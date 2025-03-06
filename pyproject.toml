@@ -18,4 +18,5 @@ dependencies = [
     "onnxruntime>=1.14.1",
     "python-dotenv>=1.0.0",
     "psutil>=7.0.0",
+    "moviepy>=1.0.3",
 ]
