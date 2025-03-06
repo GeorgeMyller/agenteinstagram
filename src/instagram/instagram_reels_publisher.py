@@ -537,10 +537,6 @@ class ReelsPublisher:
                 thumbnail_url=thumbnail_url
             )
 
-            # Limpar recursos temporários
-            if upload_result.get('deletehash'):
-                uploader.delete_video(upload_result['deletehash'])
-
             # Remover arquivo de vídeo otimizado temporário
             if is_video_optimized and os.path.exists(video_to_upload) and video_to_upload != video_path:
                 try:
@@ -553,9 +549,6 @@ class ReelsPublisher:
 
         except Exception as e:
             logger.error(f"Erro na publicação do Reels: {e}")
-            # Limpar recursos em caso de erro
-            if upload_result.get('deletehash'):
-                uploader.delete_video(upload_result['deletehash'])
             return None
 
         except Exception as e:
