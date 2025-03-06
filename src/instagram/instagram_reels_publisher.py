@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from pathlib import Path
-from .video_processor import VideoProcessor
-from .video_uploader import VideoUploader
+from .instagram_video_processor import VideoProcessor
+from .instagram_video_uploader import VideoUploader
 
 # Configurar logger
 logger = logging.getLogger('ReelsPublisher')

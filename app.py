@@ -1,14 +1,14 @@
-# app.py
-
 from src.services.message import Message
 from src.utils.image_decode_save import ImageDecodeSaver
 from src.services.instagram_send import InstagramSend
+from src.instagram.instagram_reels_publisher import ReelsPublisher  # Importe a classe ReelsPublisher
 from flask import Flask, request, jsonify
 import subprocess
 import os
 import time
 import traceback
 import threading
+
 
 # Import our queue exceptions for error handling
 from src.services.post_queue import RateLimitExceeded, ContentPolicyViolation
@@ -17,68 +17,130 @@ from src.services.post_queue import RateLimitExceeded, ContentPolicyViolation
 from monitor import start_monitoring_server
 
 from src.instagram.filter import FilterImage
+from src.services.send import sender #Para enviar mensagens de volta
 
 app = Flask(__name__)
 
 border_image = "moldura.png"
 
+# Variáveis de estado para o modo carrossel
+is_carousel_mode = False
+carousel_images = []
+carousel_start_time = 0
+CAROUSEL_TIMEOUT = 300  # 5 minutos em segundos
+MAX_CAROUSEL_IMAGES = 10
+
+
 @app.route("/messages-upsert", methods=['POST'])
 def webhook():
+    global is_carousel_mode, carousel_images, carousel_start_time  # Acesso às variáveis globais
+
     try:
-        data = request.get_json()  
-        
+        data = request.get_json()
         print(data)
-                
+
         msg = Message(data)
         texto = msg.get_text()
         
-        if msg.scope == Message.SCOPE_GROUP:    
+        #Verificar se o número é de um grupo valido.
+        if msg.scope == Message.SCOPE_GROUP:
             print(f"Grupo: {msg.group_id}")
-            
-            if str(msg.group_id) == "120363383673368986":
-                 
-                if msg.message_type == msg.TYPE_IMAGE:
-                    image_path = ImageDecodeSaver.process(msg.image_base64)
-                    
+            if str(msg.group_id) != "120363383673368986":  #Use != para a comparação, e a string correta.
+                return jsonify({"status": "processed, but ignored"}), 200 #Retorna 200 para o webhook não reenviar.
+        
+        # Lógica do Modo Carrossel
+        if texto and texto.lower() == "carrossel":
+            is_carousel_mode = True
+            carousel_images = []
+            carousel_start_time = time.time()
+            return jsonify({"status": "Modo carrossel ativado"}), 200
+
+        if is_carousel_mode:
+            if msg.message_type == msg.TYPE_IMAGE:
+                image_path = ImageDecodeSaver.process(msg.image_base64)
+                carousel_images.append(image_path)
+                if len(carousel_images) >= MAX_CAROUSEL_IMAGES:
+                    # Atingiu o limite máximo de imagens, processar o carrossel
                     try:
-                        # Queue the post instead of processing immediately
-                        job_id = InstagramSend.queue_post(image_path, texto)
-                        
-                        print(f"Post queued successfully. Job ID: {job_id}")
-                        
-                        # Return a success response with the job ID
-                        return jsonify({
-                            "status": "em processamento", 
-                            "job_id": job_id,
-                            "message": "Post adicionado à fila e será processado em breve"
-                        }), 202
-                        
-                    except ContentPolicyViolation as e:
-                        print(f"Conteúdo viola diretrizes: {str(e)}")
-                        return jsonify({"error": "Conteúdo viola diretrizes"}), 403
-                        
-                    except RateLimitExceeded as e:
-                        print(f"Limite de requisições excedido: {str(e)}")
-                        return jsonify({"error": "Limite de requisições excedido"}), 429
-                        
-                    except FileNotFoundError as e:
-                        print(f"Arquivo não encontrado: {str(e)}")
-                        return jsonify({"error": "Arquivo não encontrado"}), 404
-                        
+                        #TODO: Chamar função para processar o carrossel (ainda a ser criada em InstagramSend)
+                        # job_id = InstagramSend.queue_carousel(carousel_images, ...) 
+                        #sender.send_text(number=msg.remote_jid, msg=f"Carrossel enfileirado com sucesso! ID do trabalho: {job_id}")
+                        pass #Por agora
                     except Exception as e:
-                        print(f"Erro durante o envio para o Instagram: {str(e)}")
-                        traceback.print_exc()
-                        return jsonify({"error": "Erro no processamento do post"}), 500
-                        
+                        print(f"Erro ao enfileirar carrossel: {e}")
+                        sender.send_text(number=msg.remote_jid, msg=f"Erro ao enfileirar carrossel: {e}")
+                        return jsonify({"status": "error", "message": "Erro ao enfileirar carrossel"}), 500
                     finally:
-                        # No need to cleanup image here - the queue system will handle it
-                        pass
+                        is_carousel_mode = False  # Resetar o modo carrossel
+                        carousel_images = []
                     
+                    return jsonify({"status": "Imagem adicionada ao carrossel, processando..."}), 200
+                else:
+                    return jsonify({"status": f"Imagem adicionada ao carrossel. {len(carousel_images)}/{MAX_CAROUSEL_IMAGES}"}), 200
+
+            elif time.time() - carousel_start_time > CAROUSEL_TIMEOUT:
+                # Timeout, sair do modo carrossel
+                is_carousel_mode = False
+                carousel_images = []
+                sender.send_text(number=msg.remote_jid, msg="Timeout do carrossel. Envie 'carrossel' novamente para iniciar.")
+                return jsonify({"status": "Timeout do carrossel"}), 200
+
+            #Ignorar outras mensagens, se estiver em modo carrossel
+            return jsonify({"status": "processed (carousel mode)"}), 200
+
+        # Processamento de Imagem Única
+        if msg.message_type == msg.TYPE_IMAGE:
+            image_path = ImageDecodeSaver.process(msg.image_base64)
+            caption = msg.image_caption if msg.image_caption else ""  # Usar a legenda da imagem, se houver
+
+            try:
+                job_id = InstagramSend.queue_post(image_path, caption)
+                sender.send_text(number=msg.remote_jid, msg=f"Postagem de imagem enfileirada com sucesso! ID do trabalho: {job_id}")
+                return jsonify({"status": "enqueued", "job_id": job_id}), 202
+            except ContentPolicyViolation as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Conteúdo viola diretrizes: {str(e)}")
+                return jsonify({"error": "Conteúdo viola diretrizes"}), 403
+            except RateLimitExceeded as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Limite de requisições excedido: {str(e)}")
+                return jsonify({"error": "Limite de requisições excedido"}), 429
+            except FileNotFoundError as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Arquivo não encontrado: {str(e)}")
+                return jsonify({"error": "Arquivo não encontrado"}), 404
+            except Exception as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Erro no processamento do post: {str(e)}")
+                return jsonify({"error": "Erro no processamento do post"}), 500
+
+        # Processamento de Vídeo (Reels)
+        elif msg.message_type == msg.TYPE_VIDEO:
+            try:
+                # 1. Decodificar e salvar o vídeo
+                video_path = ImageDecodeSaver.process(msg.video_base64, directory='temp_videos') #Salvar em uma pasta separada
+                caption = msg.video_caption if msg.video_caption else "" #Usar caption, igual a imagem
+
+                # 2. Enfileirar a postagem do Reels (usando ReelsPublisher, que você já importou!)
+                job_id = InstagramSend.queue_reels(video_path, caption) # Precisa criar queue_reels em InstagramSend
+                sender.send_text(number=msg.remote_jid, msg=f"Reels enfileirado com sucesso! ID do trabalho: {job_id}")
+                return jsonify({"status": "enqueued", "job_id": job_id}), 202
+
+            except ContentPolicyViolation as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Conteúdo viola diretrizes: {str(e)}")
+                return jsonify({"error": "Conteúdo viola diretrizes"}), 403
+            except RateLimitExceeded as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Limite de requisições excedido: {str(e)}")
+                return jsonify({"error": "Limite de requisições excedido"}), 429
+            except FileNotFoundError as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Arquivo não encontrado: {str(e)}")
+                return jsonify({"error": "Arquivo não encontrado"}), 404
+            except Exception as e:
+                sender.send_text(number=msg.remote_jid, msg=f"Erro ao enfileirar Reels: {str(e)}")
+                traceback.print_exc()
+                return jsonify({"error": "Erro ao enfileirar Reels"}), 500
+            
     except Exception as e:
         print(f"Erro no processamento do webhook: {str(e)}")
         traceback.print_exc()
         return jsonify({"error": "Erro no processamento da requisição"}), 500
-        
+
     return jsonify({"status": "processed"}), 200
 
 @app.route("/status", methods=['GET'])
@@ -87,7 +149,7 @@ def status():
     try:
         # Get queue statistics
         stats = InstagramSend.get_queue_stats()
-        
+
         # Return status information
         return jsonify({
             "status": "online",
@@ -104,10 +166,10 @@ def check_job(job_id):
     try:
         # Get job status
         job = InstagramSend.check_post_status(job_id)
-        
+
         if job.get("status") == "not_found":
             return jsonify({"error": "Job não encontrado"}), 404
-            
+
         return jsonify(job)
     except Exception as e:
         print(f"Erro ao verificar job: {str(e)}")
@@ -124,7 +186,7 @@ def disable_firewall():
             return
     except subprocess.CalledProcessError as e:
         print(f"Falha ao verificar o estado do firewall: {e.stderr}")
-    
+
     # Attempt to disable the firewall if it is enabled
     command = ["sudo", "/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "off"]
     try:
@@ -147,24 +209,35 @@ def ensure_dependencies():
 def start_periodic_cleanup(temp_dir, interval_seconds=3600):
     def cleanup_task():
         while True:
-            FilterImage.clean_temp_directory(temp_dir)
+            # Modifique para usar os.path.join de forma consistente
+            image_temp_dir = os.path.join(temp_dir, "temp")  # Pasta 'temp' para imagens
+            video_temp_dir = os.path.join(temp_dir, "temp_videos")  # Pasta 'temp_videos' para vídeos
+
+            # Crie os diretórios se eles não existirem
+            os.makedirs(image_temp_dir, exist_ok=True)
+            os.makedirs(video_temp_dir, exist_ok=True)
+
+            # Limpeza para imagens
+            FilterImage.clean_temp_directory(image_temp_dir)
+            # Limpeza para vídeos (você precisará criar uma função similar em VideoProcessor, ou em um módulo separado)
+            # VideoProcessor.clean_temp_directory(video_temp_dir)
             time.sleep(interval_seconds)
 
-    cleanup_thread = threading.Thread(target=cleanup_task)
-    cleanup_thread.daemon = True
+    cleanup_thread = threading.Thread(target=cleanup_task, daemon=True)
     cleanup_thread.start()
 
 if __name__ == "__main__":
     # Ensure dependencies are installed
     ensure_dependencies()
-    
+
     # Disable firewall
     disable_firewall()
     
     # Start periodic cleanup
-    temp_dir = os.path.join(os.path.dirname(__file__), 'temp')
+    #Modificado para usar src/utils/paths.py
+    temp_dir = Paths.TEMP # Usando Paths.TEMP
     start_periodic_cleanup(temp_dir)
-    
+
     # Only start monitoring server on initial run, not on reloads
     if not os.environ.get('WERKZEUG_RUN_MAIN'):
         monitor_thread = start_monitoring_server()
@@ -172,6 +245,6 @@ if __name__ == "__main__":
             print("Sistema de monitoramento iniciado na porta 6002")
         else:
             print("Monitor já está rodando ou não foi possível iniciar")
-    
+
     # Start the main app
     app.run(host="0.0.0.0", port=5001, debug=True)
