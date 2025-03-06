@@ -1,7 +1,6 @@
 import os
 import time
 import requests
-
 from src.instagram.crew_post_instagram import InstagramPostCrew
 from src.instagram.describe_image_tool import ImageDescriber
 from src.instagram.instagram_post_service import InstagramPostService
@@ -43,6 +42,41 @@ class InstagramSend:
             
         # Add to queue and return job ID
         job_id = post_queue.add_job(image_path, caption, inputs)
+        return job_id
+    
+    @staticmethod
+    def queue_reels(video_path, caption, inputs=None) -> str:
+        """
+        Queue a video to be posted to Instagram as a reel asynchronously
+        
+        Args:
+            video_path (str): Path to the video file
+            caption (str): Caption text
+            inputs (dict): Optional configuration for post generation
+            
+        Returns:
+            str: Job ID for tracking the post status
+        """
+        # Validate inputs before queuing
+        if not caption or caption.lower() == "none":
+            caption = "A Acesso IA está transformando processos com IA! 🚀 #reels #ai"
+            print(f"Caption vazia ou 'None'. Usando caption padrão para reels: '{caption}'")
+
+        # Validate video path
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Arquivo de vídeo não encontrado: {video_path}")
+        
+        # We'll add a special flag to indicate this is a video/reel
+        if inputs is None:
+            inputs = {}
+            
+        inputs["content_type"] = "reel"
+        inputs["video_path"] = video_path
+            
+        # Add to queue and return job ID - using the same queue system for now
+        # The worker will need to check the content_type to handle differently
+        job_id = post_queue.add_job(video_path, caption, inputs)
+        print(f"Reel queued with job ID: {job_id}")
         return job_id
     
     @staticmethod
@@ -164,22 +198,22 @@ class InstagramSend:
             print("Gerando legenda...")
             try:
                 crew = InstagramPostCrew()
-                # Pass inputs as a dictionary instead of XML string
+                # Usar um dicionário diretamente
                 inputs_dict = {
-                    'genero': inputs.get('genero', 'Neutro'),
-                    'caption': caption,
-                    'describe': describe,
-                    'estilo': inputs.get('estilo', 'Divertido, Alegre, Sarcástico e descontraído'),
-                    'pessoa': inputs.get('pessoa', 'Terceira pessoa do singular'),
-                    'sentimento': inputs.get('sentimento', 'Positivo'),
-                    'tamanho': inputs.get('tamanho', '200 palavras'),
-                    'emojs': inputs.get('emojs', 'sim'),
-                    'girias': inputs.get('girias', 'sim')
+                    "genero": inputs.get('genero', 'Neutro'),
+                    "caption": caption,
+                    "describe": describe,
+                    "estilo": inputs.get('estilo', 'Divertido, Alegre, Sarcástico e descontraído'),
+                    "pessoa": inputs.get('pessoa', 'Terceira pessoa do singular'),
+                    "sentimento": inputs.get('sentimento', 'Positivo'),
+                    "tamanho": inputs.get('tamanho', '200 palavras'),
+                    "emojs": inputs.get('emojs', 'sim'),
+                    "girias": inputs.get('girias', 'sim')
                 }
-                final_caption = crew.kickoff(inputs=inputs_dict)
+                final_caption = crew.kickoff(inputs=inputs_dict)  # Passar o dicionário
             except Exception as e:
                 print(f"Erro ao gerar legenda: {str(e)}")
-                final_caption = caption
+                final_caption = caption  # Usar a legenda original em caso de erro
             
             # Adicionar texto padrão ao final da legenda
             final_caption = final_caption + "\n\n-------------------"

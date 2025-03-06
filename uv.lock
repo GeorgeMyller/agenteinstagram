@@ -40,7 +40,7 @@ requires-dist = [
     { name = "pilgram", specifier = ">=1.2.1" },
     { name = "pillow", specifier = ">=11.1.0" },
     { name = "psutil", specifier = ">=7.0.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "python-dotenv" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "streamlit", specifier = ">=1.32.0" },
 ]

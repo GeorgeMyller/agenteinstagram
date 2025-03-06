@@ -310,16 +310,54 @@ class InstagramPostService:
                         print(f"Rate limit data from {header_name}:")
                         try:
                             usage_data = json.loads(response.headers[header_name])
-                            # usage_data is either a dict (x-app-usage) or a dict with lists (x-business-use-case-usage)
-                            if isinstance(usage_data, dict):
+                            # Process headers based on their structure
+                            if header_name == 'x-app-usage':
+                                # x-app-usage is a dict with estimated_time_to_regain_access
+                                print(f"  App Usage: {usage_data}")
+                                if 'estimated_time_to_regain_access' in usage_data:
+                                    wait_seconds = int(usage_data['estimated_time_to_regain_access'])
+                                    wait_time = max(wait_time, wait_seconds)
+                                    print(f"  Estimated time to regain access: {wait_seconds}s")
+                                
+                                # Check usage percentages
+                                for metric, value in usage_data.items():
+                                    if isinstance(value, (int, float)) and metric not in ['estimated_time_to_regain_access']:
+                                        print(f"  {metric}: {value}%")
+                                        if value > self.usage_threshold:
+                                            backoff_time = 60
+                                            if value > 90:  # Critical level
+                                                backoff_time = 900  # 15 minutes
+                                            elif value > 80:  # High level
+                                                backoff_time = 300  # 5 minutes
+                                            
+                                            wait_time = max(wait_time, backoff_time)
+                                            print(f"  High usage detected ({value}%). Setting wait time to {wait_time}s.")
+                            
+                            elif header_name == 'x-business-use-case-usage':
+                                # This is typically a dict with lists
+                                print(f"  Business Usage: {usage_data}")
                                 for key, usage_list in usage_data.items():
-                                    if isinstance(usage_list, list): #x-business-use-case-usage
+                                    if isinstance(usage_list, list):
                                         for usage in usage_list:
                                             print(f"  {key}: {usage}")
-                                            if 'estimated_time_to_regain_access' in usage:
-                                                wait_time = max(wait_time, usage['estimated_time_to_regain_access'])
-                                    elif isinstance(usage_data, dict) and 'estimated_time_to_regain_access' in usage_data: #x-app-usage
-                                        wait_time = max(wait_time, usage_data['estimated_time_to_regain_access'])
+                                            if isinstance(usage, dict) and 'estimated_time_to_regain_access' in usage:
+                                                wait_seconds = int(usage['estimated_time_to_regain_access'])
+                                                wait_time = max(wait_time, wait_seconds)
+                                                print(f"  Business estimated time to regain access: {wait_seconds}s")
+                                            
+                                            # Also check usage percentages in the business header
+                                            for metric, value in usage.items():
+                                                if isinstance(value, (int, float)) and metric not in ['estimated_time_to_regain_access']:
+                                                    print(f"  {metric}: {value}%")
+                                                    if value > self.usage_threshold:
+                                                        backoff_time = 60
+                                                        if value > 90:  # Critical level
+                                                            backoff_time = 900  # 15 minutes
+                                                        elif value > 80:  # High level
+                                                            backoff_time = 300  # 5 minutes
+                                                        
+                                                        wait_time = max(wait_time, backoff_time)
+                                                        print(f"  High usage detected ({value}%). Setting wait time to {wait_time}s.")
 
                         except json.JSONDecodeError:
                             print(f"  Erro ao decodificar JSON do header {header_name}: {response.headers[header_name]}")
@@ -327,9 +365,9 @@ class InstagramPostService:
 
                 if wait_time > 0:
                     print(f"Aguardando {wait_time} segundos devido ao rate limiting (header)")
+                    self.rate_limit_reset_time = time.time() + wait_time
                     time.sleep(wait_time)
                 # --- End Rate Limiting Header Handling ---
-
 
                 if 'error' in response_data:
                     should_retry, error_msg = self._handle_error_response(response_data)
