@@ -11,7 +11,11 @@ import os
 import time
 import json
 import logging
+import random
 import requests
+import traceback
+import sys
+from datetime import datetime
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 from urllib3.util.retry import Retry
@@ -19,7 +23,8 @@ from requests.adapters import HTTPAdapter
 from pathlib import Path
 from src.instagram.instagram_video_processor import VideoProcessor
 from src.instagram.instagram_video_uploader import VideoUploader
-from PIL import Image
+from src.instagram.instagram_video_processor import InstagramVideoProcessor
+from imgurpython import ImgurClient
 
 # Configurar logger
 logger = logging.getLogger('ReelsPublisher')
@@ -85,6 +90,8 @@ class ReelsPublisher:
         
         # Validar token antes de prosseguir
         self._validate_token()
+
+        self.imgur_client = ImgurClient(os.getenv('IMGUR_CLIENT_ID'), os.getenv('IMGUR_CLIENT_SECRET'))
     
     def _setup_session(self):
         """Configura a sessão HTTP com retry e outros parâmetros."""
@@ -281,7 +288,8 @@ class ReelsPublisher:
     
     def publish_reels(self, container_id):
         """
-        Publica o Reels usando o container criado anteriormente.
+        Publica o Reels usando o container criado anteriormente, com melhor
+        tratamento de erros e estratégias de recuperação.
         
         Args:
             container_id (str): ID do container de mídia
@@ -294,15 +302,53 @@ class ReelsPublisher:
             'creation_id': container_id
         }
         
-        result = self._make_api_request('POST', endpoint, data=params)
+        max_retries = 5
+        retry_delay = 10
         
-        if result and 'id' in result:
-            post_id = result['id']
-            logger.info(f"Reels publicado com sucesso: {post_id}")
-            return post_id
-        else:
-            logger.error("Falha ao publicar Reels")
-            return None
+        for attempt in range(max_retries):
+            try:
+                result = self._make_api_request('POST', endpoint, data=params)
+                
+                if result and 'id' in result:
+                    post_id = result['id']
+                    logger.info(f"Reels publicado com sucesso: {post_id}")
+                    return post_id
+                
+                # Analisar o erro para decidir se devemos tentar novamente
+                if hasattr(self, '_last_error') and self._last_error:
+                    error_data = self._last_error.get('error', {})
+                    error_code = error_data.get('code')
+                    error_message = error_data.get('message', 'Erro desconhecido')
+                    
+                    # Alguns erros não adianta tentar novamente
+                    if error_code in [190, 10, 200, 2207026]:
+                        logger.error(f"Erro fatal na publicação: {error_message} (Código: {error_code})")
+                        return None
+                    
+                    # Para o erro genérico 1, aumentar o tempo de espera exponencialmente
+                    if error_code == 1:
+                        backoff_time = retry_delay * (2 ** attempt) + random.uniform(5, 15)
+                        logger.warning(f"Erro genérico (código 1). Aguardando {backoff_time:.1f}s...")
+                        time.sleep(backoff_time)
+                        continue
+                
+                # Backoff exponencial com jitter
+                backoff_time = retry_delay * (2 ** attempt) + random.uniform(0, 5)
+                logger.info(f"Tentativa {attempt + 1}/{max_retries}. Aguardando {backoff_time:.1f}s...")
+                time.sleep(backoff_time)
+                
+            except Exception as e:
+                logger.error(f"Erro na publicação (tentativa {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (2 ** attempt))
+        
+        # Verificar se o Reels foi publicado apesar do erro
+        if self._verify_recent_posting(minutes=2):
+            logger.info("Detectamos um post recente! O vídeo pode ter sido publicado apesar do erro.")
+            return "unknown_id_but_likely_posted"
+        
+        logger.error("Todas as tentativas de publicação falharam")
+        return None
     
     def get_reels_permalink(self, post_id):
         """
@@ -334,6 +380,7 @@ class ReelsPublisher:
                   max_retries=30, retry_interval=10):
         """
         Fluxo completo para postar um Reels: criar container, verificar status e publicar.
+        Inclui tratamento robusto de erros e estratégias de recuperação.
         
         Args:
             video_url (str): URL pública do vídeo
@@ -354,32 +401,43 @@ class ReelsPublisher:
         )
         
         if not container_id:
+            # Verificar se há algum erro específico para fornecer mensagem mais detalhada
+            if hasattr(self, '_last_error') and self._last_error:
+                error_data = self._last_error.get('error', {})
+                error_code = error_data.get('code')
+                error_message = error_data.get('message', 'Erro desconhecido')
+                
+                logger.error(f"Falha ao criar container. Código: {error_code}, Mensagem: {error_message}")
+                
+                # Mensagens específicas para erros comuns
+                if error_code == 2207026:
+                    logger.error("O vídeo não atende aos requisitos de formato do Instagram.")
+                    logger.error("Tente processar o vídeo antes do upload usando InstagramVideoProcessor.")
+                elif error_code in [4, 17, 32, 613]:
+                    logger.error("Limite de taxa excedido. Aguarde alguns minutos antes de tentar novamente.")
+            
             return None
         
-        # 2. Aguardar processamento
+        # 2. Aguardar processamento com monitoramento aprimorado de status
         logger.info(f"Aguardando processamento do Reels... (máx. {max_retries} tentativas)")
-        status = None
+        status = self.wait_for_container_status(container_id, max_attempts=max_retries, delay=retry_interval)
         
-        for attempt in range(max_retries):
-            status = self.check_container_status(container_id)
-            
-            if status == 'FINISHED':
-                logger.info("Reels processado com sucesso!")
-                break
-            elif status in ['ERROR', 'EXPIRED']:
-                logger.error(f"Erro no processamento do Reels: {status}")
-                return None
-            
-            logger.info(f"Status atual: {status}. Aguardando {retry_interval}s... " 
-                      f"(tentativa {attempt + 1}/{max_retries})")
-            time.sleep(retry_interval)
-        
-        # Verificar se saiu do loop por timeout
         if status != 'FINISHED':
-            logger.error("Tempo máximo de processamento excedido")
+            logger.error(f"Processamento do vídeo falhou com status: {status}")
+            
+            # Verificar se o vídeo foi publicado apesar do erro
+            if self._verify_recent_posting(minutes=2):
+                logger.info("Um post recente foi detectado! O vídeo pode ter sido publicado apesar do erro.")
+                return {
+                    'id': 'unknown_id_but_likely_posted',
+                    'container_id': container_id,
+                    'media_type': 'REELS',
+                    'status': 'UNCERTAIN_BUT_LIKELY_POSTED'
+                }
+            
             return None
         
-        # 3. Publicar o Reels
+        # 3. Publicar o Reels com estratégias de recuperação
         post_id = self.publish_reels(container_id)
         
         if not post_id:
@@ -389,12 +447,18 @@ class ReelsPublisher:
         permalink = self.get_reels_permalink(post_id)
         
         # 5. Retornar informações da publicação
-        return {
+        result = {
             'id': post_id,
             'permalink': permalink,
             'container_id': container_id,
             'media_type': 'REELS'
         }
+        
+        logger.info("Reels publicado com sucesso!")
+        logger.info(f"ID: {post_id}")
+        logger.info(f"Link: {permalink or 'Não disponível'}")
+        
+        return result
     
     def upload_local_video_to_reels(self, video_path, caption, hashtags=None, 
                                     optimize=True, thumbnail_path=None, 
@@ -423,7 +487,7 @@ class ReelsPublisher:
         final_caption = self._format_caption_with_hashtags(caption, hashtags)
         
         # Processar o vídeo se necessário
-        processor = VideoProcessor()
+        processor = InstagramVideoProcessor()
         uploader = VideoUploader()
         video_to_upload = video_path
         thumbnail_url = None
@@ -437,9 +501,9 @@ class ReelsPublisher:
                 logger.info(f"Vídeo não atende aos requisitos: {message}")
                 logger.info("Otimizando vídeo para Reels...")
                 
-                optimized_video = processor.optimize_for_instagram(
+                optimized_video = processor.process_video(
                     video_path, 
-                    post_type='reels'
+                    post_type='reel'  # Corrigido de 'reels' para 'reel'
                 )
                 
                 if optimized_video:
@@ -458,48 +522,42 @@ class ReelsPublisher:
                     thumbnail_url = thumb_result.get('url')
                     logger.info(f"Thumbnail enviada: {thumbnail_url}")
             
-            # Fazer upload do vídeo para hospedagem temporária
-            logger.info(f"Enviando vídeo para hospedagem temporária...")
-            upload_result = uploader.upload_from_path(video_to_upload)
-            
-            if not upload_result or not upload_result.get('url'):
-                logger.error("Falha no upload do vídeo para hospedagem temporária")
-                return None
-            
-            video_url = upload_result.get('url')
+            # Upload video to Imgur
+            logger.info(f"Enviando vídeo para Imgur...")
+            imgur_response = self.imgur_client.upload_from_path(video_to_upload, config=None, anon=True)
+            video_url = imgur_response['link']
             logger.info(f"Vídeo disponível em: {video_url}")
-            
+
             # Publicar o Reels usando a URL do vídeo
-            try:
-                result = self.post_reels(
-                    video_url=video_url,
-                    caption=final_caption,
-                    share_to_feed=share_to_feed,
-                    audio_name=audio_name,
-                    thumbnail_url=thumbnail_url
-                )
-                
-                # Limpar recursos temporários
-                if upload_result.get('deletehash'):
-                    uploader.delete_video(upload_result['deletehash'])
-                
-                # Remover arquivo de vídeo otimizado temporário
-                if is_video_optimized and os.path.exists(video_to_upload) and video_to_upload != video_path:
-                    try:
-                        os.remove(video_to_upload)
-                        logger.info(f"Arquivo temporário removido: {video_to_upload}")
-                    except Exception as e:
-                        logger.warning(f"Não foi possível remover arquivo temporário: {e}")
-                
-                return result
-                
-            except Exception as e:
-                logger.error(f"Erro na publicação do Reels: {e}")
-                # Limpar recursos em caso de erro
-                if upload_result.get('deletehash'):
-                    uploader.delete_video(upload_result['deletehash'])
-                return None
-                
+            result = self.post_reels(
+                video_url=video_url,
+                caption=final_caption,
+                share_to_feed=share_to_feed,
+                audio_name=audio_name,
+                thumbnail_url=thumbnail_url
+            )
+
+            # Limpar recursos temporários
+            if upload_result.get('deletehash'):
+                uploader.delete_video(upload_result['deletehash'])
+
+            # Remover arquivo de vídeo otimizado temporário
+            if is_video_optimized and os.path.exists(video_to_upload) and video_to_upload != video_path:
+                try:
+                    os.remove(video_to_upload)
+                    logger.info(f"Arquivo temporário removido: {video_to_upload}")
+                except Exception as e:
+                    logger.warning(f"Não foi possível remover arquivo temporário: {e}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Erro na publicação do Reels: {e}")
+            # Limpar recursos em caso de erro
+            if upload_result.get('deletehash'):
+                uploader.delete_video(upload_result['deletehash'])
+            return None
+
         except Exception as e:
             logger.error(f"Erro no processamento do vídeo: {e}")
             import traceback
@@ -569,3 +627,207 @@ class ReelsPublisher:
         
         logger.error(f"Erro ao remover Reels {media_id}")
         return False
+    
+    # Adicionar um método para lidar com erros específicos da API
+    def _handle_api_error(self, error_data, context=""):
+        """
+        Trata erros específicos da API do Instagram/Facebook com mensagens e estratégias
+        de recuperação adequadas.
+        
+        Args:
+            error_data (dict): Dados do erro da resposta da API
+            context (str): Contexto adicional sobre onde o erro ocorreu
+            
+        Returns:
+            tuple: (deve_tentar_novamente, tempo_espera, mensagem_erro)
+        """
+        try:
+            error = error_data.get('error', {})
+            code = error.get('code')
+            message = error.get('message', '')
+            error_type = error.get('type', '')
+            fb_trace_id = error.get('fbtrace_id', 'N/A')
+            
+            error_message = f"\nErro na API do Instagram ({context}):"
+            error_message += f"\nCódigo: {code}"
+            error_message += f"\nTipo: {error_type}"
+            error_message += f"\nMensagem: {message}"
+            error_message += f"\nTrace ID: {fb_trace_id}"
+            
+            # Erros de autenticação (190, 104, etc)
+            if code in [190, 104]:
+                error_message += "\n\nErro de autenticação. Ações recomendadas:"
+                error_message += "\n1. Verifique se o token não expirou"
+                error_message += "\n2. Gere um novo token de acesso"
+                error_message += "\n3. Confirme se o token tem as permissões necessárias"
+                return False, 0, error_message
+            
+            # Erros de permissão (200, 10, 803)
+            elif code in [200, 10, 803]:
+                error_message += "\n\nErro de permissão. Ações recomendadas:"
+                error_message += "\n1. Verifique se a conta é Business/Creator"
+                error_message += "\n2. Confirme as permissões do app no Facebook Developer"
+                return False, 0, error_message
+            
+            # Erros de limite de taxa (4, 17, 32, 613)
+            elif code in [4, 17, 32, 613]:
+                wait_time = 300  # 5 minutos padrão
+                if 'minutes' in message.lower():
+                    try:
+                        # Tentar extrair tempo de espera da mensagem
+                        import re
+                        time_match = re.search(r'(\d+)\s*minutes?', message.lower())
+                        if time_match:
+                            wait_time = int(time_match.group(1)) * 60
+                    except:
+                        pass
+                error_message += f"\n\nLimite de taxa atingido. Aguardando {wait_time/60:.0f} minutos."
+                return True, wait_time, error_message
+            
+            # Erros de formato de mídia (2207026)
+            elif code == 2207026:
+                error_message += "\n\nErro no formato da mídia. Requisitos para Reels:"
+                error_message += "\n- Formato: MP4/MOV"
+                error_message += "\n- Codec Vídeo: H.264"
+                error_message += "\n- Codec Áudio: AAC"
+                error_message += "\n- Resolução: Mínimo 500x500, recomendado 1080x1920"
+                error_message += "\n- Duração: 3-90 segundos"
+                error_message += "\n- Tamanho: Máximo 100MB"
+                return False, 0, error_message
+            
+            # Erros de servidor (1, 2, 500, etc)
+            elif code in [1, 2] or error_type == 'OAuthException':
+                error_message += "\n\nErro temporário do servidor. Tentando novamente..."
+                return True, 30, error_message
+            
+            # Caso desconhecido
+            else:
+                error_message += "\n\nErro desconhecido. Tentando novamente..."
+                return True, 30, error_message
+                
+        except Exception as e:
+            return True, 30, f"Erro ao processar resposta de erro: {str(e)}"
+    
+    def _verify_recent_posting(self, minutes=5):
+        """
+        Verifica se houve alguma postagem recente na conta.
+        Útil para confirmar se um vídeo foi publicado mesmo quando a API retorna erro.
+        
+        Args:
+            minutes (int): Intervalo de tempo em minutos para considerar uma postagem recente
+            
+        Returns:
+            bool: True se encontrou uma postagem recente, False caso contrário
+        """
+        try:
+            url = f"https://graph.facebook.com/{self.API_VERSION}/{self.ig_user_id}/media"
+            params = {
+                'fields': 'id,media_type,timestamp',
+                'limit': 5,
+                'access_token': self.access_token
+            }
+            
+            response = self.session.get(url, params=params)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' not in data or not data['data']:
+                    return False
+                
+                now = datetime.now()
+                
+                for post in data['data']:
+                    if 'timestamp' in post and post.get('media_type') in ['VIDEO', 'REELS']:
+                        try:
+                            # Formato do timestamp: 2023-01-01T12:00:00+0000
+                            post_time = datetime.strptime(
+                                post['timestamp'].replace('+0000', ''), 
+                                '%Y-%m-%dT%H:%M:%S'
+                            )
+                            
+                            # Calcular diferença em minutos
+                            time_diff = (now - post_time).total_seconds() / 60
+                            
+                            if time_diff <= minutes:
+                                logger.info(f"Encontrou post recente: {post['id']} ({post['media_type']})")
+                                logger.info(f"Publicado há aproximadamente {time_diff:.1f} minutos")
+                                return True
+                        except Exception as e:
+                            logger.debug(f"Erro ao processar data do post: {e}")
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Erro ao verificar postagens recentes: {str(e)}")
+            return False
+    
+    def wait_for_container_status(self, container_id, max_attempts=30, delay=10):
+        """
+        Aguarda o processamento do container com tratamento aprimorado de erros
+        e detecção de problemas.
+        
+        Args:
+            container_id (str): ID do container a verificar
+            max_attempts (int): Número máximo de tentativas
+            delay (int): Tempo de espera entre tentativas em segundos
+            
+        Returns:
+            str: Status final do container ('FINISHED', 'ERROR', etc)
+        """
+        last_error_code = None
+        endpoint = f"{container_id}"
+        
+        for attempt in range(max_attempts):
+            try:
+                params = {
+                    'fields': 'status_code,status'
+                }
+                
+                result = self._make_api_request('GET', endpoint, params=params)
+                
+                if not result:
+                    if attempt == max_attempts - 1:
+                        logger.error("Erro persistente ao verificar status do container")
+                        return 'ERROR'
+                    time.sleep(delay)
+                    continue
+                
+                status = result.get('status_code', '')
+                logger.info(f"Status do container: {status} (tentativa {attempt + 1}/{max_attempts})")
+                
+                if status == 'FINISHED':
+                    logger.info("Processamento do vídeo concluído com sucesso!")
+                    return status
+                elif status in ['ERROR', 'EXPIRED']:
+                    # Tratamento especial para erros de processamento
+                    error_message = result.get('status', 'Sem detalhes')
+                    logger.error(f"Erro no processamento do vídeo: {error_message}")
+                    
+                    # Verificar se há indicação do erro 2207026 (formato de mídia)
+                    if '2207026' in str(error_message):
+                        last_error_code = 2207026
+                        logger.error("ERRO DE FORMATO DE MÍDIA (2207026) DETECTADO")
+                        logger.error("Verifique se o vídeo atende aos requisitos do Instagram:")
+                        logger.error("- Codec H.264 para vídeo e AAC para áudio")
+                        logger.error("- Formato MP4 ou MOV")
+                        logger.error("- Resolução adequada (mínimo 500x500)")
+                        logger.error("- Duração entre 3 e 90 segundos")
+                        
+                    return status
+                    
+                # Mensagens informativas baseadas no status
+                if status == 'IN_PROGRESS':
+                    logger.info("Vídeo sendo processado pelo Instagram...")
+                elif status == 'PUBLISHED':
+                    logger.info("Vídeo foi publicado!")
+                    return status
+                
+                # Aguardar antes da próxima verificação
+                time.sleep(delay)
+                
+            except Exception as e:
+                logger.error(f"Erro durante verificação de status (tentativa {attempt + 1}): {e}")
+                time.sleep(delay)
+        
+        logger.error("Tempo limite de processamento excedido")
+        return 'TIMEOUT'

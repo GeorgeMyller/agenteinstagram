@@ -10,8 +10,23 @@ class VideoUploader:
         # self.client = YourUploadClient(...)  # Inicialize seu cliente aqui
 
     def upload_from_path(self, video_path):
-        # Lógica para upload a partir do caminho do arquivo
-        pass
+        # Mock implementation for video upload
+        try:
+            if not os.path.exists(video_path):
+                return None
+            
+            # Simulate upload process
+            time.sleep(2)  # Simulate network delay
+            
+            # Mock response
+            response = {
+                'url': f'https://mockstorage.com/{os.path.basename(video_path)}',
+                'deletehash': 'mockdeletehash123'
+            }
+            return response
+        except Exception as e:
+            print(f"Erro ao fazer upload do vídeo: {e}")
+            return None
 
     def upload_from_url(self, video_url):
         # Lógica para upload a partir de URL (download e upload)
