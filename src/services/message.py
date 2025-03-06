@@ -7,6 +7,7 @@ class Message:
     TYPE_AUDIO = "audioMessage"
     TYPE_IMAGE = "imageMessage"
     TYPE_DOCUMENT = "documentMessage"
+    TYPE_VIDEO = "videoMessage"
     
     SCOPE_GROUP = "group"
     SCOPE_PRIVATE = "private"
@@ -87,7 +88,8 @@ class Message:
             self.extract_image_message()
         elif self.message_type == self.TYPE_DOCUMENT:
             self.extract_document_message()
-
+        elif self.message_type == self.TYPE_VIDEO:
+            self.extract_video_message()
 
 
     def extract_text_message(self):
@@ -146,6 +148,27 @@ class Message:
         self.document_caption = document_data.get("caption", None)
         self.document_base64_bytes = self.decode_base64(self.data["data"]["message"].get("base64"))
 
+    def extract_video_message(self):
+        """Extrai dados de uma mensagem de vídeo e define como atributos da classe."""
+        video_data = self.data["data"]["message"]["videoMessage"]
+        self.video_url = video_data.get("url")
+        self.video_mimetype = video_data.get("mimetype")
+        self.video_caption = video_data.get("caption")
+        self.video_file_sha256 = video_data.get("fileSha256")
+        self.video_file_length = video_data.get("fileLength")
+        self.video_height = video_data.get("height")
+        self.video_width = video_data.get("width")
+        self.video_media_key = video_data.get("mediaKey")
+        self.video_file_enc_sha256 = video_data.get("fileEncSha256")
+        self.video_direct_path = video_data.get("directPath")
+        self.video_media_key_timestamp = video_data.get("mediaKeyTimestamp")
+        self.video_seconds = video_data.get("seconds")
+        self.video_streaming_sidecar = video_data.get("streamingSidecar")
+        self.video_thumbnail_base64 = video_data.get("jpegThumbnail")
+        self.video_gif_playback = video_data.get("gifPlayback", False)
+        self.video_view_once = video_data.get("viewOnce", False)
+        self.video_base64 = self.data["data"]["message"].get("base64")
+
     def decode_base64(self, base64_string):
         """Converte uma string base64 em bytes."""
         if base64_string:
@@ -165,6 +188,8 @@ class Message:
             text = self.image_caption
         elif self.message_type == self.TYPE_DOCUMENT:
             text = self.document_caption
+        elif self.message_type == self.TYPE_VIDEO:
+            text = self.video_caption
             
         return text
 

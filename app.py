@@ -9,6 +9,7 @@ import time
 import traceback
 import threading
 
+from src.utils.paths import Paths  # Add this import
 
 # Import our queue exceptions for error handling
 from src.services.post_queue import RateLimitExceeded, ContentPolicyViolation
