@@ -20,6 +20,8 @@ class InstagramPostService:
         self.base_delay = 5  # Base delay in seconds
         self.status_check_attempts = 5  # Number of status check attempts
         self.status_check_delay = 10  # Delay between status checks in seconds
+        self.permalink_check_attempts = 3  # Specific attempts for permalink
+        self.permalink_check_delay = 20  # Longer delay for permalink checks
         self.request_counter = 0
         self.rate_limit_threshold = 5
         self.rate_limit_delay = 60  # Wait 60 seconds after hitting threshold
@@ -33,69 +35,143 @@ class InstagramPostService:
 
         error = response_data['error']
         error_code = error.get('code')
+        error_msg = error.get('message', 'Unknown error')
         
+        # Handle specific permalink error
+        if error_code == 100 and "nonexisting field (permalink)" in error_msg:
+            print("Permalink ainda não está disponível (ShadowIGMediaBuilder). Isso é normal após criação recente.")
+            return True, "Permalink not available yet"
+            
         # These error codes often occur even when the post succeeds
         temporary_error_codes = [1, 2, 4, 24, 32, 33]  # Added more error codes
         instagram_business_error = 10  # Specific error for business accounts
         
         if error_code in temporary_error_codes:  
-            return True, f"Temporary API error: {error.get('message')}"
+            return True, f"Temporary API error: {error_msg}"
         elif error_code == 190:  # Invalid access token
             return False, "Invalid access token"
         elif error_code == instagram_business_error:
             return False, "Configuração de conta business necessária"
         
         # For any other error, we'll retry but note it as potentially non-fatal
-        return True, error.get('message', 'Unknown error occurred')
+        return True, f"{error_msg}"
 
-    def _verify_media_status(self, media_id, max_attempts=None, delay=None):
+    def _verify_media_status(self, media_id, max_attempts=None, delay=None, check_permalink=True):
         """
-        Verify if a media post exists and is published with multiple attempts
+        Verify if a media post exists and is published. Can separate status check from permalink check.
+        
+        Args:
+            media_id: ID of the media to check
+            max_attempts: Maximum number of check attempts
+            delay: Delay between attempts in seconds
+            check_permalink: Whether to include permalink in the checks
+        
+        Returns:
+            tuple: (success_boolean, permalink_or_None)
         """
         max_attempts = max_attempts or self.status_check_attempts
         delay = delay or self.status_check_delay
 
+        # Phase 1: Verify basic status without permalink
+        print("Fase 1: Verificando status básico da publicação...")
+        media_status = None
+        
         for attempt in range(max_attempts):
             if attempt > 0:
                 print(f"Verificando status (tentativa {attempt + 1}/{max_attempts})...")
                 time.sleep(delay)
             
-            # Endpoint correto para verificar o contêiner específico
-            url = f'{self.base_url}/media/{media_id}'
+            # Endpoint para verificar o contêiner específico
+            url = f'https://graph.facebook.com/v22.0/{media_id}'
+            
+            # Na fase inicial, não solicitar o permalink para evitar erro #100
+            fields = 'id,status_code,status'
+            
             params = {
                 'access_token': self.access_token,
-                'fields': 'status_code,status,permalink'
+                'fields': fields
             }
             
             try:
                 response = requests.get(url, params=params)
                 data = response.json()
                 
-                print(f"Resposta da API: {data}")  # Log detalhado
+                print(f"Resposta da API (status check): {data}")
                 
-                if data.get('status_code') == 'FINISHED':
-                    print(f"Post publicado! Status: {data.get('status', 'PUBLISHED')}")
-                    return True, data.get('permalink')
-                elif data.get('status_code') in ('IN_PROGRESS', 'PENDING'):
-                    print(f"Processamento em andamento... (Status: {data.get('status')})")
-                elif 'id' in data:
-                    print(f"Post encontrado mas status não disponível.")
-                    status = data.get('status', 'UNKNOWN')
-                    print(f"Status atual: {status}")
-                    if status == 'PUBLISHED':
-                        return True, data.get('permalink')
-                    
+                # Verificar se há erros
                 if 'error' in data:
                     error_msg = data['error'].get('message', 'Erro desconhecido')
                     print(f"Erro ao verificar status: {error_msg}")
+                    continue
                     
-                if attempt == max_attempts - 1:
-                    print("Post não encontrado após todas as tentativas de verificação.")
-                    
+                # Verificação de ID bem-sucedida
+                if 'id' in data and data.get('id') == media_id:
+                    # Verificar status
+                    media_status = data.get('status_code') or data.get('status')
+                    if media_status in ('FINISHED', 'PUBLISHED'):
+                        print(f"Post encontrado com status: {media_status}")
+                        break  # Status verificado com sucesso
+                    elif media_status in ('IN_PROGRESS', 'PENDING'):
+                        print(f"Processamento em andamento... (Status: {media_status})")
+                    else:
+                        print(f"Status inesperado: {media_status}")
+                        
             except Exception as e:
                 print(f"Erro ao verificar status: {str(e)}")
+                
+        # Se não conseguimos confirmar o status após todas as tentativas
+        if media_status not in ('FINISHED', 'PUBLISHED'):
+            print("Não foi possível confirmar status de publicação após múltiplas tentativas.")
+            return False, None
+            
+        # Phase 2: Get permalink (only if requested and phase 1 was successful)
+        permalink = None
+        if check_permalink:
+            print("Fase 2: Obtendo permalink da publicação...")
+            for attempt in range(self.permalink_check_attempts):
+                # Aguardar mais tempo para permalink
+                time.sleep(self.permalink_check_delay)
+                print(f"Verificando permalink (tentativa {attempt + 1}/{self.permalink_check_attempts})...")
+                
+                url = f'https://graph.facebook.com/v22.0/{media_id}'
+                params = {
+                    'access_token': self.access_token,
+                    'fields': 'permalink'
+                }
+                
+                try:
+                    response = requests.get(url, params=params)
+                    data = response.json()
+                    
+                    print(f"Resposta da API (permalink check): {data}")
+                    
+                    # Verificar se há erros específicos do permalink
+                    if 'error' in data:
+                        error_code = data['error'].get('code')
+                        error_msg = data['error'].get('message', '')
+                        
+                        # Erro #100 sobre permalink pode ser normal nas primeiras tentativas
+                        if error_code == 100 and "nonexisting field (permalink)" in error_msg:
+                            print("Permalink ainda não disponível. Tentando novamente...")
+                            continue
+                            
+                        print(f"Erro ao obter permalink: {error_msg}")
+                        continue
+                        
+                    # Se temos permalink, sucesso!
+                    if 'permalink' in data and data['permalink']:
+                        permalink = data['permalink']
+                        print(f"Permalink obtido com sucesso: {permalink}")
+                        break
+                        
+                except Exception as e:
+                    print(f"Erro ao obter permalink: {str(e)}")
+            
+            if not permalink:
+                print("Aviso: Post publicado com sucesso, mas não foi possível obter o permalink.")
         
-        return False, None
+        # Retorna sucesso mesmo se permalink não foi obtido
+        return True, permalink
 
     def _rate_limit_check(self):
         """
@@ -186,34 +262,58 @@ class InstagramPostService:
         print("Enviando requisição de publicação...")
         response_data = self._make_request_with_retry(requests.post, url, payload)
         
-        # Aumentar tempo de espera inicial para 30 segundos
-        print("Aguardando processamento inicial (30 segundos)...")
-        time.sleep(30)  
-        
-        # Even if we get an error, check if the post actually went through
+        # Verificar se temos uma resposta positiva com ID
+        post_id = None
         if response_data and 'id' in response_data:
-            success, permalink = self._verify_media_status(response_data['id'])
-            if success:
-                print(f"Post publicado com sucesso! ID do Post: {response_data['id']}")
-                if permalink:
-                    print(f"Link do post: {permalink}")
-                return response_data['id']
+            post_id = response_data['id']
+            print(f"Publicação iniciada com ID: {post_id}")
+        else:
+            print("Não recebemos ID na resposta da publicação. Usando container ID para verificação.")
+            post_id = media_container_id
+            
+        # Aumentar tempo de espera inicial para 40 segundos
+        print("Aguardando processamento inicial (40 segundos)...")
+        time.sleep(40)
         
-        # If we didn't get a success response, do an extended verification
-        print("Realizando verificação estendida do status da publicação...")
-        success, permalink = self._verify_media_status(
-            media_container_id,
-            max_attempts=8,  # Aumentado para 8 tentativas
-            delay=20  # Intervalo maior entre verificações
+        # Fase 1: Verificar apenas status básico (sem permalink)
+        print("Verificando status básico da publicação...")
+        success, _ = self._verify_media_status(
+            post_id,
+            max_attempts=8,
+            delay=15,
+            check_permalink=False  # Não verificar permalink ainda
         )
         
-        if success:
-            print("Post publicado com sucesso apesar dos erros iniciais!")
-            if permalink:
-                print(f"Link do post: {permalink}")
-            return media_container_id
+        if not success:
+            # Tente com o container ID se o post_id falhar
+            if post_id != media_container_id:
+                print("Tentando verificar com o container ID original...")
+                success, _ = self._verify_media_status(
+                    media_container_id,
+                    max_attempts=5,
+                    delay=15,
+                    check_permalink=False
+                )
             
-        return None
+            if not success:
+                print("Não foi possível confirmar publicação após verificação do status.")
+                return None
+        
+        # Fase 2: Apenas se o status for bem-sucedido, tente obter permalink
+        print("Publicação confirmada! Tentando obter permalink...")
+        success, permalink = self._verify_media_status(
+            post_id,
+            max_attempts=2,  # Menos tentativas para verificação básica
+            delay=20,
+            check_permalink=True  # Agora sim, verificar permalink
+        )
+        
+        if permalink:
+            print(f"Link da publicação: {permalink}")
+        else:
+            print("Publicação bem-sucedida, mas permalink não disponível.")
+        
+        return post_id
 
     def post_image(self, image_url, caption):
         """
@@ -227,30 +327,32 @@ class InstagramPostService:
             return None
 
         # Increased delay between creation and publishing to avoid rate limits
-        print("Aguardando estabilização do container (10 segundos)...")
-        time.sleep(10)  # Increased from 5 to 10 seconds
+        print("Aguardando estabilização do container (15 segundos)...")
+        time.sleep(15)  # Increased from 10 to 15 seconds
 
         post_id = self.publish_media(media_container_id)
-        if not post_id:
-            # Final verification with even longer delays
-            print("Realizando verificação final do status da publicação...")
-            time.sleep(20)  # Extended delay before final check
-            success, permalink = self._verify_media_status(
-                media_container_id,
-                max_attempts=5,
-                delay=20
-            )
+        if post_id:
+            print(f"Processo concluído com sucesso! ID do Post: {post_id}")
+            return post_id
+        
+        # Final verification with even longer delays
+        print("Realizando verificação final do status da publicação...")
+        time.sleep(30)  # Extended delay before final check
+        
+        # Uma última tentativa com o container ID
+        success, _ = self._verify_media_status(
+            media_container_id,
+            max_attempts=3,
+            delay=25,
+            check_permalink=False  # Não precisamos do permalink na verificação final
+        )
+        
+        if success:
+            print("Post verificado e confirmado no Instagram!")
+            return media_container_id
             
-            if success:
-                print("Post verificado e confirmado no Instagram!")
-                if permalink:
-                    print(f"Link do post: {permalink}")
-                return media_container_id
-            print("Não foi possível confirmar a publicação do post após múltiplas tentativas.")
-            return None
-
-        print(f"Processo concluído com sucesso! ID do Post: {post_id}")
-        return post_id
+        print("Não foi possível confirmar a publicação do post após múltiplas tentativas.")
+        return None
         
     def test_post(self, test_image_url="https://i.imgur.com/exampleimage.jpg", test_caption="Teste de publicação 🚀"):
         """
