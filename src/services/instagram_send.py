@@ -1,4 +1,6 @@
 import os
+import time
+import requests
 
 from src.instagram.crew_post_instagram import InstagramPostCrew
 from src.instagram.describe_image_tool import ImageDescriber
@@ -7,9 +9,77 @@ from src.instagram.border import ImageWithBorder
 from src.instagram.filter import FilterImage
 from src.utils.paths import Paths
 from src.instagram.image_uploader import ImageUploader
-import requests
+
+# Import new queue system
+from src.services.post_queue import post_queue, RateLimitExceeded, ContentPolicyViolation
 
 class InstagramSend:
+    # Keep track of rate limits
+    last_rate_limit_time = 0
+    rate_limit_window = 3600  # 1 hour window for rate limiting
+    max_rate_limit_hits = 5  # Maximum number of rate limit hits before enforcing longer delays
+    
+    @staticmethod
+    def queue_post(image_path, caption, inputs=None) -> str:
+        """
+        Queue an image to be posted to Instagram asynchronously
+        
+        Args:
+            image_path (str): Path to the image file
+            caption (str): Caption text
+            inputs (dict): Optional configuration for post generation
+            
+        Returns:
+            str: Job ID for tracking the post status
+        """
+        # Validate inputs before queuing
+        if not caption or caption.lower() == "none":
+            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
+
+        # Validate image path
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Arquivo de imagem não encontrado: {image_path}")
+            
+        # Add to queue and return job ID
+        job_id = post_queue.add_job(image_path, caption, inputs)
+        return job_id
+    
+    @staticmethod
+    def check_post_status(job_id):
+        """
+        Check the status of a queued post
+        
+        Args:
+            job_id (str): Job ID returned when queuing the post
+            
+        Returns:
+            dict: Job status information
+        """
+        return post_queue.get_job_status(job_id)
+    
+    @staticmethod
+    def get_queue_stats():
+        """
+        Get statistics about the current queue
+        
+        Returns:
+            dict: Queue statistics
+        """
+        return post_queue.get_queue_stats()
+    
+    @staticmethod
+    def get_recent_posts(limit=10):
+        """
+        Get recent post history
+        
+        Args:
+            limit (int): Maximum number of posts to return
+            
+        Returns:
+            list: Recent post history
+        """
+        return post_queue.get_job_history(limit)
     
     @staticmethod
     def send_instagram(image_path, caption, inputs=None):
@@ -90,19 +160,25 @@ class InstagramSend:
                 print(f"Erro ao fazer upload da imagem final: {str(e)}")
                 raise
             
-            # Generate or use provided caption
+            # Generate caption
             print("Gerando legenda...")
             try:
                 crew = InstagramPostCrew()
-                inputs.update({
-                    "caption": caption,
-                    "describe": describe,
-                })
-                
-                final_caption = crew.kickoff(inputs=inputs)
+                # Pass inputs as a dictionary instead of XML string
+                inputs_dict = {
+                    'genero': inputs.get('genero', 'Neutro'),
+                    'caption': caption,
+                    'describe': describe,
+                    'estilo': inputs.get('estilo', 'Divertido, Alegre, Sarcástico e descontraído'),
+                    'pessoa': inputs.get('pessoa', 'Terceira pessoa do singular'),
+                    'sentimento': inputs.get('sentimento', 'Positivo'),
+                    'tamanho': inputs.get('tamanho', '200 palavras'),
+                    'emojs': inputs.get('emojs', 'sim'),
+                    'girias': inputs.get('girias', 'sim')
+                }
+                final_caption = crew.kickoff(inputs=inputs_dict)
             except Exception as e:
                 print(f"Erro ao gerar legenda: {str(e)}")
-                # Se falhar a geração da legenda, usa a original
                 final_caption = caption
             
             # Adicionar texto padrão ao final da legenda
@@ -117,22 +193,44 @@ class InstagramSend:
             final_caption = final_caption + "\n 6 - Postagem no feed do instagram"
             final_caption = final_caption + "\n\n-------------------"
             
-            # Post to Instagram
+            # Post to Instagram with enhanced rate limit handling
             print("Iniciando processo de publicação no Instagram...")
             try:
                 insta_post = InstagramPostService()
+                
+                # Check for severe rate limiting
+                stats = post_queue.get_queue_stats()
+                current_time = time.time()
+                
+                if stats["rate_limited_posts"] > InstagramSend.max_rate_limit_hits:
+                    # Check if we're still within the rate limit window
+                    if (current_time - InstagramSend.last_rate_limit_time) < InstagramSend.rate_limit_window:
+                        remaining_time = InstagramSend.rate_limit_window - (current_time - InstagramSend.last_rate_limit_time)
+                        raise RateLimitExceeded(
+                            f"Taxa de requisições severamente excedida. "
+                            f"Aguarde {int(remaining_time/60)} minutos antes de tentar novamente."
+                        )
+                    else:
+                        # Reset rate limit tracking if window has passed
+                        InstagramSend.last_rate_limit_time = 0
+                        stats["rate_limited_posts"] = 0
+
                 result = insta_post.post_image(final_image['url'], final_caption)
-            except Exception as e:
-                print(f"Erro no processo de publicação no Instagram: {str(e)}")
-                raise
-            
-            if result:
+                
+                if not result:
+                    print("Falha ao publicar no Instagram. Verificando status...")
+                    raise Exception("Falha na publicação")
+                    
                 print("Post processado e enviado ao Instagram com sucesso!")
                 return result
-            else:
-                print("O post pode ter sido publicado, mas não foi possível confirmar o status.")
-                print("Verifique manualmente o feed do Instagram.")
-                return None
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                if "rate" in error_str and "limit" in error_str:
+                    InstagramSend.last_rate_limit_time = current_time
+                    raise RateLimitExceeded(f"Taxa de requisições excedida: {str(e)}")
+                print(f"Erro no processo de publicação no Instagram: {str(e)}")
+                raise
 
         except Exception as e:
             print(f"Erro durante o processo de publicação: {str(e)}")

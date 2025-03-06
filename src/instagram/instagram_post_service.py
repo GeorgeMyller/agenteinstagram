@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 from dotenv import load_dotenv
 
@@ -24,7 +25,18 @@ class InstagramPostService:
         self.permalink_check_delay = 20  # Longer delay for permalink checks
         self.request_counter = 0
         self.rate_limit_threshold = 5
-        self.rate_limit_delay = 60  # Wait 60 seconds after hitting threshold
+        self.rate_limit_delay = 60  # Default delay when hitting threshold
+        self.rate_limit_reset_time = 0  # Time when rate limit resets
+        self.usage_threshold = 80  # Percentage of quota at which to start backing off
+        
+        # Rate limit header tracking
+        self.rate_limit_headers = {
+            'call_count': 0,
+            'total_time': 0,
+            'total_cputime': 0,
+            'app_usage': {},
+            'business_usage': {}
+        }
 
     def _handle_error_response(self, response_data):
         """
@@ -35,7 +47,33 @@ class InstagramPostService:
 
         error = response_data['error']
         error_code = error.get('code')
+        error_subcode = error.get('error_subcode')
         error_msg = error.get('message', 'Unknown error')
+        error_type = error.get('type', 'Unknown')
+        
+        # Log detailed error information
+        print(f"API Error Details:")
+        print(f"  Code: {error_code}")
+        print(f"  Subcode: {error_subcode}")
+        print(f"  Type: {error_type}")
+        print(f"  Message: {error_msg}")
+        
+        # Handle specific error codes
+        
+        # Rate limit error (code 4, subcode 2207051)
+        if error_code == 4 and error_subcode == 2207051:
+            print("Taxa de requisições da aplicação atingida. Implementando backoff prolongado.")
+            # Increase rate limit delay for more severe backoff
+            self.rate_limit_delay = 300  # 5 minutes
+            self.rate_limit_reset_time = time.time() + self.rate_limit_delay
+            return True, f"Rate limit exceeded: {error_msg}"
+            
+        # Fatal error (code -1, subcode 2207001)
+        if error_code == -1 and error_subcode == 2207001:
+            print("Erro fatal da API detectado. Pode ser necessário verificar o container de mídia.")
+            # Try with a longer delay, but mark as retriable
+            self.rate_limit_delay = 600  # 10 minutes
+            return True, f"Fatal API error: {error_msg}"
         
         # Handle specific permalink error
         if error_code == 100 and "nonexisting field (permalink)" in error_msg:
@@ -173,19 +211,82 @@ class InstagramPostService:
         # Retorna sucesso mesmo se permalink não foi obtido
         return True, permalink
 
+    def _analyze_rate_limit_headers(self, response):
+        """
+        Analyze rate limit headers from the Instagram API response and 
+        adjust rate limiting strategy accordingly
+        """
+        headers = response.headers
+        rate_limited = False
+        
+        # Log all headers for debugging
+        print("Response Headers:")
+        for header_name, header_value in headers.items():
+            if header_name.lower().startswith('x-'):
+                print(f"  {header_name}: {header_value}")
+
+        # Process Instagram/Facebook specific rate limit headers
+        for header_name in ['x-app-usage', 'x-business-use-case-usage']:
+            if header_name in headers:
+                try:
+                    usage_data = json.loads(headers[header_name])
+                    print(f"Rate limit data from {header_name}:")
+                    
+                    if header_name == 'x-app-usage':
+                        self.rate_limit_headers['app_usage'] = usage_data
+                    else:
+                        self.rate_limit_headers['business_usage'] = usage_data
+                    
+                    # Check usage percentages
+                    for metric, value in usage_data.items():
+                        print(f"  {metric}: {value}")
+                        if isinstance(value, (int, float)) and value > self.usage_threshold:
+                            print(f"⚠️ Rate limit approaching critical level for {metric}: {value}%")
+                            
+                            # Dynamic delay calculation based on usage percentage
+                            if value > 90:  # Critical level
+                                wait_seconds = 900  # 15 minutes
+                            elif value > 80:  # High level
+                                wait_seconds = 300  # 5 minutes
+                            else:  # Moderate level
+                                wait_seconds = 60  # 1 minute
+                                
+                            print(f"Implementing rate limit backoff: {wait_seconds} seconds")
+                            self.rate_limit_delay = wait_seconds
+                            self.rate_limit_reset_time = time.time() + wait_seconds
+                            rate_limited = True
+                except json.JSONDecodeError:
+                    print(f"Could not parse {header_name} header: {headers[header_name]}")
+                except Exception as e:
+                    print(f"Error processing {header_name} header: {str(e)}")
+        
+        return rate_limited
+
     def _rate_limit_check(self):
         """
-        Check if we're approaching rate limits and pause if needed
+        Enhanced rate limit check with dynamic delays based on header data
         """
+        current_time = time.time()
+        
+        # If we have a reset time and haven't reached it yet
+        if self.rate_limit_reset_time > current_time:
+            wait_time = self.rate_limit_reset_time - current_time
+            print(f"Aguardando {int(wait_time)} segundos para reset de rate limit...")
+            time.sleep(wait_time)
+            self.rate_limit_reset_time = 0
+            self.request_counter = 0
+            return
+        
+        # Standard counter-based rate limiting (fallback if headers are not available)
         self.request_counter += 1
         if self.request_counter >= self.rate_limit_threshold:
-            print(f"Atingido limite de {self.rate_limit_threshold} requisições. Pausando por {self.rate_limit_delay} segundos.")
+            print(f"Limite de requisições atingido. Pausando por {self.rate_limit_delay} segundos...")
             time.sleep(self.rate_limit_delay)
             self.request_counter = 0
 
     def _make_request_with_retry(self, method, url, payload):
         """
-        Make API request with exponential backoff retry logic
+        Make API request with exponential backoff retry logic and header analysis
         """
         self._rate_limit_check()
         
@@ -198,15 +299,28 @@ class InstagramPostService:
                 print(f"Payload: {payload}")
                 
                 response = method(url, data=payload)
-                response_data = response.json()
                 
-                print(f"Resposta da API: {response_data}")  # Log detalhado
+                # First analyze headers before processing response body
+                rate_limited = self._analyze_rate_limit_headers(response)
+                
+                # Now process the response body
+                response_data = response.json()
+                print(f"Resposta da API: {response_data}")
+                
+                if rate_limited:
+                    print("Rate limiting detectado nos headers. Aplicando backoff.")
+                    if attempt < self.max_retries - 1:
+                        delay = self.rate_limit_delay
+                        print(f"Tentativa {attempt + 1} pausada devido a rate limits. Aguardando {delay} segundos...")
+                        time.sleep(delay)
+                        continue
 
                 if 'error' in response_data:
                     should_retry, error_msg = self._handle_error_response(response_data)
                     last_error = error_msg
                     
                     if should_retry and attempt < self.max_retries - 1:
+                        # Use exponential backoff for retries
                         delay = self.base_delay * (2 ** attempt)
                         print(f"Tentativa {attempt + 1} falhou. Tentando novamente em {delay} segundos...")
                         time.sleep(delay)

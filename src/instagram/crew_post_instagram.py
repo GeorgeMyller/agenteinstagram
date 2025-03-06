@@ -45,25 +45,25 @@ Nota: Evite utilizar as palavras 'nunca', 'sempre' e 'garanto' durante a criaç�
             verbose=True
         )
 
-        # Tarefa de criação de legendas
+        # Tarefa de criação de legendas - Atualizando para usar formatação com dicionário
         captioner_task = Task(
             description=(
-                    r"""
+                    """
 Criar uma postagem no Instagram usando os seguintes insumos:
                         
 **Recebendo os seguintes insumos:**  
 1. **Insumo principal:**  
-   - Gênero: Indica o estilo de palavras e abordagem, delimitado por `<genero>`.  
-   - Caption: Uma breve ideia inicial ou descrição enviada pela Acesso IA, delimitada por `<caption>`.  
-   - Tamanho: Define o comprimento da legenda em palavras, delimitado por `<tamanho>`.  
+   - Gênero: Indica o estilo de palavras e abordagem.  
+   - Caption: Uma breve ideia inicial ou descrição enviada pela Acesso IA.  
+   - Tamanho: Define o comprimento da legenda em palavras.  
 
 2. **Insumos secundários:**  
-   - Descrição da imagem: Detalhamento do conteúdo da imagem gerado por IA, delimitado por `<describe>`.  
-   - Estilo de escrita: O tom desejado para a legenda, delimitado por `<estilo>`.  
-   - Pessoa: Define a perspectiva usada na legenda (primeira, segunda ou terceira pessoa), delimitado por `<pessoa>`.  
-   - Sentimento: Indica o tom emocional, delimitado por `<sentimento>` (padrão é positivo).  
-   - Emojis: Define se emojis podem ser usados, delimitado por `<emojs>`.  
-   - Gírias: Indica se gírias podem ser incluídas, delimitado por `<girias>`.  
+   - Descrição da imagem: Detalhamento do conteúdo da imagem gerado por IA.  
+   - Estilo de escrita: O tom desejado para a legenda.  
+   - Pessoa: Define a perspectiva usada na legenda (primeira, segunda ou terceira pessoa).  
+   - Sentimento: Indica o tom emocional (padrão é positivo).  
+   - Emojis: Define se emojis podem ser usados.  
+   - Gírias: Indica se gírias podem ser incluídas.  
 
 **Instruções de Geração de Texto:**  
 - Você combina todos os insumos de forma natural e criativa, gerando uma legenda que:  
@@ -72,7 +72,7 @@ Criar uma postagem no Instagram usando os seguintes insumos:
   3. Use o estilo e humor característico para destacar as façanhas da AcessoIA.
   4. Incorpore aleatoriamente **somente duas zoeiras** numeradas, sem repetição.
   5. Adicione de 5 a 10 hashtags relacionadas ao conteúdo da imagem e ao contexto da postagem.
-  6. Se por acaso no texto do <caption> mencionar "eu" mude para "AcessoIA". Exemplo "Eu estou aqui na praia" para "AcessoIA tá lá na praia e eu aqui trabalhando, ah! mizeravi kkk.". Faça variações.
+  6. Se por acaso no texto do caption mencionar "eu" mude para "AcessoIA". Exemplo "Eu estou aqui na praia" para "AcessoIA tá lá na praia e eu aqui trabalhando, ah! mizeravi kkk.". Faça variações.
   7. Adicione pequenas risadinhas depois de uma zoeira como "kkk". Mas somente uma vez no texto.
 
 **Zoeiras numeradas:**  
@@ -101,16 +101,15 @@ Esses exemplos demonstram como transformar uma linguagem pessoal em uma comunica
 **Exemplo de legenda gerada:**  
 *"A Acesso IA está no comando hoje! Enquanto otimiza seu repositório com insights do LLM 💻 e desenvolve soluções em Python 🐍, os workshops capacitam as equipes corporativas para transformar processos e acelerar resultados. Implementar IA é simples, mas ver a Acesso IA vibrar com os ganhos de eficiência é outra história! Treinar equipes em IA pode ser fácil, mas celebrar cada novo acesso ao mercado de trabalho é o verdadeiro diferencial!🚀"*
                     
-                    <genero>{genero}</genero>
-                    <caption>{caption}</caption>
-                    <describe>{describe}</describe>
-                    <estilo>{estilo}</estilo>
-                    <pessoa>{pessoa}</pessoa>
-                    <sentimento>{sentimento}</sentimento>
-                    <tamanho>{tamanho}</tamanho>
-                    <emojs>{emojs}</emojs>
-                    <girias>{girias}</girias>
-                    
+Gênero: {genero}
+Caption: {caption}
+Descrição da imagem: {describe}
+Estilo: {estilo}
+Pessoa: {pessoa}
+Sentimento: {sentimento}
+Tamanho: {tamanho}
+Usar emojis: {emojs}
+Usar gírias: {girias}
                     """
             ),
             expected_output=(
@@ -138,5 +137,80 @@ Esses exemplos demonstram como transformar uma linguagem pessoal em uma comunica
         Returns:
             str: Postagem gerada com legenda e hashtags.
         """
+        # Verifica se o input é um dicionário (formato esperado)
+        if not isinstance(inputs, dict):
+            # Vamos tentar converter strings XML para dicionário como fallback
+            if isinstance(inputs, str) and "<genero>" in inputs:
+                try:
+                    import re
+                    # Converter do formato XML para dicionário
+                    patterns = {
+                        'genero': r'<genero>(.*?)</genero>',
+                        'caption': r'<caption>(.*?)</caption>',
+                        'describe': r'<describe>(.*?)</describe>',
+                        'estilo': r'<estilo>(.*?)</estilo>',
+                        'pessoa': r'<pessoa>(.*?)</pessoa>',
+                        'sentimento': r'<sentimento>(.*?)</sentimento>',
+                        'tamanho': r'<tamanho>(.*?)</tamanho>',
+                        'emojs': r'<emojs>(.*?)</emojs>',
+                        'girias': r'<girias>(.*?)</girias>'
+                    }
+                    
+                    parsed_inputs = {}
+                    for key, pattern in patterns.items():
+                        match = re.search(pattern, inputs, re.DOTALL)
+                        if match:
+                            parsed_inputs[key] = match.group(1).strip()
+                    
+                    if parsed_inputs:
+                        inputs = parsed_inputs
+                    else:
+                        raise ValueError("Não foi possível analisar a entrada como XML")
+                except Exception as e:
+                    print(f"Erro ao converter entrada XML para dicionário: {str(e)}")
+                    # Use defaults
+                    inputs = {
+                        'genero': 'Neutro',
+                        'caption': 'Imagem para Instagram',
+                        'describe': 'Imagem para redes sociais',
+                        'estilo': 'Divertido e descontraído',
+                        'pessoa': 'Terceira pessoa',
+                        'sentimento': 'Positivo',
+                        'tamanho': '200 palavras',
+                        'emojs': 'sim',
+                        'girias': 'sim'
+                    }
+            else:
+                # Se não for nem dicionário nem XML, usar valores padrão
+                print("Formato de entrada não reconhecido. Usando valores padrão.")
+                inputs = {
+                    'genero': 'Neutro',
+                    'caption': 'Imagem para Instagram',
+                    'describe': 'Imagem para redes sociais',
+                    'estilo': 'Divertido e descontraído',
+                    'pessoa': 'Terceira pessoa',
+                    'sentimento': 'Positivo',
+                    'tamanho': '200 palavras',
+                    'emojs': 'sim',
+                    'girias': 'sim'
+                }
+        
+        # Garantir que todas as chaves necessárias existam
+        default_values = {
+            'genero': 'Neutro',
+            'caption': 'Imagem para Instagram',
+            'describe': 'Imagem para redes sociais',
+            'estilo': 'Divertido e descontraído',
+            'pessoa': 'Terceira pessoa',
+            'sentimento': 'Positivo',
+            'tamanho': '200 palavras',
+            'emojs': 'sim',
+            'girias': 'sim'
+        }
+        
+        for key, default_value in default_values.items():
+            if key not in inputs or not inputs[key]:
+                inputs[key] = default_value
+        
         resultado = self.crew.kickoff(inputs=inputs)
         return resultado.raw
