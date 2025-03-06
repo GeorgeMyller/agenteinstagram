@@ -31,7 +31,7 @@ class InstagramSend:
                 "girias": "sim"
             }
         
-        border_image = os.path.join(Paths.ROOT_DIR, "instagram", "moldura.png")
+        border_image = os.path.join(Paths.SRC_DIR, "instagram", "moldura.png")
         
         # Process image with filter
         image_path = FilterImage.process(image_path)

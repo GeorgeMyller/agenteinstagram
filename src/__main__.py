@@ -1,4 +1,4 @@
-from src.handlers.app import app, disable_firewall
+from app import app, disable_firewall
 
 if __name__ == "__main__":
     disable_firewall()

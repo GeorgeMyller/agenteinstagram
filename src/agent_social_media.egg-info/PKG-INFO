@@ -1,0 +1,159 @@
+Metadata-Version: 2.2
+Name: agent-social-media
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: <3.13,>=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: crewai-tools
+Requires-Dist: crewai>=0.100.0
+Requires-Dist: flask>=3.1.0
+Requires-Dist: requests>=2.32.3
+Requires-Dist: pillow>=11.1.0
+Requires-Dist: evolutionapi>=0.0.9
+Requires-Dist: pilgram>=1.2.1
+Requires-Dist: imgurpython>=1.1.7
+Requires-Dist: google-generativeai>=0.8.4
+Requires-Dist: streamlit>=1.32.0
+Requires-Dist: onnxruntime>=1.17.0
+Requires-Dist: numpy<2.0.0,>=1.26.0
+Requires-Dist: python-dotenv>=0.19.0
+
+# Agent Social Media - CrewAI2 📱🤖
+
+## Português 🇧🇷
+
+### Descrição do Projeto
+Este projeto é uma ferramenta completa para automação e gerenciamento de postagens em redes sociais, com foco especial no Instagram. Ele integra a biblioteca CrewAI para gerar legendas criativas, além de oferecer serviços robustos de processamento de imagens – incluindo aplicação de filtros, adição de bordas, upload via Imgur e publicação no Instagram. Também conta com descrição inteligente de imagens utilizando a API Gemini do Google, processamento de mensagens (texto, áudio, imagem e documentos) e integração com a Evolution API.
+
+### Funcionalidades Principais 🚀
+- Geração de legendas com CrewAI
+- Processamento de imagens: filtros, correção e bordas
+- Upload de imagens via Imgur
+- Publicação de posts no Instagram
+- Descrição inteligente de imagens com API Gemini
+- Processamento e envio de mensagens via Evolution API
+- Endpoints Flask para webhooks e integração de serviços
+
+### Como Usar 🚀
+
+#### Interface Gráfica (Recomendado)
+1. Instale as dependências:
+   ```bash
+   uv sync
+   ```
+2. Execute a interface Streamlit:
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+3. Acesse a interface web em `http://localhost:8501`
+4. Use o painel lateral para configurar:
+   - Estilo de escrita
+   - Pessoa narrativa
+   - Sentimento
+   - Uso de emojis e linguagem informal
+5. Faça upload de uma imagem e adicione uma legenda opcional
+6. Clique em "Post to Instagram" para publicar
+
+#### API (Webhooks)
+1. Instale o UV:
+   ```bash
+   pip install uv
+   ```
+2. Crie o ambiente virtual:
+   ```bash
+   uv venv
+   ```
+3. Ative o ambiente virtual (no Windows use `venv\Scripts\activate`):
+   ```bash
+   source venv/bin/activate
+   ```
+4. Sincronize as dependências e inicie a aplicação:
+   ```bash
+   uv sync
+   ```
+
+### Estrutura do Projeto 📂
+- `app.py`: Endpoints Flask para o processamento de mensagens.
+- Diretório `instagram/`: Módulos para criar posts, fazer upload de imagens, aplicar filtros, adicionar bordas e descrever imagens.
+- `crew_post_instagram.py`: Configuração do CrewAI e tarefas para geração de legendas.
+- `message.py` e `send_message.py`: Processamento e envio de mensagens.
+- `paths.py`: Definição dos caminhos usados no sistema.
+- `streamlit_app.py`: Interface gráfica para gerenciamento de posts
+- Outros arquivos e scripts auxiliares.
+
+### Contribuição
+Contribuições são bem-vindas! Sinta-se à vontade para abrir issues e pull requests para melhorias e correções.
+
+### Licença
+Este projeto está licenciado sob a Licença MIT. Veja o arquivo LICENSE para mais detalhes.
+
+---
+
+## English 🇺🇸
+
+### Project Description
+This project is a comprehensive tool for automating and managing social media posts, with a special focus on Instagram. It integrates the CrewAI library to generate creative captions, along with robust image processing features – including filters, border addition, image upload via Imgur, and Instagram posting. It also features intelligent image description using Google's Gemini API, message processing (text, audio, image, and document) and integration with the Evolution API.
+
+### Main Features 🚀
+- Caption generation with CrewAI
+- Image processing: filters, corrections, and border additions
+- Image upload using Imgur
+- Instagram post publishing
+- Intelligent image description with Gemini API
+- Message processing and sending via Evolution API
+- Flask endpoints for webhooks and service integration
+
+### How to Use 🚀
+
+#### Graphical Interface (Recommended)
+1. Install dependencies:
+   ```bash
+   uv sync
+   ```
+2. Run the Streamlit interface:
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+3. Access the web interface at `http://localhost:8501`
+4. Use the sidebar to configure:
+   - Writing style
+   - Narrative person
+   - Sentiment
+   - Emoji and informal language usage
+5. Upload an image and add an optional caption
+6. Click "Post to Instagram" to publish
+
+#### API (Webhooks)
+1. Install UV:
+   ```bash
+   pip install uv
+   ```
+2. Create the virtual environment:
+   ```bash
+   uv venv
+   ```
+3. Activate the virtual environment (use `venv\Scripts\activate` on Windows):
+   ```bash
+   source venv/bin/activate
+   ```
+4. Synchronize dependencies and launch the application:
+   ```bash
+   uv sync
+   ```
+
+### Project Structure 📂
+- `app.py`: Flask endpoints for message processing.
+- `instagram/` folder: Modules for creating posts, image uploading, filters, border additions and image description.
+- `crew_post_instagram.py`: CrewAI configuration and caption generation tasks.
+- `message.py` and `send_message.py`: Message processing and sending.
+- `paths.py`: File path configurations.
+- `streamlit_app.py`: Graphical interface for post management
+- Other auxiliary files and scripts.
+
+### Contribution
+Contributions are welcome! Feel free to open issues and pull requests for improvements and fixes.
+
+### License
+This project is licensed under the MIT License. See the LICENSE file for more details.
+
+Happy coding! 😄
