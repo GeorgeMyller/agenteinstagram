@@ -4,32 +4,59 @@ from moviepy.video.fx.resize import resize
 from moviepy.video.tools.cuts import find_video_period
 from moviepy.config import change_settings
 import tempfile
+from typing import Dict, Any
+import logging
 
 # Defina um diretório temporário para o moviepy usar (opcional, mas recomendado)
 # change_settings({"TEMP_DIR": "/caminho/para/seu/diretorio/temporario"}) # Linux/macOS
 # change_settings({"TEMP_DIR": "C:\\caminho\\para\\seu\\diretorio\\temporario"}) # Windows
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class VideoProcessor:
 
     @staticmethod
-    def get_video_info(video_path):
-        """Obtém informações sobre o vídeo usando moviepy."""
+    def get_video_info(video_path: str) -> Dict[str, Any]:
+        """
+        Get video information using moviepy instead of ffprobe.
+        
+        Args:
+            video_path: Path to the video file
+            
+        Returns:
+            Dictionary with video metadata
+        """
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        
         try:
+            # Use moviepy instead of ffprobe
             with VideoFileClip(video_path) as clip:
-                video_info = {
-                    'duration': clip.duration,
-                    'width': clip.size[0],
-                    'height': clip.size[1],
-                    'fps': clip.fps,
-                    'codec': clip.codec,
-                    'audio_codec': clip.audio.codec if clip.audio else None,  # Verifica se há áudio
-                    'file_size': os.path.getsize(video_path),
-                    'aspect_ratio': clip.size[0] / clip.size[1]
+                width = int(clip.size[0])
+                height = int(clip.size[1])
+                duration = float(clip.duration)
+                
+                # Get file size
+                file_size_bytes = os.path.getsize(video_path)
+                file_size_mb = file_size_bytes / (1024 * 1024)
+                
+                # Get format/container from file extension
+                _, ext = os.path.splitext(video_path)
+                format_name = ext.lower().strip('.')
+                
+                return {
+                    'width': width,
+                    'height': height,
+                    'duration': duration,
+                    'file_size_mb': file_size_mb,
+                    'format': format_name,
+                    'aspect_ratio': width / height if height else 0
                 }
-            return video_info
         except Exception as e:
-            print(f"Erro ao obter informações do vídeo: {e}")
-            return None
+            logger.error(f"Error analyzing video: {str(e)}")
+            raise
 
     @staticmethod
     def check_duration(duration, post_type):

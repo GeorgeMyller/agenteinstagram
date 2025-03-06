@@ -1,376 +1,345 @@
 import os
-import threading
 import time
-import uuid
 import json
-from enum import Enum
+import uuid
+import threading
+import logging
 from datetime import datetime
-from queue import Queue
-from typing import Dict, List, Any, Optional
+from queue import Queue, Empty
+from threading import Thread
 
-# Custom exceptions
-class RateLimitExceeded(Exception):
-    """Raised when API rate limits are exceeded"""
-    pass
+# Configurar logger
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('PostQueue')
 
 class ContentPolicyViolation(Exception):
-    """Raised when content violates Instagram guidelines"""
+    """Exceção para violações de política de conteúdo"""
     pass
 
-class PostStatus(Enum):
-    QUEUED = "queued"
+class RateLimitExceeded(Exception):
+    """Exceção para limites de taxa excedidos"""
+    pass
+
+# Add PostStatus class that monitor.py is trying to import
+class PostStatus:
+    """Enum-like class to represent post status values"""
+    PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
     RATE_LIMITED = "rate_limited"
-    CONTENT_VIOLATION = "content_violation"
+    POLICY_VIOLATION = "policy_violation"
 
 class PostQueue:
     """
-    Queue system for processing Instagram posts asynchronously with support for multiple content types
+    Sistema de filas para processamento assíncrono de posts e reels
     """
     
-    def __init__(self, max_workers=2, poll_interval=5):
-        self.queue = Queue()
-        self.jobs: Dict[str, Dict[str, Any]] = {}
-        self.max_workers = max_workers
-        self.poll_interval = poll_interval
-        self.active_workers = 0
-        self.lock = threading.Lock()
-        self.history: List[Dict[str, Any]] = []
-        self.max_history = 100
-        self.workers = []
-        self.running = False
-        
-        # Metrics
-        self.total_posts = 0
-        self.successful_posts = 0
-        self.failed_posts = 0
-        self.rate_limited_posts = 0
-        self.content_violations = 0
-        self.last_processing_times = []  # Store last 10 processing times
-        
-        # Load history if exists
-        self._load_history()
+    def __init__(self):
+        """Inicializa o sistema de filas"""
+        self.job_queue = Queue()
+        self.jobs = {}  # Armazena informações sobre os trabalhos
+        self.job_history = []  # Histórico de trabalhos
+        self.stats = {
+            "total_jobs": 0,
+            "completed_jobs": 0,
+            "failed_jobs": 0,
+            "rate_limited_posts": 0,
+            "video_processing_jobs": 0,
+            "image_processing_jobs": 0,
+            "avg_processing_time": 0
+        }
+        self.worker_thread = None
+        self.is_running = False
+        self.processing_lock = threading.Lock()  # Lock para operações críticas
+
+        # Iniciar thread de processamento
+        self.start_worker()
     
-    def start(self):
-        """Start the queue processing"""
-        if self.running:
-            return
+    def start_worker(self):
+        """Inicia o thread worker para processamento de filas"""
+        if not self.is_running:
+            self.is_running = True
+            self.worker_thread = Thread(target=self._process_queue, daemon=True)
+            self.worker_thread.start()
+            logger.info("Worker de processamento iniciado")
+    
+    def stop_worker(self):
+        """Para o thread worker"""
+        self.is_running = False
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=5.0)
+            logger.info("Worker de processamento encerrado")
+    
+    def add_job(self, media_path, caption, inputs=None) -> str:
+        """
+        Adiciona um novo trabalho à fila
+        
+        Args:
+            media_path (str): Caminho do arquivo de mídia (imagem ou vídeo)
+            caption (str): Legenda do post
+            inputs (dict): Configurações adicionais
             
-        self.running = True
-        
-        # Start worker threads
-        for _ in range(self.max_workers):
-            worker = threading.Thread(target=self._worker_thread, daemon=True)
-            worker.start()
-            self.workers.append(worker)
-            
-        print(f"Post queue started with {self.max_workers} workers")
-    
-    def stop(self):
-        """Stop the queue processing"""
-        self.running = False
-        
-        # Wait for workers to finish
-        for worker in self.workers:
-            if worker.is_alive():
-                worker.join(timeout=30)
-        
-        self.workers = []
-        print("Post queue stopped")
-    
-    def add_job(self, media_path: str, caption: str, inputs: Optional[Dict] = None) -> str:
-        """Add a new job to the queue"""
+        Returns:
+            str: ID do trabalho
+        """
         job_id = str(uuid.uuid4())
         
-        # Determine job type based on inputs and file extension
-        job_type = "image"  # default type
-        if inputs and "content_type" in inputs:
-            job_type = inputs["content_type"]
-        else:
-            # Try to determine type from file extension
-            ext = os.path.splitext(media_path)[1].lower()
-            if ext in ['.mp4', '.mov', '.avi']:
-                job_type = "video"
-            elif isinstance(media_path, list):
-                job_type = "carousel"
+        # Verificar tipo de conteúdo
+        is_video = media_path.lower().endswith(('.mp4', '.mov', '.avi', '.wmv'))
+        content_type = "reel" if (inputs and inputs.get('content_type') == 'reel') or is_video else "image"
         
-        # Create job object
-        job = {
+        job_data = {
             "id": job_id,
-            "type": job_type,
             "media_path": media_path,
             "caption": caption,
             "inputs": inputs or {},
-            "status": PostStatus.QUEUED.value,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "completed_at": None,
+            "status": "pending",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "result": None,
             "error": None,
-            "result": None
+            "content_type": content_type
         }
         
-        # Add to jobs dictionary
-        with self.lock:
-            self.jobs[job_id] = job
-            self.total_posts += 1
+        # Armazenar informações do trabalho
+        self.jobs[job_id] = job_data
         
-        # Add to queue
-        self.queue.put(job_id)
+        # Adicionar à fila de processamento
+        self.job_queue.put(job_id)
         
-        print(f"Job added to queue: {job_id} (type: {job_type})")
+        # Atualizar estatísticas
+        with self.processing_lock:
+            self.stats["total_jobs"] += 1
+            if content_type == "reel":
+                self.stats["video_processing_jobs"] += 1
+            else:
+                self.stats["image_processing_jobs"] += 1
+        
+        logger.info(f"Novo trabalho adicionado: {job_id} ({content_type})")
         return job_id
     
-    def get_job_status(self, job_id: str) -> Dict:
-        """
-        Get the status of a job
-        
-        Args:
-            job_id: The job identifier
-            
-        Returns:
-            job status information
-        """
-        with self.lock:
-            if job_id in self.jobs:
-                return self.jobs[job_id].copy()
-            
-            # Check in history
-            for job in self.history:
-                if job["id"] == job_id:
-                    return job.copy()
-        
-        return {"error": "Job not found", "status": "not_found"}
-    
-    def get_queue_stats(self) -> Dict:
-        """Get current queue statistics"""
-        with self.lock:
-            pending_jobs = self.queue.qsize()
-            active_jobs = self.active_workers
-            
-            avg_time = 0
-            if self.last_processing_times:
-                avg_time = sum(self.last_processing_times) / len(self.last_processing_times)
-            
-            return {
-                "pending_jobs": pending_jobs,
-                "active_jobs": active_jobs,
-                "total_posts": self.total_posts,
-                "successful_posts": self.successful_posts,
-                "failed_posts": self.failed_posts,
-                "rate_limited_posts": self.rate_limited_posts,
-                "content_violations": self.content_violations,
-                "average_processing_time": avg_time,
-                "queue_length": self.queue.qsize()
-            }
-    
-    def get_job_history(self, limit=10) -> List[Dict]:
-        """Get recent job history"""
-        with self.lock:
-            return self.history[:limit]
-    
-    def _worker_thread(self):
-        """Worker thread that processes jobs from the queue with support for multiple content types"""
-        while self.running:
+    def _process_queue(self):
+        """Thread worker para processar trabalhos na fila"""
+        while self.is_running:
             try:
-                # Get a job from the queue with timeout
+                # Tentar obter um trabalho da fila
                 try:
-                    job_id = self.queue.get(timeout=1.0)
-                except Exception:
+                    job_id = self.job_queue.get(block=True, timeout=1.0)
+                except Empty:
+                    # Fila vazia, continuar verificando
                     continue
                 
-                # Get job details
-                with self.lock:
-                    if job_id not in self.jobs:
-                        self.queue.task_done()
-                        continue
-                    
-                    job = self.jobs[job_id]
-                    job["status"] = PostStatus.PROCESSING.value
-                    job["updated_at"] = datetime.now().isoformat()
-                    self.active_workers += 1
-                
-                # Process the job
-                start_time = time.time()
+                # Processar o trabalho
                 try:
-                    # Import here to avoid circular imports
+                    logger.info(f"Processando trabalho: {job_id}")
+                    
+                    # Obter dados do trabalho
+                    job = self.jobs[job_id]
+                    
+                    # Atualizar status
+                    self._update_job_status(job_id, "processing")
+                    
+                    # Importar módulos necessários aqui para evitar dependências circulares
                     from src.services.instagram_send import InstagramSend
                     
-                    # Process based on job type
+                    start_time = time.time()
                     result = None
-                    if job["type"] == "image":
-                        result = InstagramSend.send_instagram(
-                            job["media_path"], 
-                            job["caption"], 
-                            job["inputs"]
-                        )
-                    elif job["type"] == "video":
-                        result = InstagramSend.send_reels(
-                            job["media_path"],
-                            job["caption"],
-                            job["inputs"]
-                        )
-                    elif job["type"] == "carousel":
-                        # TODO: Implement carousel handling
-                        result = None
-                        raise NotImplementedError("Carousel posting not yet implemented")
-                    else:
-                        raise ValueError(f"Unknown job type: {job['type']}")
+                    error = None
                     
-                    # Update job with success/failure
-                    with self.lock:
-                        if job_id in self.jobs:
-                            if result:
-                                job["status"] = PostStatus.COMPLETED.value
-                                job["result"] = result
-                                self.successful_posts += 1
-                            else:
-                                job["status"] = PostStatus.FAILED.value
-                                job["error"] = f"Failed to post {job['type']}, but no specific error was returned"
-                                self.failed_posts += 1
+                    # Processar com base no tipo de conteúdo
+                    try:
+                        if job["content_type"] == "reel":
+                            logger.info(f"Processando vídeo para Reels: {job['media_path']}")
+                            # Priorizar configurações específicas para otimizar vídeos
+                            share_to_feed = True
+                            if "share_to_feed" in job["inputs"]:
+                                share_to_feed = job["inputs"]["share_to_feed"]
+                                
+                            result = InstagramSend.send_reels(
+                                job["media_path"], 
+                                job["caption"],
+                                job["inputs"]
+                            )
+                        else:
+                            # Imagem padrão
+                            result = InstagramSend.send_instagram(
+                                job["media_path"], 
+                                job["caption"],
+                                job["inputs"]
+                            )
                             
-                            job["completed_at"] = datetime.now().isoformat()
-                            job["updated_at"] = datetime.now().isoformat()
-                    
-                except RateLimitExceeded as e:
-                    with self.lock:
-                        if job_id in self.jobs:
-                            self.jobs[job_id]["status"] = PostStatus.RATE_LIMITED.value
-                            self.jobs[job_id]["error"] = str(e)
-                            self.jobs[job_id]["updated_at"] = datetime.now().isoformat()
-                            self.rate_limited_posts += 1
-                    
-                    # Requeue with delay
-                    threading.Timer(300, lambda: self.queue.put(job_id)).start()
-                    
-                except ContentPolicyViolation as e:
-                    with self.lock:
-                        if job_id in self.jobs:
-                            self.jobs[job_id]["status"] = PostStatus.CONTENT_VIOLATION.value
-                            self.jobs[job_id]["error"] = str(e)
-                            self.jobs[job_id]["updated_at"] = datetime.now().isoformat()
-                            self.jobs[job_id]["completed_at"] = datetime.now().isoformat()
-                            self.content_violations += 1
+                        if result:
+                            self._update_job_status(job_id, "completed", result=result)
+                            logger.info(f"Trabalho completado: {job_id}")
                             
-                            # Move to history
-                            self._move_to_history(job_id)
-                
-                except Exception as e:
-                    with self.lock:
-                        if job_id in self.jobs:
-                            self.jobs[job_id]["status"] = PostStatus.FAILED.value
-                            self.jobs[job_id]["error"] = str(e)
-                            self.jobs[job_id]["updated_at"] = datetime.now().isoformat()
-                            self.jobs[job_id]["completed_at"] = datetime.now().isoformat()
-                            self.failed_posts += 1
+                            with self.processing_lock:
+                                self.stats["completed_jobs"] += 1
+                        else:
+                            raise Exception("Falha no processamento do conteúdo")
                             
-                            # Move to history
-                            self._move_to_history(job_id)
-                
-                finally:
-                    # Calculate processing time
-                    process_time = time.time() - start_time
-                    
-                    with self.lock:
-                        self.active_workers -= 1
-                        self.last_processing_times.append(process_time)
-                        if len(self.last_processing_times) > 10:
-                            self.last_processing_times.pop(0)
+                    except RateLimitExceeded as e:
+                        error = str(e)
+                        logger.warning(f"Rate limit excedido: {error}")
                         
-                        # If job is completed or failed, move to history
-                        if job_id in self.jobs:
-                            job = self.jobs[job_id]
-                            if job["status"] in [PostStatus.COMPLETED.value, PostStatus.FAILED.value, 
-                                            PostStatus.CONTENT_VIOLATION.value]:
-                                self._move_to_history(job_id)
+                        # Marcar como falha de rate limit
+                        self._update_job_status(job_id, "rate_limited", error=error)
+                        
+                        with self.processing_lock:
+                            self.stats["rate_limited_posts"] += 1
+                            self.stats["failed_jobs"] += 1
+                            
+                    except ContentPolicyViolation as e:
+                        error = str(e)
+                        logger.warning(f"Violação de política: {error}")
+                        self._update_job_status(job_id, "policy_violation", error=error)
+                        
+                        with self.processing_lock:
+                            self.stats["failed_jobs"] += 1
+                            
+                    except Exception as e:
+                        error = str(e)
+                        logger.error(f"Erro no processamento: {error}")
+                        self._update_job_status(job_id, "failed", error=error)
+                        
+                        with self.processing_lock:
+                            self.stats["failed_jobs"] += 1
                     
-                    # Mark task as done
-                    self.queue.task_done()
+                    # Calcular tempo médio de processamento
+                    processing_time = time.time() - start_time
+                    with self.processing_lock:
+                        if self.stats["completed_jobs"] > 0:
+                            current_avg = self.stats["avg_processing_time"]
+                            total_processed = self.stats["completed_jobs"]
+                            new_avg = ((current_avg * (total_processed - 1)) + processing_time) / total_processed
+                            self.stats["avg_processing_time"] = new_avg
+                    
+                    # Adicionar ao histórico
+                    self._add_to_history(job_id)
+                    
+                    # Limpar mídia temporária após processamento 
+                    self._cleanup_media(job["media_path"])
+                    
+                finally:
+                    # Marcar como concluído na fila
+                    self.job_queue.task_done()
                     
             except Exception as e:
-                print(f"Error in worker thread: {e}")
-                with self.lock:
-                    self.active_workers -= 1
+                logger.exception(f"Erro no worker de processamento: {e}")
     
-    def _move_to_history(self, job_id: str):
-        """Move a job from active jobs to history"""
-        with self.lock:
+    def _update_job_status(self, job_id, status, result=None, error=None):
+        """Atualiza o status de um trabalho"""
+        if job_id in self.jobs:
+            self.jobs[job_id]["status"] = status
+            self.jobs[job_id]["updated_at"] = time.time()
+            
+            if result is not None:
+                self.jobs[job_id]["result"] = result
+                
+            if error is not None:
+                self.jobs[job_id]["error"] = error
+    
+    def _add_to_history(self, job_id):
+        """Adiciona um trabalho ao histórico"""
+        if job_id in self.jobs:
+            # Copiar o trabalho para o histórico
+            job_copy = self.jobs[job_id].copy()
+            
+            # Limitar tamanho do histórico
+            MAX_HISTORY = 100
+            if len(self.job_history) >= MAX_HISTORY:
+                self.job_history.pop(0)  # Remover o mais antigo
+                
+            self.job_history.append(job_copy)
+            
+            # Limpar trabalhos antigos após um período
+            self._cleanup_old_jobs()
+    
+    def _cleanup_old_jobs(self):
+        """Limpa trabalhos antigos"""
+        current_time = time.time()
+        MAX_AGE = 24 * 60 * 60  # 24 horas
+        
+        jobs_to_remove = []
+        for job_id, job in self.jobs.items():
+            if current_time - job["updated_at"] > MAX_AGE:
+                jobs_to_remove.append(job_id)
+        
+        for job_id in jobs_to_remove:
             if job_id in self.jobs:
-                # Add to history
-                self.history.insert(0, self.jobs[job_id])
-                
-                # Remove from active jobs
                 del self.jobs[job_id]
-                
-                # Trim history if needed
-                if len(self.history) > self.max_history:
-                    self.history = self.history[:self.max_history]
-                    
-                # Save history
-                self._save_history()
     
-    def _save_history(self):
-        """Save job history to disk"""
+    def _cleanup_media(self, media_path):
+        """Limpa arquivos de mídia temporários"""
         try:
-            with open("instagram_post_history.json", "w") as f:
-                json.dump(self.history, f)
+            # Verificar se é um arquivo temporário que devemos remover
+            if os.path.exists(media_path) and os.path.basename(media_path).startswith("temp-"):
+                os.remove(media_path)
+                logger.info(f"Arquivo de mídia temporário removido: {media_path}")
         except Exception as e:
-            print(f"Error saving history: {e}")
+            logger.warning(f"Erro ao limpar arquivo temporário {media_path}: {e}")
     
-    def _load_history(self):
-        """Load job history from disk"""
-        try:
-            if os.path.exists("instagram_post_history.json"):
-                with open("instagram_post_history.json", "r") as f:
-                    self.history = json.load(f)
-                    
-                # Update metrics from history
-                for job in self.history:
-                    if job["status"] == PostStatus.COMPLETED.value:
-                        self.successful_posts += 1
-                    elif job["status"] == PostStatus.FAILED.value:
-                        self.failed_posts += 1
-                    elif job["status"] == PostStatus.RATE_LIMITED.value:
-                        self.rate_limited_posts += 1
-                    elif job["status"] == PostStatus.CONTENT_VIOLATION.value:
-                        self.content_violations += 1
-                        
-                print(f"Loaded {len(self.history)} items from history")
-        except Exception as e:
-            print(f"Error loading history: {e}")
-            self.history = []
-    
-    def _check_content_policy(self, image_path: str, caption: str) -> bool:
+    def get_job_status(self, job_id):
         """
-        Check if content violates Instagram policies
+        Obtém o status de um trabalho
+        
+        Args:
+            job_id (str): ID do trabalho
+            
+        Returns:
+            dict: Informações do trabalho
+        """
+        if job_id in self.jobs:
+            # Retornar cópia para evitar modificações
+            return self.jobs[job_id].copy()
+        
+        # Verificar no histórico
+        for job in self.job_history:
+            if job["id"] == job_id:
+                return job.copy()
+                
+        return {"error": "Job não encontrado"}
+    
+    def get_queue_stats(self):
+        """
+        Obtém estatísticas da fila
         
         Returns:
-            bool: True if content violates policy
+            dict: Estatísticas da fila
         """
-        # Check for obvious policy violations
-        forbidden_words = [
-            "porn", "nude", "naked", "sex", "viagra", "cialis", "gambling",
-            "casino", "bet", "drugs", "cocaine", "heroin", "marijuana"
-        ]
+        with self.processing_lock:
+            stats = self.stats.copy()
+            stats["queue_size"] = self.job_queue.qsize()
+            stats["active_jobs"] = len(self.jobs)
+            return stats
+    
+    def get_job_history(self, limit=10):
+        """
+        Obtém histórico de trabalhos
         
-        # Check caption for forbidden words
-        if caption:
-            caption_lower = caption.lower()
-            for word in forbidden_words:
-                if word in caption_lower:
-                    return True
+        Args:
+            limit (int): Número máximo de registros
+            
+        Returns:
+            list: Histórico de trabalhos
+        """
+        # Retornar histórico em ordem cronológica inversa
+        return sorted(
+            self.job_history,
+            key=lambda x: x.get("updated_at", 0),
+            reverse=True
+        )[:limit]
+    
+    def clear_queue(self):
+        """Limpa a fila atual de trabalhos"""
+        while not self.job_queue.empty():
+            try:
+                self.job_queue.get(False)
+                self.job_queue.task_done()
+            except Empty:
+                break
         
-        # TODO: Implement image content checking with ML model
-        # For now, just check if file exists
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found at path: {image_path}")
-        
-        return False
+        logger.info("Fila limpa")
 
-
-# Create a global instance
-post_queue = PostQueue(max_workers=2)
-
-# Auto-start the queue
-post_queue.start()
+# Instância global para uso em toda a aplicação
+post_queue = PostQueue()

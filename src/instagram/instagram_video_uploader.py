@@ -26,7 +26,7 @@ class VideoUploader:
         pass
     
     def validate_video(self, video_path):
-        from src.instagram.video_processor import VideoProcessor  # Importe aqui para evitar circular imports
+        from src.instagram.instagram_video_processor import VideoProcessor  # Importe aqui para evitar circular imports
         video_info = VideoProcessor.get_video_info(video_path)
 
         if not video_info:

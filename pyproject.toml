@@ -20,5 +20,7 @@ dependencies = [
     "psutil>=7.0.0",
     "moviepy>=1.0.3",
     "urllib3>=2.3.0",
+    "plotly>=6.0.0",
+    "matplotlib>=3.10.1",
 ]
     

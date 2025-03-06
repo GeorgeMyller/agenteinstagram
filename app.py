@@ -115,7 +115,7 @@ def webhook():
         elif msg.message_type == msg.TYPE_VIDEO:
             try:
                 # 1. Decodificar e salvar o vídeo
-                video_path = VideoDecodeSaver.process(msg.video_base64, msg.video_mimetype, directory='temp_videos')
+                video_path = VideoDecodeSaver.process(msg.video_base64)
                 caption = msg.video_caption if msg.video_caption else ""
                 print(f"Caption received: {caption}")  # Debug statement
                 # 2. Enfileirar a postagem do Reels

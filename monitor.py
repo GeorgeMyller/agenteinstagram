@@ -378,3 +378,276 @@ def start_monitoring_server():
 if __name__ == '__main__':
     # Start server directly when run as script
     app.run(host='0.0.0.0', port=6002, debug=False)  # Disabled debug mode for monitoring server
+
+import streamlit as st
+import requests
+import time
+import pandas as pd
+import plotly.express as px
+import matplotlib.pyplot as plt
+import datetime
+import os
+from src.services.instagram_send import InstagramSend
+
+# Configuração da página
+st.set_page_config(
+    page_title="Agent Social Media - Monitoramento",
+    page_icon="📊",
+    layout="wide"
+)
+
+# Título
+st.title('📊 Monitoramento do Agent Social Media')
+
+# Definir URL base da API
+API_BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:3000')
+
+# Sidebar para configurações
+st.sidebar.header('Configurações')
+refresh_interval = st.sidebar.slider('Intervalo de atualização (segundos)', 5, 60, 15)
+auto_refresh = st.sidebar.checkbox('Atualização automática', value=True)
+
+# Função para obter dados da API
+def get_api_data(endpoint):
+    try:
+        response = requests.get(f"{API_BASE_URL}/{endpoint}")
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Erro ao obter dados da API: {str(e)}")
+        return None
+
+# Função para formatar timestamp
+def format_timestamp(timestamp):
+    if isinstance(timestamp, (int, float)):
+        return datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+    return "N/A"
+
+# Criar tabs para diferentes visualizações
+tab1, tab2, tab3 = st.tabs(["Dashboard Geral", "Monitoramento de Reels", "Histórico de Jobs"])
+
+# Tab 1: Dashboard Geral
+with tab1:
+    st.header("Estatísticas Gerais")
+    
+    # Obter estatísticas
+    stats = InstagramSend.get_queue_stats()
+    
+    # Criar colunas para métricas principais
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total de Jobs", stats["total_jobs"])
+        st.metric("Jobs Completados", stats["completed_jobs"])
+        st.metric("Jobs Falhos", stats["failed_jobs"])
+    
+    with col2:
+        st.metric("Posts de Imagens", stats["image_processing_jobs"])
+        st.metric("Posts de Vídeos", stats["video_processing_jobs"])
+        taxa_sucesso = 0
+        if stats["total_jobs"] > 0:
+            taxa_sucesso = round((stats["completed_jobs"] / stats["total_jobs"]) * 100, 2)
+        st.metric("Taxa de Sucesso", f"{taxa_sucesso}%")
+    
+    with col3:
+        st.metric("Jobs na Fila", stats["queue_size"])
+        st.metric("Rate Limited", stats["rate_limited_posts"])
+        st.metric("Tempo Médio", f"{round(stats['avg_processing_time'], 2)}s")
+    
+    # Gráfico de pizza: distribuição por tipo de conteúdo
+    st.subheader("Distribuição por Tipo de Conteúdo")
+    
+    tipos_data = {
+        'Tipo': ['Imagens', 'Vídeos'],
+        'Quantidade': [stats["image_processing_jobs"], stats["video_processing_jobs"]]
+    }
+    
+    tipos_df = pd.DataFrame(tipos_data)
+    if sum(tipos_data['Quantidade']) > 0:  # Verificar se há dados para mostrar
+        fig = px.pie(tipos_df, values='Quantidade', names='Tipo', 
+                     title='Distribuição de Posts por Tipo')
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sem dados suficientes para gerar o gráfico")
+
+# Tab 2: Monitoramento de Reels
+with tab2:
+    st.header("Monitoramento de Reels")
+    
+    # Obter histórico de jobs
+    history = InstagramSend.get_recent_posts(20)  # Pegar mais jobs para filtrar apenas vídeos
+    
+    # Filtrar apenas vídeos/reels
+    reels_jobs = [job for job in history if job.get('content_type') == 'reel']
+    
+    if not reels_jobs:
+        st.info("Nenhum job de Reels encontrado no histórico recente.")
+    else:
+        # Criar DataFrame com dados relevantes
+        reels_data = []
+        for job in reels_jobs:
+            status = job.get('status', 'unknown')
+            created_at = format_timestamp(job.get('created_at'))
+            updated_at = format_timestamp(job.get('updated_at'))
+            
+            # Calcular duração do processamento
+            processing_time = "N/A"
+            if job.get('created_at') and job.get('updated_at') and job.get('status') in ['completed', 'failed']:
+                duration = job.get('updated_at') - job.get('created_at')
+                processing_time = f"{round(duration, 2)}s"
+            
+            # Informações adicionais
+            result = job.get('result', {})
+            permalink = result.get('permalink', 'N/A') if result else 'N/A'
+            post_id = result.get('id', 'N/A') if result else 'N/A'
+            
+            # Extrair path do vídeo para análise
+            media_path = job.get('media_path', 'N/A')
+            media_filename = os.path.basename(media_path) if media_path != 'N/A' else 'N/A'
+            
+            reels_data.append({
+                'Job ID': job.get('id', 'N/A')[:8] + "...",
+                'Status': status,
+                'Criado': created_at,
+                'Atualizado': updated_at,
+                'Tempo Processamento': processing_time,
+                'Post ID': post_id,
+                'Permalink': permalink,
+                'Arquivo': media_filename
+            })
+        
+        # Converter para DataFrame
+        reels_df = pd.DataFrame(reels_data)
+        
+        # Mostrar tabela de reels
+        st.dataframe(reels_df, use_container_width=True)
+        
+        # Mostrar gráfico de status dos reels
+        st.subheader("Status dos Reels")
+        status_counts = {}
+        for job in reels_jobs:
+            status = job.get('status', 'unknown')
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        status_data = {
+            'Status': list(status_counts.keys()),
+            'Quantidade': list(status_counts.values())
+        }
+        
+        status_df = pd.DataFrame(status_data)
+        
+        colors = {
+            'completed': '#2ecc71',
+            'failed': '#e74c3c',
+            'processing': '#3498db',
+            'pending': '#95a5a6',
+            'rate_limited': '#f39c12',
+            'unknown': '#7f8c8d'
+        }
+        
+        fig = px.bar(status_df, x='Status', y='Quantidade', 
+                    title='Distribuição dos Status de Reels',
+                    color='Status',
+                    color_discrete_map=colors)
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+# Tab 3: Histórico de Jobs
+with tab3:
+    st.header("Histórico de Jobs")
+    
+    # Filtros
+    col1, col2 = st.columns(2)
+    with col1:
+        status_filter = st.multiselect(
+            'Filtrar por Status',
+            ['completed', 'failed', 'processing', 'pending', 'rate_limited'],
+            default=['completed', 'failed', 'processing', 'pending', 'rate_limited']
+        )
+    
+    with col2:
+        tipo_filter = st.multiselect(
+            'Filtrar por Tipo',
+            ['image', 'reel'],
+            default=['image', 'reel']
+        )
+    
+    # Obter histórico
+    history = InstagramSend.get_recent_posts(50)  # Aumentar limite para mostrar mais jobs
+    
+    # Aplicar filtros
+    filtered_jobs = [
+        job for job in history 
+        if job.get('status') in status_filter and job.get('content_type') in tipo_filter
+    ]
+    
+    if not filtered_jobs:
+        st.info("Nenhum job encontrado com os filtros aplicados.")
+    else:
+        # Preparar dados para tabela
+        job_data = []
+        for job in filtered_jobs:
+            job_id = job.get('id', 'N/A')
+            status = job.get('status', 'unknown')
+            content_type = job.get('content_type', 'unknown')
+            created_at = format_timestamp(job.get('created_at'))
+            
+            # Verificar resultado
+            result = job.get('result', {})
+            post_id = result.get('id', 'N/A') if result else 'N/A'
+            
+            # Verificar erro
+            error = job.get('error', 'N/A')
+            
+            job_data.append({
+                'Job ID': job_id[:8] + "...",
+                'Tipo': content_type.upper(),
+                'Status': status,
+                'Criado em': created_at,
+                'Post ID': post_id,
+                'Erro': error if error != 'N/A' else ''
+            })
+        
+        # Criar DataFrame
+        jobs_df = pd.DataFrame(job_data)
+        
+        # Mostrar tabela com todos os jobs filtrados
+        st.dataframe(jobs_df, use_container_width=True)
+        
+        # Gráfico de linha do tempo
+        st.subheader("Timeline de Jobs")
+        
+        # Preparar dados de timeline (últimos 20 jobs em ordem cronológica)
+        timeline_data = []
+        for idx, job in enumerate(filtered_jobs[:20]):
+            timeline_data.append({
+                'Índice': idx,
+                'Timestamp': job.get('created_at', 0),
+                'Status': job.get('status', 'unknown'),
+                'Tipo': job.get('content_type', 'unknown').upper()
+            })
+        
+        # Ordenar por timestamp
+        timeline_df = pd.DataFrame(timeline_data)
+        timeline_df = timeline_df.sort_values('Timestamp')
+        
+        # Converter timestamp para datetime formatado
+        timeline_df['Data/Hora'] = timeline_df['Timestamp'].apply(format_timestamp)
+        
+        # Plotar gráfico de linha do tempo
+        fig = px.scatter(timeline_df, x='Data/Hora', y='Tipo', color='Status',
+                        title='Histórico de Jobs ao Longo do Tempo',
+                        color_discrete_map={
+                            'completed': '#2ecc71',
+                            'failed': '#e74c3c',
+                            'processing': '#3498db',
+                            'pending': '#95a5a6',
+                            'rate_limited': '#f39c12'
+                        })
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+# Auto refresh
+if auto_refresh:
+    time.sleep(refresh_interval)
+    st.rerun()
