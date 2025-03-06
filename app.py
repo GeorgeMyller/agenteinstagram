@@ -60,22 +60,21 @@ def webhook():
             if msg.message_type == msg.TYPE_IMAGE:
                 image_path = ImageDecodeSaver.process(msg.image_base64)
                 carousel_images.append(image_path)
-                if len(carousel_images) >= MAX_CAROUSEL_IMAGES:
-                    # Atingiu o limite máximo de imagens, processar o carrossel
-                    try:
-                        job_id = InstagramSend.queue_carousel(carousel_images, caption="Carrossel de imagens")
-                        sender.send_text(number=msg.remote_jid, msg=f"Carrossel enfileirado com sucesso! ID do trabalho: {job_id}")
-                    except Exception as e:
-                        print(f"Erro ao enfileirar carrossel: {e}")
-                        sender.send_text(number=msg.remote_jid, msg=f"Erro ao enfileirar carrossel: {e}")
-                        return jsonify({"status": "error", "message": "Erro ao enfileirar carrossel"}), 500
-                    finally:
-                        is_carousel_mode = False  # Resetar o modo carrossel
-                        carousel_images = []
-                    
-                    return jsonify({"status": "Imagem adicionada ao carrossel, processando..."}), 200
-                else:
-                    return jsonify({"status": f"Imagem adicionada ao carrossel. {len(carousel_images)}/{MAX_CAROUSEL_IMAGES}"}), 200
+                return jsonify({"status": f"Imagem adicionada ao carrossel. {len(carousel_images)}/{MAX_CAROUSEL_IMAGES}"}), 200
+
+            elif texto and texto.lower() == "postar":
+                # Processar o carrossel quando receber a mensagem "postar"
+                try:
+                    job_id = InstagramSend.queue_carousel(carousel_images, caption="Carrossel de imagens")
+                    sender.send_text(number=msg.remote_jid, msg=f"Carrossel enfileirado com sucesso! ID do trabalho: {job_id}")
+                except Exception as e:
+                    print(f"Erro ao enfileirar carrossel: {e}")
+                    sender.send_text(number=msg.remote_jid, msg=f"Erro ao enfileirar carrossel: {e}")
+                    return jsonify({"status": "error", "message": "Erro ao enfileirar carrossel"}), 500
+                finally:
+                    is_carousel_mode = False  # Resetar o modo carrossel
+                    carousel_images = []
+                return jsonify({"status": "Carrossel processado e enfileirado"}), 200
 
             elif time.time() - carousel_start_time > CAROUSEL_TIMEOUT:
                 # Timeout, sair do modo carrossel
