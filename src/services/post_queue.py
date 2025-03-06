@@ -71,12 +71,12 @@ class PostQueue:
             self.worker_thread.join(timeout=5.0)
             logger.info("Worker de processamento encerrado")
     
-    def add_job(self, media_path, caption, inputs=None) -> str:
+    def add_job(self, media_paths, caption, inputs=None) -> str:
         """
         Adiciona um novo trabalho à fila
         
         Args:
-            media_path (str): Caminho do arquivo de mídia (imagem ou vídeo)
+            media_paths (list): Lista de caminhos dos arquivos de mídia (imagens ou vídeos)
             caption (str): Legenda do post
             inputs (dict): Configurações adicionais
             
@@ -86,12 +86,12 @@ class PostQueue:
         job_id = str(uuid.uuid4())
         
         # Verificar tipo de conteúdo
-        is_video = media_path.lower().endswith(('.mp4', '.mov', '.avi', '.wmv'))
-        content_type = "reel" if (inputs and inputs.get('content_type') == 'reel') or is_video else "image"
+        is_video = any(path.lower().endswith(('.mp4', '.mov', '.avi', '.wmv')) for path in media_paths)
+        content_type = "carrossel" if len(media_paths) > 1 else ("reel" if is_video else "image")
         
         job_data = {
             "id": job_id,
-            "media_path": media_path,
+            "media_paths": media_paths,
             "caption": caption,
             "inputs": inputs or {},
             "status": "pending",
@@ -113,8 +113,8 @@ class PostQueue:
             self.stats["total_jobs"] += 1
             if content_type == "reel":
                 self.stats["video_processing_jobs"] += 1
-            else:
-                self.stats["image_processing_jobs"] += 1
+            elif content_type == "carousel":
+                self.stats["image_processing_jobs"] += 1  # Considerar carrossel como imagem para estatísticas
         
         logger.info(f"Novo trabalho adicionado: {job_id} ({content_type})")
         return job_id
@@ -150,21 +150,28 @@ class PostQueue:
                     # Processar com base no tipo de conteúdo
                     try:
                         if job["content_type"] == "reel":
-                            logger.info(f"Processando vídeo para Reels: {job['media_path']}")
+                            logger.info(f"Processando vídeo para Reels: {job['media_paths'][0]}")
                             # Priorizar configurações específicas para otimizar vídeos
                             share_to_feed = True
                             if "share_to_feed" in job["inputs"]:
                                 share_to_feed = job["inputs"]["share_to_feed"]
                                 
                             result = InstagramSend.send_reels(
-                                job["media_path"], 
+                                job["media_paths"][0], 
+                                job["caption"],
+                                job["inputs"]
+                            )
+                        elif job["content_type"] == "carousel":
+                            logger.info(f"Processando carrossel: {job['media_paths']}")
+                            result = InstagramSend.send_carousel(
+                                job["media_paths"], 
                                 job["caption"],
                                 job["inputs"]
                             )
                         else:
                             # Imagem padrão
                             result = InstagramSend.send_instagram(
-                                job["media_path"], 
+                                job["media_paths"][0], 
                                 job["caption"],
                                 job["inputs"]
                             )
@@ -218,7 +225,8 @@ class PostQueue:
                     self._add_to_history(job_id)
                     
                     # Limpar mídia temporária após processamento 
-                    self._cleanup_media(job["media_path"])
+                    for media_path in job["media_paths"]:
+                        self._cleanup_media(media_path)
                     
                 finally:
                     # Marcar como concluído na fila

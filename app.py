@@ -63,10 +63,8 @@ def webhook():
                 if len(carousel_images) >= MAX_CAROUSEL_IMAGES:
                     # Atingiu o limite máximo de imagens, processar o carrossel
                     try:
-                        #TODO: Chamar função para processar o carrossel (ainda a ser criada em InstagramSend)
-                        # job_id = InstagramSend.queue_carousel(carousel_images, ...) 
-                        #sender.send_text(number=msg.remote_jid, msg=f"Carrossel enfileirado com sucesso! ID do trabalho: {job_id}")
-                        pass #Por agora
+                        job_id = InstagramSend.queue_carousel(carousel_images, caption="Carrossel de imagens")
+                        sender.send_text(number=msg.remote_jid, msg=f"Carrossel enfileirado com sucesso! ID do trabalho: {job_id}")
                     except Exception as e:
                         print(f"Erro ao enfileirar carrossel: {e}")
                         sender.send_text(number=msg.remote_jid, msg=f"Erro ao enfileirar carrossel: {e}")

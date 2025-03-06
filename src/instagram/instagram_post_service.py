@@ -1,6 +1,8 @@
 import os
 import time
 import json
+import random  # Added the missing import for jitter functionality
+import re  # Added the missing import for regex functionality
 import requests
 from dotenv import load_dotenv
 
@@ -20,9 +22,9 @@ class InstagramPostService:
         self.max_retries = 3
         self.base_delay = 5  # Base delay in seconds
         self.status_check_attempts = 5  # Number of status check attempts
-        self.status_check_delay = 10  # Delay between status checks in seconds
+        self.status_check_delay = 20  # Increased from 10 to 20 seconds
         self.permalink_check_attempts = 3  # Specific attempts for permalink
-        self.permalink_check_delay = 20  # Longer delay for permalink checks
+        self.permalink_check_delay = 30  # Increased from 20 to 30 seconds
         self.request_counter = 0
         self.rate_limit_threshold = 5
         self.rate_limit_delay = 60  # Default delay when hitting threshold
@@ -46,6 +48,33 @@ class InstagramPostService:
             'media_publish': {'counter': 0, 'limit': 30}
         }
         self.media_status_cache = {}
+        self.last_successful_request_time = 0
+        self.min_request_interval = 30  # Minimum 30 seconds between critical requests
+        self.known_rate_limits = {
+            'app': {'window_size': 3600, 'max_calls': 100},  # Example values
+            'account': {'window_size': 3600, 'max_calls': 60}
+        }
+        # Store limits for both app ID and account ID
+        self.id_rate_limits = {}  # Will store rate limit info for each ID found in headers
+        
+        # Container cache to avoid recreating containers
+        self.container_cache = {}
+        # Minimum wait time between ANY API calls to the same endpoint
+        self.min_api_call_spacing = {
+            'media': 120,      # 2 minutes between container creations (more conservative)
+            'media_publish': 300,  # 5 minutes between publish attempts (much more conservative)
+            'status_check': 30     # 30 seconds between status checks (less frequent polling)
+        }
+        self.last_api_call_time = {
+            'media': 0,
+            'media_publish': 0,
+            'status_check': 0
+        }
+        
+        self.retry_delay = 5
+        self.error_log = []
+        self._save_api_state()
+
 
     def _handle_error_response(self, response_data):
         """
@@ -90,7 +119,6 @@ class InstagramPostService:
             if 'minutes' in error_msg.lower():
                 try:
                     # Tentar extrair tempo de espera da mensagem
-                    import re
                     time_match = re.search(r'(\d+)\s*minutes?', error_msg.lower())
                     if time_match:
                         wait_time = int(time_match.group(1)) * 60
@@ -188,7 +216,13 @@ class InstagramPostService:
         for attempt in range(max_attempts):
             if attempt > 0:
                 print(f"Verificando status (tentativa {attempt + 1}/{max_attempts})...")
-                time.sleep(delay)
+                # Use progressive backoff - wait longer for later attempts
+                adjusted_delay = delay * (1 + (attempt * 0.5))
+                print(f"Aguardando {adjusted_delay:.1f}s antes da próxima verificação")
+                time.sleep(adjusted_delay)
+            
+            # Respect minimum API spacing for status checks
+            self._respect_api_spacing('status_check')
             
             # Endpoint para verificar o contêiner específico
             url = f'https://graph.facebook.com/v22.0/{media_id}'
@@ -311,42 +345,156 @@ class InstagramPostService:
                 try:
                     usage_data = json.loads(headers[header_name])
                     print(f"Processando {header_name}: {usage_data}")
+                    
+                    # Process specific rate limit data
+                    if header_name == 'x-app-usage':
+                        # Track overall app usage
+                        self._process_app_usage(usage_data)
+                    
+                    elif header_name == 'x-business-use-case-usage':
+                        # Track per-ID usage
+                        self._process_business_usage(usage_data)
+                    
+                    # Common processing for any wait times in headers
                     if 'estimated_time_to_regain_access' in usage_data:
                         wait_seconds = int(usage_data['estimated_time_to_regain_access'])
                         print(f"Header {header_name} indica espera de {wait_seconds}s")
-                        self.rate_limit_reset_time = time.time() + wait_seconds
-                        self.rate_limit_delay = wait_seconds
-                    print(f"Rate limit data from {header_name}:")
-                    
-                    if header_name == 'x-app-usage':
-                        self.rate_limit_headers['app_usage'] = usage_data
-                    else:
-                        self.rate_limit_headers['business_usage'] = usage_data
-                    
-                    # Check usage percentages
-                    for metric, value in usage_data.items():
-                        print(f"  {metric}: {value}")
-                        if isinstance(value, (int, float)) and value > self.usage_threshold:
-                            print(f"⚠️ Rate limit approaching critical level for {metric}: {value}%")
-                            
-                            # Dynamic delay calculation based on usage percentage
-                            if value > 90:  # Critical level
-                                wait_seconds = 900  # 15 minutes
-                            elif value > 80:  # High level
-                                wait_seconds = 300  # 5 minutes
-                            else:  # Moderate level
-                                wait_seconds = 60  # 1 minute
-                                
-                            print(f"Implementing rate limit backoff: {wait_seconds} seconds")
-                            self.rate_limit_delay = wait_seconds
+                        
+                        # If headers say wait=0 but we have rate limit error, use backoff
+                        if wait_seconds == 0 and self.app_level_backoff > 300:
+                            wait_seconds = self.app_level_backoff
+                            print(f"⚠️ Header mostra 0s mas temos erros de rate limit. Usando backoff: {wait_seconds}s")
+                        
+                        if wait_seconds > 0:
                             self.rate_limit_reset_time = time.time() + wait_seconds
+                            self.rate_limit_delay = wait_seconds
                             rate_limited = True
-                except json.JSONDecodeError:
-                    print(f"Could not parse {header_name} header: {headers[header_name]}")
+                    
                 except Exception as e:
                     print(f"Error processing {header_name} header: {str(e)}")
         
+        # After processing all headers, save state to persist rate limits
+        self._save_api_state()
+        
         return rate_limited
+
+    def _process_app_usage(self, usage_data):
+        """Process app-level usage data from x-app-usage header"""
+        # Store app usage metrics
+        self.rate_limit_headers['app_usage'] = usage_data
+        
+        # Calculate if we're approaching limits
+        approaching_limit = False
+        
+        for metric, value in usage_data.items():
+            if isinstance(value, (int, float)) and metric != 'estimated_time_to_regain_access':
+                print(f"  {metric}: {value}%")
+                # Store the percentage for this metric
+                if value > self.usage_threshold:
+                    approaching_limit = True
+                    print(f"⚠️ App usage approaching limit for {metric}: {value}%")
+        
+        # If we're approaching limits, adjust our backoff strategy
+        if approaching_limit:
+            new_backoff = max(self.app_level_backoff, 300)  # At least 5 minutes
+            highest_value = max([v for k, v in usage_data.items() 
+                               if isinstance(v, (int, float)) and k != 'estimated_time_to_regain_access'], 
+                              default=0)
+            
+            # Scale backoff based on highest usage percentage
+            if highest_value > 90:
+                new_backoff = 900  # 15 minutes
+            elif highest_value > 80:
+                new_backoff = 600  # 10 minutes
+            elif highest_value > 70:
+                new_backoff = 300  # 5 minutes
+            
+            self.app_level_backoff = new_backoff
+            print(f"Ajustando backoff global para {new_backoff}s devido ao uso elevado")
+
+    def _process_business_usage(self, usage_data):
+        """Process account-level usage data from x-business-use-case-usage header"""
+        self.rate_limit_headers['business_usage'] = usage_data
+        
+        # Process each ID separately (Facebook app ID and Instagram account ID)
+        for id_key, usage_list in usage_data.items():
+            print(f"  Processing usage for ID: {id_key}")
+            
+            # Initialize rate limit tracking for this ID if not exists
+            if id_key not in self.id_rate_limits:
+                self.id_rate_limits[id_key] = {
+                    'last_call_time': 0,
+                    'call_count': 0,
+                    'window_start': time.time(),
+                    'backoff_until': 0
+                }
+            
+            # Process all usages for this ID
+            if isinstance(usage_list, list):
+                for usage in usage_list:
+                    # Check if this usage contains estimated time
+                    if isinstance(usage, dict):
+                        if 'estimated_time_to_regain_access' in usage and usage['estimated_time_to_regain_access'] > 0:
+                            wait_time = int(usage['estimated_time_to_regain_access'])
+                            print(f"  ID {id_key} needs to wait {wait_time}s")
+                            self.id_rate_limits[id_key]['backoff_until'] = time.time() + wait_time
+                        
+                        # Check other metrics for this ID
+                        highest_metric = 0
+                        for metric, value in usage.items():
+                            if isinstance(value, (int, float)) and metric != 'estimated_time_to_regain_access':
+                                print(f"  {id_key} - {metric}: {value}%")
+                                highest_metric = max(highest_metric, value)
+                        
+                        # If any metric is high, set backoff for this specific ID
+                        if highest_metric > self.usage_threshold:
+                            backoff_time = 0
+                            if highest_metric > 90:
+                                backoff_time = 900  # 15 minutes
+                            elif highest_metric > 80:
+                                backoff_time = 300  # 5 minutes
+                            else:
+                                backoff_time = 60  # 1 minute
+                            
+                            current_backoff = self.id_rate_limits[id_key].get('backoff_until', 0) - time.time()
+                            if current_backoff < backoff_time:
+                                print(f"  Setting backoff for ID {id_key}: {backoff_time}s due to high usage")
+                                self.id_rate_limits[id_key]['backoff_until'] = time.time() + backoff_time
+                    
+                    # Increment call count for rate limiting purposes
+                    self.id_rate_limits[id_key]['call_count'] += 1
+                    self.id_rate_limits[id_key]['last_call_time'] = time.time()
+
+    def _check_id_rate_limits(self):
+        """Check if any ID has reached its rate limit"""
+        current_time = time.time()
+        wait_time = 0
+        
+        for id_key, limits in self.id_rate_limits.items():
+            # Check if we need to wait due to backoff
+            if limits.get('backoff_until', 0) > current_time:
+                id_wait = limits['backoff_until'] - current_time
+                print(f"ID {id_key} em backoff por mais {int(id_wait)}s")
+                wait_time = max(wait_time, id_wait)
+            
+            # Check window-based rate limits
+            window_size = self.known_rate_limits.get('account' if id_key == self.instagram_account_id else 'app', {}).get('window_size', 3600)
+            window_start = limits.get('window_start', 0)
+            
+            # Reset window if needed
+            if current_time - window_start > window_size:
+                limits['window_start'] = current_time
+                limits['call_count'] = 0
+            
+            # Check call count against max allowed
+            max_calls = self.known_rate_limits.get('account' if id_key == self.instagram_account_id else 'app', {}).get('max_calls', 60)
+            if limits.get('call_count', 0) >= max_calls:
+                window_wait = window_size - (current_time - window_start)
+                if window_wait > 0:
+                    print(f"ID {id_key} atingiu o limite de chamadas ({max_calls}). Aguardando {int(window_wait)}s")
+                    wait_time = max(wait_time, window_wait)
+        
+        return wait_time
 
     def _rate_limit_check(self):
         """
@@ -370,11 +518,32 @@ class InstagramPostService:
             time.sleep(self.rate_limit_delay)
             self.request_counter = 0
 
+    def _forced_rate_limit_backoff(self):
+        """
+        Force backoff between critical API calls regardless of headers
+        """
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_successful_request_time
+        
+        if time_since_last_request < self.min_request_interval:
+            wait_time = self.min_request_interval - time_since_last_request
+            print(f"Aplicando backoff forçado de {wait_time:.1f}s entre requisições críticas")
+            time.sleep(wait_time)
+        
+        self.last_successful_request_time = current_time
+
     def _make_request_with_retry(self, method, url, payload):
         """
         Make API request with exponential backoff retry logic and rate limit handling
         """
-        self._rate_limit_check() # Keep the basic check
+        # First check basic rate limit (old implementation)
+        self._rate_limit_check()
+        
+        # Then check ID-specific rate limits (new implementation)
+        id_wait_time = self._check_id_rate_limits()
+        if id_wait_time > 0:
+            print(f"Aguardando {int(id_wait_time)}s devido a limites de ID específicos")
+            time.sleep(id_wait_time)
 
         last_error = None
         response_data = None
@@ -498,32 +667,68 @@ class InstagramPostService:
         return response_data
 
     def _load_api_state(self):
+        """Load extended rate limit state"""
         try:
             with open(self.state_file, 'r') as f:
                 state = json.load(f)
                 self.rate_limit_reset_time = state.get('rate_limit_reset_time', 0)
                 self.rate_limit_multiplier = state.get('rate_limit_multiplier', 1)
                 self.app_level_backoff = state.get('app_level_backoff', 300)
+                
+                # Load ID-specific rate limits
+                self.id_rate_limits = state.get('id_rate_limits', {})
+                
+                # Reset if last error was too long ago
                 last_error_time = state.get('last_error_time', 0)
                 if time.time() - last_error_time > 3600:
-                    self.app_level_backoff = 300  # Reset se o último erro foi há mais de 1 hora
+                    print("Resetando limites de taxa pois o último erro foi há mais de 1 hora")
+                    self.app_level_backoff = 300
+                    self.id_rate_limits = {}
         except:
             pass
 
     def _save_api_state(self):
+        """Save extended rate limit state"""
         state = {
             'rate_limit_reset_time': self.rate_limit_reset_time,
             'rate_limit_multiplier': self.rate_limit_multiplier,
             'app_level_backoff': self.app_level_backoff,
-            'last_error_time': time.time()
+            'last_error_time': time.time(),
+            'id_rate_limits': self.id_rate_limits  # Save ID-specific limits
         }
         with open(self.state_file, 'w') as f:
             json.dump(state, f)
+
+    def _respect_api_spacing(self, endpoint_type):
+        """Ensure minimum spacing between API calls to the same endpoint"""
+        current_time = time.time()
+        last_call = self.last_api_call_time.get(endpoint_type, 0)
+        min_spacing = self.min_api_call_spacing.get(endpoint_type, 10)
+        
+        if last_call > 0:
+            elapsed = current_time - last_call
+            if elapsed < min_spacing:
+                wait_time = min_spacing - elapsed
+                print(f"Respeitando intervalo mínimo para {endpoint_type}. Aguardando {wait_time:.1f}s...")
+                time.sleep(wait_time)
+        
+        # Update last call time
+        self.last_api_call_time[endpoint_type] = time.time()
 
     def create_media_container(self, image_url, caption):
         """
         Cria um contêiner de mídia para o post com retry logic.
         """
+        # Check container cache first
+        cache_key = f"{image_url}:{caption[:50]}"  # Use URL and start of caption as key
+        if cache_key in self.container_cache and time.time() - self.container_cache[cache_key]['timestamp'] < 3600:
+            container_id = self.container_cache[cache_key]['id']
+            print(f"Reusing cached container ID: {container_id} (created within the last hour)")
+            return container_id
+            
+        # Respect minimum spacing between container creation calls
+        self._respect_api_spacing('media')
+        
         url = f'{self.base_url}/media'
         payload = {
             'image_url': image_url,
@@ -535,6 +740,13 @@ class InstagramPostService:
         if response_data and 'id' in response_data:
             container_id = response_data['id']
             print(f"Container de mídia criado com ID: {container_id}")
+            
+            # Cache the container ID
+            self.container_cache[cache_key] = {
+                'id': container_id,
+                'timestamp': time.time()
+            }
+            
             return container_id
         return None
 
@@ -542,19 +754,38 @@ class InstagramPostService:
         """
         Publica o contêiner de mídia no Instagram com retry logic.
         """
-        # Pre-check for rate limits before attempting publish
+        # Respect minimum spacing between publish calls
+        self._respect_api_spacing('media_publish')
+        
+        # Apply forced backoff between container creation and publishing
+        self._forced_rate_limit_backoff()
+        
+        # Much longer wait before publishing in high backoff scenarios
         if self.app_level_backoff > 300:
-            print(f"Nível de backoff alto detectado ({self.app_level_backoff}s). Pulando chamada API e verificando direto.")
-            # Skip API call, go straight to verification
-            success, permalink = self._verify_media_status(
-                media_container_id, 
-                max_attempts=10,  # Increased attempts
-                delay=30,         # Longer delay between attempts
-                check_permalink=True
-            )
-            if success:
-                print("Publicação confirmada através de verificação direta!")
-                return media_container_id
+            # Calculate a progressive delay based on backoff level
+            extra_wait = min(900, self.app_level_backoff * 0.75)  # Up to 15 minutes
+            print(f"Modo de backoff progressivo: aguardando {extra_wait:.1f}s adicionais antes da publicação")
+            time.sleep(extra_wait)
+        
+        # Extended pre-check with more attempts and longer delays
+        if self.app_level_backoff > 300:
+            print(f"Nível de backoff alto: verificando se o container já está publicado")
+            # Try verification before making a new API call
+            for i in range(5):  # Increased from 3 to 5 attempts
+                wait_before_check = 45 * (i + 1)  # Progressive wait: 45s, 90s, 135s, 180s, 225s
+                print(f"Aguardando {wait_before_check}s antes da verificação {i+1}/5...")
+                time.sleep(wait_before_check)
+                
+                print(f"Tentativa de verificação direta {i+1}/5...")
+                success, permalink = self._verify_media_status(
+                    media_container_id, 
+                    max_attempts=3,
+                    delay=30,  # Increased delay between checks
+                    check_permalink=False
+                )
+                if success:
+                    print("Publicação já confirmada! Evitando chamada API adicional.")
+                    return media_container_id
         
         # Continue with normal flow if pre-check doesn't verify
         endpoint = f'{self.base_url}/media_publish'
@@ -642,12 +873,26 @@ class InstagramPostService:
             print("Falha na criação do contêiner de mídia.")
             return None
 
-        # Increased delay between creation and publishing to avoid rate limits
-        print("Aguardando estabilização do container (15 segundos)...")
-        time.sleep(15)  # Increased from 10 to 15 seconds
+        # Significantly longer delay between creation and publishing (3 minutes)
+        base_delay = 180  # Increased from 15s to 180s
+        if self.app_level_backoff > 300:
+            base_delay = 300  # Increased from 45s to 300s when in backoff mode
+        
+        print(f"Aguardando estabilização do container ({base_delay} segundos)...")
+        time.sleep(base_delay)
+
+        # Sleep for a random short time to avoid pattern detection
+        jitter = random.uniform(1, 5)
+        time.sleep(jitter)
 
         post_id = self.publish_media(media_container_id)
         if post_id:
+            # Reset backoff after successful posting
+            if self.app_level_backoff > 300:
+                print("Publicação bem-sucedida, reduzindo nível de backoff")
+                self.app_level_backoff = max(300, self.app_level_backoff / 2)
+                self._save_api_state()
+            
             print(f"Processo concluído com sucesso! ID do Post: {post_id}")
             return post_id
         

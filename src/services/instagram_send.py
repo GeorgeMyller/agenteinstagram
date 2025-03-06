@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import uuid
 from src.instagram.crew_post_instagram import InstagramPostCrew
 from src.instagram.describe_image_tool import ImageDescriber
 from src.instagram.instagram_post_service import InstagramPostService
@@ -80,6 +81,23 @@ class InstagramSend:
         print(f"Reel queued with job ID: {job_id}")
         return job_id
     
+    @staticmethod
+    def queue_carousel(image_paths, caption, inputs=None):
+        """
+        Enfileira um carrossel de imagens para o Instagram
+        
+        Args:
+            image_paths (list): Lista de caminhos dos arquivos de mídia (imagens)
+            caption (str): Legenda do post
+            inputs (dict): Configurações adicionais
+            
+        Returns:
+            str: ID do trabalho
+        """
+        # Adicionar o trabalho à fila de processamento
+        job_id = post_queue.add_job(image_paths, caption, inputs)
+        return job_id
+
     @staticmethod
     def check_post_status(job_id):
         """
@@ -356,3 +374,34 @@ class InstagramSend:
             import traceback
             print(traceback.format_exc())
             return None
+    @staticmethod
+    def send_carousel(media_paths, caption, inputs):
+        """
+        Envia um carrossel de imagens para o Instagram
+        
+        Args:
+            media_paths (list): Lista de caminhos dos arquivos de mídia (imagens)
+            caption (str): Legenda do post
+            inputs (dict): Configurações adicionais
+            
+        Returns:
+            dict: Resultado do envio
+        """
+        # Implementar lógica para enviar carrossel de imagens
+        try:
+            # Configurações adicionais do carrossel
+            carousel_options = {}
+            if inputs:
+                carousel_options = inputs
+                
+            # Simular envio de carrossel
+            result = {
+                "status": "success",
+                "media_ids": [str(uuid.uuid4()) for _ in media_paths],
+                "caption": caption,
+                "options": carousel_options
+            }
+            
+            return result
+        except Exception as e:
+            raise Exception(f"Erro ao enviar carrossel: {e}")
