@@ -1,5 +1,6 @@
 from src.services.message import Message
 from src.utils.image_decode_save import ImageDecodeSaver
+from src.utils.video_decode_save import VideoDecodeSaver  # Added import for video processing
 from src.services.instagram_send import InstagramSend
 from src.instagram.instagram_reels_publisher import ReelsPublisher  # Importe a classe ReelsPublisher
 from flask import Flask, request, jsonify
