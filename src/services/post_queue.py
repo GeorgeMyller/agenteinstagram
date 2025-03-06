@@ -27,7 +27,7 @@ class PostStatus(Enum):
 
 class PostQueue:
     """
-    Queue system for processing Instagram posts asynchronously
+    Queue system for processing Instagram posts asynchronously with support for multiple content types
     """
     
     def __init__(self, max_workers=2, poll_interval=5):
@@ -80,29 +80,27 @@ class PostQueue:
         self.workers = []
         print("Post queue stopped")
     
-    def add_job(self, image_path: str, caption: str, inputs: Optional[Dict] = None) -> str:
-        """
-        Add a new job to the queue
-        
-        Args:
-            image_path: Path to the image file
-            caption: Caption text
-            inputs: Additional configuration
-            
-        Returns:
-            job_id: Unique identifier for tracking the job
-        """
-        # Check if content violates policy
-        if self._check_content_policy(image_path, caption):
-            raise ContentPolicyViolation("O conteúdo viola as diretrizes do Instagram")
-        
-        # Generate a unique job ID
+    def add_job(self, media_path: str, caption: str, inputs: Optional[Dict] = None) -> str:
+        """Add a new job to the queue"""
         job_id = str(uuid.uuid4())
         
-        # Create job data
+        # Determine job type based on inputs and file extension
+        job_type = "image"  # default type
+        if inputs and "content_type" in inputs:
+            job_type = inputs["content_type"]
+        else:
+            # Try to determine type from file extension
+            ext = os.path.splitext(media_path)[1].lower()
+            if ext in ['.mp4', '.mov', '.avi']:
+                job_type = "video"
+            elif isinstance(media_path, list):
+                job_type = "carousel"
+        
+        # Create job object
         job = {
             "id": job_id,
-            "image_path": image_path,
+            "type": job_type,
+            "media_path": media_path,
             "caption": caption,
             "inputs": inputs or {},
             "status": PostStatus.QUEUED.value,
@@ -121,7 +119,7 @@ class PostQueue:
         # Add to queue
         self.queue.put(job_id)
         
-        print(f"Job added to queue: {job_id}")
+        print(f"Job added to queue: {job_id} (type: {job_type})")
         return job_id
     
     def get_job_status(self, job_id: str) -> Dict:
@@ -173,14 +171,13 @@ class PostQueue:
             return self.history[:limit]
     
     def _worker_thread(self):
-        """Worker thread that processes jobs from the queue"""
+        """Worker thread that processes jobs from the queue with support for multiple content types"""
         while self.running:
             try:
                 # Get a job from the queue with timeout
                 try:
                     job_id = self.queue.get(timeout=1.0)
                 except Exception:
-                    # Timeout, no jobs available
                     continue
                 
                 # Get job details
@@ -200,24 +197,37 @@ class PostQueue:
                     # Import here to avoid circular imports
                     from src.services.instagram_send import InstagramSend
                     
-                    # Process the post
-                    result = InstagramSend.send_instagram(
-                        job["image_path"], 
-                        job["caption"], 
-                        job["inputs"]
-                    )
+                    # Process based on job type
+                    result = None
+                    if job["type"] == "image":
+                        result = InstagramSend.send_instagram(
+                            job["media_path"], 
+                            job["caption"], 
+                            job["inputs"]
+                        )
+                    elif job["type"] == "video":
+                        result = InstagramSend.send_reels(
+                            job["media_path"],
+                            job["caption"],
+                            job["inputs"]
+                        )
+                    elif job["type"] == "carousel":
+                        # TODO: Implement carousel handling
+                        result = None
+                        raise NotImplementedError("Carousel posting not yet implemented")
+                    else:
+                        raise ValueError(f"Unknown job type: {job['type']}")
                     
-                    # Update job with success
+                    # Update job with success/failure
                     with self.lock:
                         if job_id in self.jobs:
-                            job = self.jobs[job_id]
                             if result:
                                 job["status"] = PostStatus.COMPLETED.value
                                 job["result"] = result
                                 self.successful_posts += 1
                             else:
                                 job["status"] = PostStatus.FAILED.value
-                                job["error"] = "Failed to post image, but no specific error was returned"
+                                job["error"] = f"Failed to post {job['type']}, but no specific error was returned"
                                 self.failed_posts += 1
                             
                             job["completed_at"] = datetime.now().isoformat()
@@ -230,7 +240,7 @@ class PostQueue:
                             self.jobs[job_id]["error"] = str(e)
                             self.jobs[job_id]["updated_at"] = datetime.now().isoformat()
                             self.rate_limited_posts += 1
-                            
+                    
                     # Requeue with delay
                     threading.Timer(300, lambda: self.queue.put(job_id)).start()
                     
@@ -245,7 +255,7 @@ class PostQueue:
                             
                             # Move to history
                             self._move_to_history(job_id)
-                    
+                
                 except Exception as e:
                     with self.lock:
                         if job_id in self.jobs:

@@ -19,5 +19,6 @@ dependencies = [
     "python-dotenv",
     "psutil>=7.0.0",
     "moviepy>=1.0.3",
+    "urllib3>=2.3.0",
 ]
     

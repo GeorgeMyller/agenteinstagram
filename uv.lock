@@ -25,6 +25,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "streamlit" },
+    { name = "urllib3" },
 ]
 
 [package.metadata]
@@ -43,6 +44,7 @@ requires-dist = [
     { name = "python-dotenv" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "streamlit", specifier = ">=1.32.0" },
+    { name = "urllib3", specifier = ">=2.3.0" },
 ]
 
 [[package]]

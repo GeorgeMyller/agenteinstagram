@@ -72,7 +72,8 @@ class InstagramSend:
             
         inputs["content_type"] = "reel"
         inputs["video_path"] = video_path
-            
+        
+        print(f"Caption in queue_reels: {caption}")  # Debug statement
         # Add to queue and return job ID - using the same queue system for now
         # The worker will need to check the content_type to handle differently
         job_id = post_queue.add_job(video_path, caption, inputs)
@@ -303,3 +304,55 @@ class InstagramSend:
                 print(f"Erro ao limpar arquivos temporários: {str(cleanup_error)}")
         
         return result
+
+    @staticmethod
+    def send_reels(video_path, caption, inputs=None):
+        """
+        Send a video to Instagram as a Reel
+        
+        Args:
+            video_path (str): Path to the video file
+            caption (str): Caption text
+            inputs (dict): Optional configuration for post generation
+            
+        Returns:
+            dict: Result information including post ID and URL
+        """
+        # Import here to avoid circular imports
+        from src.instagram.instagram_reels_publisher import ReelsPublisher
+
+        try:
+            # Initialize publisher
+            publisher = ReelsPublisher()
+            
+            # Process hashtags if provided in inputs
+            hashtags = None
+            if inputs and 'hashtags' in inputs:
+                hashtags = inputs['hashtags']
+
+            # Set share to feed option
+            share_to_feed = True
+            if inputs and 'share_to_feed' in inputs:
+                share_to_feed = inputs['share_to_feed']
+
+            # Upload and publish the reel
+            result = publisher.upload_local_video_to_reels(
+                video_path=video_path,
+                caption=caption,
+                hashtags=hashtags,
+                optimize=True,  # Always optimize video for best results
+                share_to_feed=share_to_feed
+            )
+
+            if not result:
+                print(f"Failed to publish reel from {video_path}")
+                return None
+
+            print(f"Reel published successfully. ID: {result.get('id')}")
+            return result
+
+        except Exception as e:
+            print(f"Error publishing reel: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return None

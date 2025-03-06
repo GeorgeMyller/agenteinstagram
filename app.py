@@ -117,7 +117,7 @@ def webhook():
                 # 1. Decodificar e salvar o vídeo
                 video_path = VideoDecodeSaver.process(msg.video_base64, msg.video_mimetype, directory='temp_videos')
                 caption = msg.video_caption if msg.video_caption else ""
-
+                print(f"Caption received: {caption}")  # Debug statement
                 # 2. Enfileirar a postagem do Reels
                 job_id = InstagramSend.queue_reels(video_path, caption)  # Ainda precisa ser implementado
                 sender.send_text(number=msg.remote_jid, msg=f"Reels enfileirado com sucesso! ID do trabalho: {job_id}")
