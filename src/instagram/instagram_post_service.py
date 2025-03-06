@@ -43,13 +43,14 @@ class InstagramPostService:
         Handle different types of Instagram API errors
         """
         if 'error' not in response_data:
-            return False, "Unknown error occurred"
+            return False, 0, "Unknown error occurred"
 
         error = response_data['error']
         error_code = error.get('code')
         error_subcode = error.get('error_subcode')
         error_msg = error.get('message', 'Unknown error')
         error_type = error.get('type', 'Unknown')
+        fb_trace_id = error.get('fbtrace_id', 'N/A')
         
         # Log detailed error information
         print(f"API Error Details:")
@@ -57,6 +58,53 @@ class InstagramPostService:
         print(f"  Subcode: {error_subcode}")
         print(f"  Type: {error_type}")
         print(f"  Message: {error_msg}")
+        print(f"  Trace ID: {fb_trace_id}")
+        
+        # Erros de autenticação (190, 104, etc)
+        if error_code in [190, 104]:
+            error_msg += "\n\nErro de autenticação. Ações recomendadas:"
+            error_msg += "\n1. Verifique se o token não expirou"
+            error_msg += "\n2. Gere um novo token de acesso"
+            error_msg += "\n3. Confirme se o token tem as permissões necessárias"
+            return False, 0, error_msg
+        
+        # Erros de permissão (200, 10, 803)
+        elif error_code in [200, 10, 803]:
+            error_msg += "\n\nErro de permissão. Ações recomendadas:"
+            error_msg += "\n1. Verifique se a conta é Business/Creator"
+            error_msg += "\n2. Confirme as permissões do app no Facebook Developer"
+            return False, 0, error_msg
+        
+        # Erros de limite de taxa (4, 17, 32, 613)
+        elif error_code in [4, 17, 32, 613]:
+            wait_time = 300  # 5 minutos padrão
+            if 'minutes' in error_msg.lower():
+                try:
+                    # Tentar extrair tempo de espera da mensagem
+                    import re
+                    time_match = re.search(r'(\d+)\s*minutes?', error_msg.lower())
+                    if time_match:
+                        wait_time = int(time_match.group(1)) * 60
+                except:
+                    pass
+            error_msg += f"\n\nLimite de taxa atingido. Aguardando {wait_time/60:.0f} minutos."
+            return True, wait_time, error_msg
+        
+        # Erros de formato de mídia (2207026)
+        elif error_code == 2207026:
+            error_msg += "\n\nErro no formato da mídia. Requisitos para Reels:"
+            error_msg += "\n- Formato: MP4/MOV"
+            error_msg += "\n- Codec Vídeo: H.264"
+            error_msg += "\n- Codec Áudio: AAC"
+            error_msg += "\n- Resolução: Mínimo 500x500, recomendado 1080x1920"
+            error_msg += "\n- Duração: 3-90 segundos"
+            error_msg += "\n- Tamanho: Máximo 100MB"
+            return False, 0, error_msg
+        
+        # Erros de servidor (1, 2, 500, etc)
+        elif error_code in [1, 2] or error_type == 'OAuthException':
+            error_msg += "\n\nErro temporário do servidor. Tentando novamente..."
+            return True, 30, error_msg
         
         # Handle specific error codes
         
@@ -66,33 +114,33 @@ class InstagramPostService:
             # Increase rate limit delay for more severe backoff
             self.rate_limit_delay = 300  # 5 minutes
             self.rate_limit_reset_time = time.time() + self.rate_limit_delay
-            return True, f"Rate limit exceeded: {error_msg}"
+            return True, self.rate_limit_delay, f"Rate limit exceeded: {error_msg}"
             
         # Fatal error (code -1, subcode 2207001)
         if error_code == -1 and error_subcode == 2207001:
             print("Erro fatal da API detectado. Pode ser necessário verificar o container de mídia.")
             # Try with a longer delay, but mark as retriable
             self.rate_limit_delay = 600  # 10 minutes
-            return True, f"Fatal API error: {error_msg}"
+            return True, self.rate_limit_delay, f"Fatal API error: {error_msg}"
         
         # Handle specific permalink error
         if error_code == 100 and "nonexisting field (permalink)" in error_msg:
             print("Permalink ainda não está disponível (ShadowIGMediaBuilder). Isso é normal após criação recente.")
-            return True, "Permalink not available yet"
+            return True, 20, "Permalink not available yet"
             
         # These error codes often occur even when the post succeeds
         temporary_error_codes = [1, 2, 4, 24, 32, 33]  # Added more error codes
         instagram_business_error = 10  # Specific error for business accounts
         
         if error_code in temporary_error_codes:  
-            return True, f"Temporary API error: {error_msg}"
+            return True, 30, f"Temporary API error: {error_msg}"
         elif error_code == 190:  # Invalid access token
-            return False, "Invalid access token"
+            return False, 0, "Invalid access token"
         elif error_code == instagram_business_error:
-            return False, "Configuração de conta business necessária"
+            return False, 0, "Configuração de conta business necessária"
         
         # For any other error, we'll retry but note it as potentially non-fatal
-        return True, f"{error_msg}"
+        return True, 30, f"{error_msg}"
 
     def _verify_media_status(self, media_id, max_attempts=None, delay=None, check_permalink=True):
         """
@@ -370,11 +418,12 @@ class InstagramPostService:
                 # --- End Rate Limiting Header Handling ---
 
                 if 'error' in response_data:
-                    should_retry, error_msg = self._handle_error_response(response_data)
+                    should_retry, retry_delay, error_msg = self._handle_error_response(response_data)
                     last_error = error_msg
 
                     if should_retry and attempt < self.max_retries - 1:
                         delay = self.base_delay * (2 ** attempt)
+                        delay = max(delay, retry_delay)
                         print(f"Tentativa {attempt + 1} falhou. Tentando novamente em {delay} segundos...")
                         time.sleep(delay)
                         continue
@@ -419,68 +468,81 @@ class InstagramPostService:
         """
         Publica o contêiner de mídia no Instagram com retry logic.
         """
-        url = f'{self.base_url}/media_publish'
-        payload = {
+        endpoint = f'{self.base_url}/media_publish'
+        params = {
             'creation_id': media_container_id,
             'access_token': self.access_token
         }
-
-        print(f"Media Container ID: {media_container_id}")  # Log crítico
-        print("Enviando requisição de publicação...")
-        response_data = self._make_request_with_retry(requests.post, url, payload)
         
-        # Verificar se temos uma resposta positiva com ID
-        post_id = None
-        if response_data and 'id' in response_data:
-            post_id = response_data['id']
-            print(f"Publicação iniciada com ID: {post_id}")
-        else:
-            print("Não recebemos ID na resposta da publicação. Usando container ID para verificação.")
-            post_id = media_container_id
-            
-        # Aumentar tempo de espera inicial para 40 segundos
-        print("Aguardando processamento inicial (40 segundos)...")
-        time.sleep(40)
+        max_retries = 3
+        retry_delay = 10
         
-        # Fase 1: Verificar apenas status básico (sem permalink)
-        print("Verificando status básico da publicação...")
-        success, _ = self._verify_media_status(
-            post_id,
-            max_attempts=8,
-            delay=15,
-            check_permalink=False  # Não verificar permalink ainda
-        )
-        
-        if not success:
-            # Tente com o container ID se o post_id falhar
-            if post_id != media_container_id:
-                print("Tentando verificar com o container ID original...")
+        for attempt in range(max_retries):
+            try:
+                print(f"Media Container ID: {media_container_id}")  # Log crítico
+                print("Enviando requisição de publicação...")
+                response_data = self._make_request_with_retry(requests.post, endpoint, params)
+                
+                # Verificar se temos uma resposta positiva com ID
+                post_id = None
+                if response_data and 'id' in response_data:
+                    post_id = response_data['id']
+                    print(f"Publicação iniciada com ID: {post_id}")
+                else:
+                    print("Não recebemos ID na resposta da publicação. Usando container ID para verificação.")
+                    post_id = media_container_id
+                
+                # Aumentar tempo de espera inicial para 40 segundos
+                print("Aguardando processamento inicial (40 segundos)...")
+                time.sleep(40)
+                
+                # Fase 1: Verificar apenas status básico (sem permalink)
+                print("Verificando status básico da publicação...")
                 success, _ = self._verify_media_status(
-                    media_container_id,
-                    max_attempts=5,
+                    post_id,
+                    max_attempts=8,
                     delay=15,
-                    check_permalink=False
+                    check_permalink=False  # Não verificar permalink ainda
                 )
+                
+                if not success:
+                    # Tente com o container ID se o post_id falhar
+                    if post_id != media_container_id:
+                        print("Tentando verificar com o container ID original...")
+                        success, _ = self._verify_media_status(
+                            media_container_id,
+                            max_attempts=5,
+                            delay=15,
+                            check_permalink=False
+                        )
+                    
+                    if not success:
+                        print("Não foi possível confirmar publicação após verificação do status.")
+                        return None
+                
+                # Fase 2: Apenas se o status for bem-sucedido, tente obter permalink
+                print("Publicação confirmada! Tentando obter permalink...")
+                success, permalink = self._verify_media_status(
+                    post_id,
+                    max_attempts=2,  # Menos tentativas para verificação básica
+                    delay=20,
+                    check_permalink=True  # Agora sim, verificar permalink
+                )
+                
+                if permalink:
+                    print(f"Link da publicação: {permalink}")
+                else:
+                    print("Publicação bem-sucedida, mas permalink não disponível.")
+                
+                return post_id
             
-            if not success:
-                print("Não foi possível confirmar publicação após verificação do status.")
-                return None
+            except Exception as e:
+                print(f"Erro na publicação (tentativa {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (2 ** attempt))
         
-        # Fase 2: Apenas se o status for bem-sucedido, tente obter permalink
-        print("Publicação confirmada! Tentando obter permalink...")
-        success, permalink = self._verify_media_status(
-            post_id,
-            max_attempts=2,  # Menos tentativas para verificação básica
-            delay=20,
-            check_permalink=True  # Agora sim, verificar permalink
-        )
-        
-        if permalink:
-            print(f"Link da publicação: {permalink}")
-        else:
-            print("Publicação bem-sucedida, mas permalink não disponível.")
-        
-        return post_id
+        print("Todas as tentativas de publicação falharam")
+        return None
 
     def post_image(self, image_url, caption):
         """

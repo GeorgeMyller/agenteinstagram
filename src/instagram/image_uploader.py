@@ -32,6 +32,7 @@ class ImageUploader():
             raise ValueError("As credenciais do Imgur não foram configuradas corretamente.")
 
         self.client = ImgurClient(self.client_id, self.client_secret)
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     def _validate_response(self, response):
         """
@@ -54,27 +55,44 @@ class ImageUploader():
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"O arquivo especificado não foi encontrado: {image_path}")
 
-        try:
-            uploaded_image = self.client.upload_from_path(image_path, config=None, anon=True)
-            
-            # Validar resposta
-            self._validate_response(uploaded_image)
-            
-            # Log do deletehash para debug
-            print(f"Upload bem sucedido. ID: {uploaded_image['id']}, Deletehash: {uploaded_image['deletehash']}")
-            
-            return {
-                "id": uploaded_image["id"],
-                "url": uploaded_image["link"],
-                "deletehash": uploaded_image["deletehash"],
-                "image_path": image_path
-            }
-        except ImgurClientError as e:
-            print(f"Erro do cliente Imgur durante upload: {str(e)}")
-            raise
-        except Exception as e:
-            print(f"Erro inesperado durante upload: {str(e)}")
-            raise
+        retry_count = 0
+        while retry_count < self.max_retries:
+            try:
+                uploaded_image = self.client.upload_from_path(image_path, config=None, anon=True)
+                
+                # Validar resposta
+                self._validate_response(uploaded_image)
+                
+                # Log do deletehash para debug
+                self.logger.info(f"Upload bem sucedido. ID: {uploaded_image['id']}, Deletehash: {uploaded_image['deletehash']}")
+                
+                return {
+                    "id": uploaded_image["id"],
+                    "url": uploaded_image["link"],
+                    "deletehash": uploaded_image["deletehash"],
+                    "image_path": image_path
+                }
+            except ImgurClientError as e:
+                self.logger.warning(f"Erro do cliente Imgur durante upload (tentativa {retry_count + 1}/{self.max_retries}): {str(e)}")
+                retry_count += 1
+                if retry_count < self.max_retries:
+                    self.logger.info(f"Tentando novamente em {self.retry_delay} segundos...")
+                    time.sleep(self.retry_delay * retry_count)  # Exponential backoff
+                else:
+                    self.logger.error(f"Falha após {self.max_retries} tentativas. Último erro: {e}")
+                    raise
+            except Exception as e:
+                self.logger.error(f"Erro inesperado durante upload (tentativa {retry_count + 1}/{self.max_retries}): {str(e)}")
+                retry_count += 1
+                if retry_count < self.max_retries:
+                    self.logger.info(f"Tentando novamente em {self.retry_delay} segundos...")
+                    time.sleep(self.retry_delay * retry_count)  # Exponential backoff
+                else:
+                    self.logger.error(f"Falha após {self.max_retries} tentativas. Último erro: {e}")
+                    raise
+
+        self.logger.error("Limite de tentativas excedido.")
+        return None
 
     def upload_from_base64(self, image_base64: str) -> dict:
         """
@@ -94,7 +112,7 @@ class ImageUploader():
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_image:
                 image.save(temp_image.name, format="PNG", optimize=False)
                 temp_image_path = temp_image.name
-                print(f"Imagem temporária salva em: {temp_image_path}")
+                self.logger.info(f"Imagem temporária salva em: {temp_image_path}")
 
             # Fazer o upload usando o caminho do arquivo temporário
             try:
@@ -103,16 +121,16 @@ class ImageUploader():
                 # Limpar arquivo temporário após upload bem-sucedido
                 if os.path.exists(temp_image_path):
                     os.remove(temp_image_path)
-                    print(f"Arquivo temporário removido: {temp_image_path}")
+                    self.logger.info(f"Arquivo temporário removido: {temp_image_path}")
                 
                 return result
             except Exception as e:
-                print(f"Erro no upload da imagem base64: {str(e)}")
+                self.logger.error(f"Erro no upload da imagem base64: {str(e)}")
                 if os.path.exists(temp_image_path):
                     os.remove(temp_image_path)
                 raise
         except Exception as e:
-            print(f'Erro ao processar imagem base64: {str(e)}')
+            self.logger.error(f'Erro ao processar imagem base64: {str(e)}')
             raise
 
     def delete_image(self, deletehash: str) -> bool:
@@ -123,39 +141,39 @@ class ImageUploader():
         :return: True se a imagem foi deletada com sucesso, False caso contrário.
         """
         if not deletehash:
-            print("Tentativa de deleção com deletehash nulo ou vazio")
+            self.logger.warning("Tentativa de deleção com deletehash nulo ou vazio")
             return False
 
-        print(f"Tentando deletar imagem com deletehash: {deletehash}")
+        self.logger.info(f"Tentando deletar imagem com deletehash: {deletehash}")
         
         for attempt in range(self.max_retries):
             try:
                 if attempt > 0:
-                    print(f"Tentativa {attempt + 1} de {self.max_retries} para deletar imagem...")
+                    self.logger.info(f"Tentativa {attempt + 1} de {self.max_retries} para deletar imagem...")
                     time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
                 
                 result = self.client.delete_image(deletehash)
                 if result:
-                    print(f"Imagem deletada com sucesso após {attempt + 1} tentativa(s)")
+                    self.logger.info(f"Imagem deletada com sucesso após {attempt + 1} tentativa(s)")
                     return True
                     
             except ImgurClientError as e:
                 if hasattr(e, 'status_code') and e.status_code == 404:
-                    print(f"Imagem não encontrada (404) com deletehash: {deletehash}")
+                    self.logger.info(f"Imagem não encontrada (404) com deletehash: {deletehash}")
                     return True  # Consider it a success if image doesn't exist
                 elif attempt < self.max_retries - 1:
-                    print(f"Erro do Imgur ao deletar imagem (tentativa {attempt + 1}): {str(e)}")
+                    self.logger.warning(f"Erro do Imgur ao deletar imagem (tentativa {attempt + 1}): {str(e)}")
                     continue
                 else:
-                    print(f"Todas as tentativas de deleção falharam para deletehash: {deletehash}")
+                    self.logger.error(f"Todas as tentativas de deleção falharam para deletehash: {deletehash}")
                     return False
                     
             except Exception as e:
                 if attempt < self.max_retries - 1:
-                    print(f"Erro inesperado ao deletar imagem (tentativa {attempt + 1}): {str(e)}")
+                    self.logger.warning(f"Erro inesperado ao deletar imagem (tentativa {attempt + 1}): {str(e)}")
                     continue
                 else:
-                    print(f"Erro fatal ao tentar deletar imagem: {str(e)}")
+                    self.logger.error(f"Erro fatal ao tentar deletar imagem: {str(e)}")
                     return False
         
         return False
