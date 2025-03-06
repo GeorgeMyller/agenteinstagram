@@ -1,0 +1,5 @@
+requests>=2.31.0
+python-dotenv>=1.0.0
+pillow>=11.1.0  # PIL library
+imgurpython>=1.1.7
+# Existing dependencies below
