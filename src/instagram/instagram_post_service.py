@@ -286,41 +286,56 @@ class InstagramPostService:
 
     def _make_request_with_retry(self, method, url, payload):
         """
-        Make API request with exponential backoff retry logic and header analysis
+        Make API request with exponential backoff retry logic and rate limit handling
         """
-        self._rate_limit_check()
-        
+        self._rate_limit_check() # Keep the basic check
+
         last_error = None
         response_data = None
-        
+
         for attempt in range(self.max_retries):
             try:
                 print(f"Fazendo requisição para: {url}")
                 print(f"Payload: {payload}")
-                
+
                 response = method(url, data=payload)
-                
-                # First analyze headers before processing response body
-                rate_limited = self._analyze_rate_limit_headers(response)
-                
-                # Now process the response body
                 response_data = response.json()
-                print(f"Resposta da API: {response_data}")
-                
-                if rate_limited:
-                    print("Rate limiting detectado nos headers. Aplicando backoff.")
-                    if attempt < self.max_retries - 1:
-                        delay = self.rate_limit_delay
-                        print(f"Tentativa {attempt + 1} pausada devido a rate limits. Aguardando {delay} segundos...")
-                        time.sleep(delay)
-                        continue
+
+                print(f"Resposta da API: {response_data}")  # Log detalhado
+
+                # --- Rate Limiting Header Handling ---
+                wait_time = 0
+                for header_name in ['x-app-usage', 'x-business-use-case-usage']:
+                    if header_name in response.headers:
+                        print(f"Rate limit data from {header_name}:")
+                        try:
+                            usage_data = json.loads(response.headers[header_name])
+                            # usage_data is either a dict (x-app-usage) or a dict with lists (x-business-use-case-usage)
+                            if isinstance(usage_data, dict):
+                                for key, usage_list in usage_data.items():
+                                    if isinstance(usage_list, list): #x-business-use-case-usage
+                                        for usage in usage_list:
+                                            print(f"  {key}: {usage}")
+                                            if 'estimated_time_to_regain_access' in usage:
+                                                wait_time = max(wait_time, usage['estimated_time_to_regain_access'])
+                                    elif isinstance(usage_data, dict) and 'estimated_time_to_regain_access' in usage_data: #x-app-usage
+                                        wait_time = max(wait_time, usage_data['estimated_time_to_regain_access'])
+
+                        except json.JSONDecodeError:
+                            print(f"  Erro ao decodificar JSON do header {header_name}: {response.headers[header_name]}")
+                            continue
+
+                if wait_time > 0:
+                    print(f"Aguardando {wait_time} segundos devido ao rate limiting (header)")
+                    time.sleep(wait_time)
+                # --- End Rate Limiting Header Handling ---
+
 
                 if 'error' in response_data:
                     should_retry, error_msg = self._handle_error_response(response_data)
                     last_error = error_msg
-                    
+
                     if should_retry and attempt < self.max_retries - 1:
-                        # Use exponential backoff for retries
                         delay = self.base_delay * (2 ** attempt)
                         print(f"Tentativa {attempt + 1} falhou. Tentando novamente em {delay} segundos...")
                         time.sleep(delay)
@@ -328,9 +343,9 @@ class InstagramPostService:
                     elif not should_retry:
                         print(f"Erro não recuperável: {error_msg}")
                         return None
-                
+
                 return response_data
-                
+
             except requests.exceptions.RequestException as e:
                 last_error = str(e)
                 if attempt < self.max_retries - 1:
@@ -339,7 +354,7 @@ class InstagramPostService:
                     time.sleep(delay)
                 else:
                     print(f"Todas as tentativas falharam: {str(e)}")
-        
+
         if last_error:
             print(f"Erro: {last_error}")
         return response_data

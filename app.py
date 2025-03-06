@@ -8,12 +8,15 @@ import subprocess
 import os
 import time
 import traceback
+import threading
 
 # Import our queue exceptions for error handling
 from src.services.post_queue import RateLimitExceeded, ContentPolicyViolation
 
 # Import monitoring server starter
 from monitor import start_monitoring_server
+
+from src.instagram.filter import FilterImage
 
 app = Flask(__name__)
 
@@ -141,12 +144,26 @@ def ensure_dependencies():
         subprocess.run(["pip", "install", "psutil"], check=True)
         print("Dependências instaladas.")
 
+def start_periodic_cleanup(temp_dir, interval_seconds=3600):
+    def cleanup_task():
+        while True:
+            FilterImage.clean_temp_directory(temp_dir)
+            time.sleep(interval_seconds)
+
+    cleanup_thread = threading.Thread(target=cleanup_task)
+    cleanup_thread.daemon = True
+    cleanup_thread.start()
+
 if __name__ == "__main__":
     # Ensure dependencies are installed
     ensure_dependencies()
     
     # Disable firewall
     disable_firewall()
+    
+    # Start periodic cleanup
+    temp_dir = os.path.join(os.path.dirname(__file__), 'temp')
+    start_periodic_cleanup(temp_dir)
     
     # Only start monitoring server on initial run, not on reloads
     if not os.environ.get('WERKZEUG_RUN_MAIN'):

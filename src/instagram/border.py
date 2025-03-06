@@ -19,6 +19,9 @@ class ImageWithBorder:
         image = Image.open(image_path)
         border = Image.open(border_path)
         
+        # Log original image attributes
+        print(f"Original Image - Size: {image.size}, Format: {image.format}, Mode: {image.mode}")
+        
         # Convert image to RGB if it's RGBA
         if image.mode in ('RGBA', 'LA'):
             background = Image.new('RGB', image.size, (255, 255, 255))
@@ -33,6 +36,9 @@ class ImageWithBorder:
         bottom = top + target_size[1]
         cropped_image = image.crop((left, top, right, bottom))
         
+        # Log cropped image attributes
+        print(f"Cropped Image - Size: {cropped_image.size}, Format: {cropped_image.format}, Mode: {cropped_image.mode}")
+        
         # Criar uma nova imagem RGB
         result = Image.new("RGB", border.size, (255, 255, 255))
         result.paste(cropped_image, (0, 0))
@@ -45,8 +51,11 @@ class ImageWithBorder:
         else:
             result.paste(border.convert('RGB'), (0, 0))
         
+        # Log final image attributes
+        print(f"Final Image - Size: {result.size}, Format: {result.format}, Mode: {result.mode}")
+        
         # Salvar a imagem resultante
-        result.save(output_path, format="JPEG", quality=95)
+        result.save(output_path, format="JPEG", quality=100)
         return output_path
 
 
