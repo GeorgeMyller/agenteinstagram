@@ -37,6 +37,15 @@ class InstagramPostService:
             'app_usage': {},
             'business_usage': {}
         }
+        self.rate_limit_multiplier = 1  # Multiplicador dinâmico
+        self.app_level_backoff = 300  # Começa com 5 minutos
+        self.state_file = 'api_state.json'
+        self._load_api_state()
+        self.endpoint_limits = {
+            'media_creation': {'counter': 0, 'limit': 20},
+            'media_publish': {'counter': 0, 'limit': 30}
+        }
+        self.media_status_cache = {}
 
     def _handle_error_response(self, response_data):
         """
@@ -110,11 +119,18 @@ class InstagramPostService:
         
         # Rate limit error (code 4, subcode 2207051)
         if error_code == 4 and error_subcode == 2207051:
-            print("Taxa de requisições da aplicação atingida. Implementando backoff prolongado.")
-            # Increase rate limit delay for more severe backoff
-            self.rate_limit_delay = 300  # 5 minutes
-            self.rate_limit_reset_time = time.time() + self.rate_limit_delay
-            return True, self.rate_limit_delay, f"Rate limit exceeded: {error_msg}"
+            print("Limite GLOBAL do aplicativo atingido. Backoff exponencial ativado.")
+            # Use app_level_backoff instead of rate_limit_multiplier
+            self.app_level_backoff *= 2
+            if self.app_level_backoff > 3600:  # Máximo 1 hora
+                self.app_level_backoff = 3600
+            
+            calculated_delay = self.app_level_backoff
+            self.rate_limit_delay = calculated_delay
+            self.rate_limit_reset_time = time.time() + calculated_delay
+            self._save_api_state()
+            
+            return True, calculated_delay, f"Rate limit exceeded: {error_msg}"
             
         # Fatal error (code -1, subcode 2207001)
         if error_code == -1 and error_subcode == 2207001:
@@ -155,6 +171,13 @@ class InstagramPostService:
         Returns:
             tuple: (success_boolean, permalink_or_None)
         """
+        # Verifica cache primeiro
+        if media_id in self.media_status_cache:
+            cached = self.media_status_cache[media_id]
+            if time.time() - cached['timestamp'] < 30:
+                print(f"Retornando status do cache para {media_id}")
+                return cached['status'], cached['permalink']
+
         max_attempts = max_attempts or self.status_check_attempts
         delay = delay or self.status_check_delay
 
@@ -257,7 +280,16 @@ class InstagramPostService:
                 print("Aviso: Post publicado com sucesso, mas não foi possível obter o permalink.")
         
         # Retorna sucesso mesmo se permalink não foi obtido
-        return True, permalink
+        success = media_status in ('FINISHED', 'PUBLISHED')
+        
+        # Update cache with actual values
+        self.media_status_cache[media_id] = {
+            'status': success,
+            'permalink': permalink,
+            'timestamp': time.time()
+        }
+        
+        return success, permalink
 
     def _analyze_rate_limit_headers(self, response):
         """
@@ -278,6 +310,12 @@ class InstagramPostService:
             if header_name in headers:
                 try:
                     usage_data = json.loads(headers[header_name])
+                    print(f"Processando {header_name}: {usage_data}")
+                    if 'estimated_time_to_regain_access' in usage_data:
+                        wait_seconds = int(usage_data['estimated_time_to_regain_access'])
+                        print(f"Header {header_name} indica espera de {wait_seconds}s")
+                        self.rate_limit_reset_time = time.time() + wait_seconds
+                        self.rate_limit_delay = wait_seconds
                     print(f"Rate limit data from {header_name}:")
                     
                     if header_name == 'x-app-usage':
@@ -340,6 +378,12 @@ class InstagramPostService:
 
         last_error = None
         response_data = None
+
+        endpoint_type = 'media_creation' if '/media' in url else 'media_publish'
+        if self.endpoint_limits[endpoint_type]['counter'] >= self.endpoint_limits[endpoint_type]['limit']:
+            print(f"Limite horário atingido para {endpoint_type}. Aguardando 1 hora.")
+            time.sleep(3600)
+            self.endpoint_limits[endpoint_type]['counter'] = 0
 
         for attempt in range(self.max_retries):
             try:
@@ -431,6 +475,13 @@ class InstagramPostService:
                         print(f"Erro não recuperável: {error_msg}")
                         return None
 
+                # On successful response, reset multiplier to mitigate prolonged backoff on future calls.
+                if response.status_code == 200:
+                    self.rate_limit_multiplier = 1  # Reset multiplier after success
+                    endpoint_type = 'media_creation' if '/media' in url else 'media_publish'
+                    self.endpoint_limits[endpoint_type]['counter'] += 1
+
+                self._save_api_state()
                 return response_data
 
             except requests.exceptions.RequestException as e:
@@ -445,6 +496,29 @@ class InstagramPostService:
         if last_error:
             print(f"Erro: {last_error}")
         return response_data
+
+    def _load_api_state(self):
+        try:
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+                self.rate_limit_reset_time = state.get('rate_limit_reset_time', 0)
+                self.rate_limit_multiplier = state.get('rate_limit_multiplier', 1)
+                self.app_level_backoff = state.get('app_level_backoff', 300)
+                last_error_time = state.get('last_error_time', 0)
+                if time.time() - last_error_time > 3600:
+                    self.app_level_backoff = 300  # Reset se o último erro foi há mais de 1 hora
+        except:
+            pass
+
+    def _save_api_state(self):
+        state = {
+            'rate_limit_reset_time': self.rate_limit_reset_time,
+            'rate_limit_multiplier': self.rate_limit_multiplier,
+            'app_level_backoff': self.app_level_backoff,
+            'last_error_time': time.time()
+        }
+        with open(self.state_file, 'w') as f:
+            json.dump(state, f)
 
     def create_media_container(self, image_url, caption):
         """
@@ -468,6 +542,21 @@ class InstagramPostService:
         """
         Publica o contêiner de mídia no Instagram com retry logic.
         """
+        # Pre-check for rate limits before attempting publish
+        if self.app_level_backoff > 300:
+            print(f"Nível de backoff alto detectado ({self.app_level_backoff}s). Pulando chamada API e verificando direto.")
+            # Skip API call, go straight to verification
+            success, permalink = self._verify_media_status(
+                media_container_id, 
+                max_attempts=10,  # Increased attempts
+                delay=30,         # Longer delay between attempts
+                check_permalink=True
+            )
+            if success:
+                print("Publicação confirmada através de verificação direta!")
+                return media_container_id
+        
+        # Continue with normal flow if pre-check doesn't verify
         endpoint = f'{self.base_url}/media_publish'
         params = {
             'creation_id': media_container_id,
@@ -483,52 +572,50 @@ class InstagramPostService:
                 print("Enviando requisição de publicação...")
                 response_data = self._make_request_with_retry(requests.post, endpoint, params)
                 
-                # Verificar se temos uma resposta positiva com ID
-                post_id = None
-                if response_data and 'id' in response_data:
-                    post_id = response_data['id']
-                    print(f"Publicação iniciada com ID: {post_id}")
-                else:
-                    print("Não recebemos ID na resposta da publicação. Usando container ID para verificação.")
-                    post_id = media_container_id
-                
-                # Aumentar tempo de espera inicial para 40 segundos
-                print("Aguardando processamento inicial (40 segundos)...")
-                time.sleep(40)
-                
-                # Fase 1: Verificar apenas status básico (sem permalink)
-                print("Verificando status básico da publicação...")
-                success, _ = self._verify_media_status(
-                    post_id,
-                    max_attempts=8,
-                    delay=15,
-                    check_permalink=False  # Não verificar permalink ainda
-                )
-                
-                if not success:
-                    # Tente com o container ID se o post_id falhar
-                    if post_id != media_container_id:
-                        print("Tentando verificar com o container ID original...")
+                # Se a resposta for None (por exemplo, devido a erro de rate limit), tenta verificação final
+                if response_data is None or ('error' in response_data and 
+                   response_data['error'].get('code') == 4 and 
+                   response_data['error'].get('error_subcode') == 2207051):
+                    print("Falha na publicação devido a rate limit; tentando verificação estendida...")
+                    
+                    # Try multiple verification attempts with increasing delays
+                    for verify_attempt in range(5):
+                        wait_time = 30 * (verify_attempt + 1)
+                        print(f"Aguardando {wait_time}s antes da verificação {verify_attempt + 1}/5...")
+                        time.sleep(wait_time)
+                        
                         success, _ = self._verify_media_status(
-                            media_container_id,
-                            max_attempts=5,
+                            media_container_id, 
+                            max_attempts=3,
                             delay=15,
                             check_permalink=False
                         )
+                        
+                        if success:
+                            print(f"Publicação confirmada na tentativa {verify_attempt + 1}!")
+                            return media_container_id
                     
+                    print("Todas as verificações estendidas falharam.")
+                    return None
+                
+                # Se temos uma resposta positiva com ID
+                post_id = response_data.get('id', media_container_id)
+                print(f"Publicação iniciada com ID: {post_id}")
+                
+                # Aguardar processamento e verificar status
+                print("Aguardando processamento inicial (40 segundos)...")
+                time.sleep(40)
+                print("Verificando status básico da publicação...")
+                success, _ = self._verify_media_status(post_id, max_attempts=8, delay=15, check_permalink=False)
+                if not success and post_id != media_container_id:
+                    print("Tentando verificar com o container ID original...")
+                    success, _ = self._verify_media_status(media_container_id, max_attempts=5, delay=15, check_permalink=False)
                     if not success:
                         print("Não foi possível confirmar publicação após verificação do status.")
                         return None
-                
-                # Fase 2: Apenas se o status for bem-sucedido, tente obter permalink
+
                 print("Publicação confirmada! Tentando obter permalink...")
-                success, permalink = self._verify_media_status(
-                    post_id,
-                    max_attempts=2,  # Menos tentativas para verificação básica
-                    delay=20,
-                    check_permalink=True  # Agora sim, verificar permalink
-                )
-                
+                success, permalink = self._verify_media_status(post_id, max_attempts=2, delay=20, check_permalink=True)
                 if permalink:
                     print(f"Link da publicação: {permalink}")
                 else:
