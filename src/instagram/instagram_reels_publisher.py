@@ -19,6 +19,7 @@ from requests.adapters import HTTPAdapter
 from pathlib import Path
 from src.instagram.instagram_video_processor import VideoProcessor
 from src.instagram.instagram_video_uploader import VideoUploader
+from PIL import Image
 
 # Configurar logger
 logger = logging.getLogger('ReelsPublisher')
