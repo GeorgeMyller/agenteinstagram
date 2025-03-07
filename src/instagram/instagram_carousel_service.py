@@ -1,6 +1,7 @@
 import os
 import requests
 import time
+import json
 from dotenv import load_dotenv
 
 class InstagramCarouselService:
@@ -17,9 +18,46 @@ class InstagramCarouselService:
     def _make_request(self, method, url, **kwargs):
         """Faz uma requisição HTTP com melhor tratamento de erros."""
         try:
+            # Logging para debug
+            if method == 'POST' and 'data' in kwargs:
+                print(f"Fazendo requisição para: {url}")
+                # Cria uma cópia do payload para não mostrar tokens de acesso
+                safe_payload = kwargs['data'].copy() if isinstance(kwargs['data'], dict) else {}
+                if 'access_token' in safe_payload:
+                    safe_payload['access_token'] = safe_payload['access_token'][:10] + '...'
+                print(f"Payload: {safe_payload}")
+                
             response = self.session.request(method, url, **kwargs)
-            response.raise_for_status()
-            return response.json()
+            
+            # Obter informações de rate limit dos cabeçalhos
+            self._log_rate_limit_info(response)
+            
+            # Verificar se tem conteúdo JSON na resposta
+            if response.content:
+                json_response = response.json()
+                print(f"Resposta da API: {json_response}")
+                
+                # Verificar se há erro na resposta
+                if 'error' in json_response:
+                    error = json_response['error']
+                    print("API Error Details:")
+                    print(f"  Code: {error.get('code')}")
+                    print(f"  Subcode: {error.get('error_subcode', 'N/A')}")
+                    print(f"  Type: {error.get('type', 'N/A')}")
+                    print(f"  Message: {error.get('message', 'N/A')}")
+                    print(f"  Trace ID: {error.get('fbtrace_id', 'N/A')}")
+                    
+                    # Verificar se é rate limit
+                    if error.get('code') == 4 or error.get('message', '').lower().find('rate') >= 0:
+                        retry_seconds = self._get_retry_time_from_error(error)
+                        print(f"Rate limit detectado. Recomendado aguardar {retry_seconds} segundos.")
+                        raise RateLimitError(f"Rate limit excedido", retry_seconds=retry_seconds)
+                    
+                    return None
+                
+                return json_response
+            return {}
+            
         except requests.exceptions.RequestException as e:
             error_msg = f"Erro na requisição HTTP: {e}"
             if response := getattr(e, 'response', None):
@@ -35,7 +73,50 @@ class InstagramCarouselService:
                 except:
                     error_msg += f"\nResposta da API: {response.text}"
             print(error_msg)
+            
+            # Verificar se é rate limit
+            if response and response.status_code == 429:
+                retry_seconds = 300  # Default: 5 minutos
+                if 'error' in error_data and 'message' in error_data['error']:
+                    if 'rate' in error_data['error']['message'].lower():
+                        retry_seconds = self._get_retry_time_from_error(error_data['error'])
+                raise RateLimitError(f"Rate limit excedido", retry_seconds=retry_seconds)
+                
             return None
+    
+    def _log_rate_limit_info(self, response):
+        """Extrai e loga informações de rate limit dos cabeçalhos da resposta"""
+        if 'x-business-use-case-usage' in response.headers:
+            usage_info = response.headers['x-business-use-case-usage']
+            try:
+                usage_data = json.loads(usage_info)
+                print("Rate limit data from x-business-use-case-usage:")
+                print(f"  Business Usage: {usage_data}")
+                
+                # Processar cada app ID
+                for app_id, metrics in usage_data.items():
+                    if isinstance(metrics, list) and metrics:
+                        rate_data = metrics[0]
+                        print(f"  {app_id}: {rate_data}")
+                        if 'estimated_time_to_regain_access' in rate_data:
+                            print(f"  Business estimated time to regain access: {rate_data['estimated_time_to_regain_access']}s")
+                        if 'call_count' in rate_data:
+                            print(f"  call_count: {rate_data['call_count']}%")
+                        if 'total_cputime' in rate_data:
+                            print(f"  total_cputime: {rate_data['total_cputime']}%") 
+                        if 'total_time' in rate_data:
+                            print(f"  total_time: {rate_data['total_time']}%")
+            except json.JSONDecodeError:
+                print(f"Erro ao decodificar informações de rate limit: {usage_info}")
+    
+    def _get_retry_time_from_error(self, error):
+        """Extrai o tempo de espera recomendado a partir de um erro de rate limit"""
+        # Tenta obter o tempo de retry dos dados de erro
+        if 'error_data' in error and 'error_subcode' in error:
+            if error['error_subcode'] == 2207051:  # Application request limit reached
+                return 900  # 15 minutos
+                
+        return 300  # Default: 5 minutos
 
     def _create_child_container(self, media_url):
         """Cria um contêiner filho para uma imagem do carrossel."""
@@ -170,7 +251,11 @@ class InstagramCarouselService:
                 print(f"Mensagem para usuário: {error.get('error_user_msg', 'N/A')}")
             
             return None
-                
+            
+        except RateLimitError as e:
+            print(f"Rate limit excedido ao publicar carrossel: {e}")
+            print(f"Recomendado aguardar {e.retry_seconds} segundos antes de tentar novamente.")
+            return None
         except Exception as e:
             print(f"Erro ao publicar carrossel: {e}")
             return None
@@ -190,3 +275,9 @@ class InstagramCarouselService:
             
         # Publish carousel
         return self.publish_carousel(container_id)
+
+class RateLimitError(Exception):
+    """Exceção lançada quando um rate limit é atingido."""
+    def __init__(self, message, retry_seconds=300):
+        super().__init__(message)
+        self.retry_seconds = retry_seconds

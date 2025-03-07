@@ -5,13 +5,23 @@ import os
 import json
 import psutil
 from datetime import datetime
-
 from src.services.post_queue import post_queue, PostStatus
 from src.instagram.instagram_post_service import InstagramPostService
 from src.services.instagram_send import InstagramSend
+import logging
+import sqlite3
+import glob
 
-# Initialize the monitoring app on port 6002
+# Initialize the monitoring app on port 5001
 app = Flask(__name__, template_folder="monitoring_templates")
+
+# Configure logging
+logger = logging.getLogger(__name__)
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 # Track server stats
 SERVER_STATS = {
@@ -21,8 +31,23 @@ SERVER_STATS = {
     "api_rate_limits": {
         "count": 0,
         "window_start": time.time()
+    },
+    # Storage for carousel related data
+    "carousel_debug": {
+        "last_cleared": None,
+        "clear_count": 0
+    },
+    # Storage for error queue data
+    "error_queue": {
+        "last_cleared": None,
+        "clear_count": 0,
+        "errors": []
     }
 }
+
+# Path to temporary carousel storage
+CAROUSEL_TEMP_DIR = os.path.join("temp", "carousel")
+os.makedirs(CAROUSEL_TEMP_DIR, exist_ok=True)
 
 # Create templates directory if it doesn't exist
 os.makedirs("monitoring_templates", exist_ok=True)
@@ -101,7 +126,6 @@ with open("monitoring_templates/dashboard.html", "w") as f:
                 <p>Content Violations: <span class="stat-value">{{stats.content_violations}}</span></p>
             </div>
         </div>
-
         <div class="stat-box">
             <h3>System Resources</h3>
             <div class="stats-container">
@@ -341,19 +365,284 @@ def queue_post():
         SERVER_STATS["last_error"] = str(e)
         return jsonify({"error": str(e)}), 500
 
+# New debug endpoints for troubleshooting Instagram carousel issues
+
+@app.route('/debug/carousel/clear', methods=['POST'])
+def clear_carousel_state():
+    """
+    Clear carousel-related temporary files and state
+    As referenced in docs/troubleshooting/common.md
+    """
+    try:
+        # Clear any temporary carousel files
+        count = 0
+        
+        # Clear temp files from carousel directory
+        for file_path in glob.glob(os.path.join(CAROUSEL_TEMP_DIR, "*")):
+            try:
+                os.remove(file_path)
+                count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete file {file_path}: {str(e)}")
+        
+        # Try to clear any cached carousel data in Instagram services
+        try:
+            # Get an instance of InstagramPostService to clear its container cache
+            service = InstagramPostService()
+            if hasattr(service, 'container_cache'):
+                # Filter and clear only carousel entries from cache
+                carousel_keys = [key for key in service.container_cache.keys() 
+                                if 'carousel' in key or 'children' in str(service.container_cache[key])]
+                for key in carousel_keys:
+                    service.container_cache.pop(key, None)
+                count += len(carousel_keys)
+        except Exception as e:
+            logger.error(f"Failed to clear InstagramPostService container_cache: {str(e)}")
+        
+        # Update stats
+        SERVER_STATS["carousel_debug"]["last_cleared"] = datetime.now().isoformat()
+        SERVER_STATS["carousel_debug"]["clear_count"] += 1
+        
+        return jsonify({
+            "success": True,
+            "message": f"Carousel state cleared - removed {count} items",
+            "timestamp": SERVER_STATS["carousel_debug"]["last_cleared"]
+        })
+    except Exception as e:
+        SERVER_STATS["last_error"] = str(e)
+        logger.error(f"Error clearing carousel state: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to clear carousel state"
+        }), 500
+
+@app.route('/debug/error-queue/clear', methods=['POST'])
+def clear_error_queue():
+    """
+    Clear any pending errors in the queue
+    As referenced in docs/troubleshooting/common.md
+    """
+    try:
+        # Clear error queue
+        count = len(SERVER_STATS["error_queue"]["errors"])
+        SERVER_STATS["error_queue"]["errors"] = []
+        
+        # Attempt to reset error status on failed carousel jobs
+        try:
+            # Get active jobs
+            jobs = post_queue.get_job_history(limit=50)
+            
+            # Filter for failed carousel jobs
+            carousel_jobs = [job for job in jobs 
+                           if job.get('status') == 'failed' and 
+                           job.get('content_type') == 'carousel']
+            
+            # Reset job status if possible
+            reset_count = 0
+            for job in carousel_jobs:
+                try:
+                    job_id = job.get('id')
+                    if job_id:
+                        post_queue.update_job_status(job_id, PostStatus.PENDING, 
+                                                    error_message=None)
+                        reset_count += 1
+                except Exception as job_e:
+                    logger.error(f"Failed to reset job {job.get('id')}: {str(job_e)}")
+            
+            # Add reset count to the total
+            count += reset_count
+        except Exception as e:
+            logger.error(f"Failed to reset failed carousel jobs: {str(e)}")
+        
+        # Update stats
+        SERVER_STATS["error_queue"]["last_cleared"] = datetime.now().isoformat()
+        SERVER_STATS["error_queue"]["clear_count"] += 1
+        
+        return jsonify({
+            "success": True,
+            "message": f"Error queue cleared - {count} errors removed or jobs reset",
+            "timestamp": SERVER_STATS["error_queue"]["last_cleared"]
+        })
+    except Exception as e:
+        SERVER_STATS["last_error"] = str(e)
+        logger.error(f"Error clearing error queue: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to clear error queue"
+        }), 500
+
+@app.route('/debug/carousel/status', methods=['GET'])
+def get_carousel_status():
+    """
+    Get status of carousel processing, including pending uploads
+    """
+    try:
+        # Check for carousel files in temporary directory
+        temp_files = glob.glob(os.path.join(CAROUSEL_TEMP_DIR, "*"))
+        
+        # Get active carousel jobs
+        jobs = post_queue.get_job_history(limit=50)
+        carousel_jobs = [job for job in jobs 
+                       if (job.get('content_type') == 'carousel' and 
+                           job.get('status') in ['pending', 'processing'])]
+        
+        # Get service container cache information if available
+        container_cache_info = []
+        try:
+            service = InstagramPostService()
+            if hasattr(service, 'container_cache'):
+                for key, value in service.container_cache.items():
+                    if 'carousel' in key or 'children' in str(value):
+                        cache_item = {
+                            "key": key,
+                            "id": value.get('id'),
+                            "timestamp": datetime.fromtimestamp(value.get('timestamp')).isoformat() 
+                                        if 'timestamp' in value else None
+                        }
+                        container_cache_info.append(cache_item)
+        except Exception as e:
+            logger.error(f"Failed to get container cache info: {str(e)}")
+        
+        return jsonify({
+            "success": True,
+            "temp_files": {
+                "count": len(temp_files),
+                "files": [os.path.basename(f) for f in temp_files]
+            },
+            "active_jobs": {
+                "count": len(carousel_jobs),
+                "jobs": carousel_jobs
+            },
+            "container_cache": {
+                "count": len(container_cache_info),
+                "items": container_cache_info
+            },
+            "last_cleared": SERVER_STATS["carousel_debug"]["last_cleared"],
+            "clear_count": SERVER_STATS["carousel_debug"]["clear_count"]
+        })
+    except Exception as e:
+        SERVER_STATS["last_error"] = str(e)
+        logger.error(f"Error getting carousel status: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to get carousel status"
+        }), 500
+
+@app.route('/debug/error-queue/status', methods=['GET'])
+def get_error_queue_status():
+    """
+    Get status of error queue
+    """
+    try:
+        # Get all failed jobs
+        jobs = post_queue.get_job_history(limit=100)
+        failed_jobs = [job for job in jobs if job.get('status') == 'failed']
+        failed_carousel_jobs = [job for job in failed_jobs if job.get('content_type') == 'carousel']
+        failed_image_jobs = [job for job in failed_jobs if job.get('content_type') == 'image']
+        failed_reel_jobs = [job for job in failed_jobs if job.get('content_type') == 'reel']
+        
+        # Group errors by type
+        error_types = {}
+        for job in failed_jobs:
+            error = job.get('error')
+            if error:
+                error_code = None
+                # Try to extract error code if available
+                if "Code:" in error:
+                    try:
+                        code_part = error.split("Code:")[1].strip()
+                        error_code = int(code_part.split()[0])
+                    except:
+                        pass
+                
+                # Use error code as key if available, otherwise use first 30 chars
+                key = str(error_code) if error_code else error[:30]
+                if key in error_types:
+                    error_types[key]['count'] += 1
+                else:
+                    error_types[key] = {
+                        'count': 1,
+                        'message': error,
+                        'code': error_code
+                    }
+        
+        return jsonify({
+            "success": True,
+            "failed_jobs": {
+                "total": len(failed_jobs),
+                "carousel": len(failed_carousel_jobs),
+                "image": len(failed_image_jobs),
+                "reel": len(failed_reel_jobs)
+            },
+            "error_types": list(error_types.values()),
+            "current_errors": SERVER_STATS["error_queue"]["errors"],
+            "last_cleared": SERVER_STATS["error_queue"]["last_cleared"],
+            "clear_count": SERVER_STATS["error_queue"]["clear_count"]
+        })
+    except Exception as e:
+        SERVER_STATS["last_error"] = str(e)
+        logger.error(f"Error getting error queue status: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to get error queue status"
+        }), 500
+
+@app.route('/debug/log-error', methods=['POST'])
+def log_instagram_error():
+    """
+    Log an Instagram API error for later analysis
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Missing request body"}), 400
+        
+        # Extract error details
+        error = {
+            "timestamp": datetime.now().isoformat(),
+            "code": data.get("code"),
+            "subcode": data.get("subcode"),
+            "message": data.get("message"),
+            "type": data.get("type"),
+            "fb_trace_id": data.get("fb_trace_id"),
+            "context": data.get("context")
+        }
+        
+        # Add to error list, maintain max size of 100
+        SERVER_STATS["error_queue"]["errors"].append(error)
+        if len(SERVER_STATS["error_queue"]["errors"]) > 100:
+            SERVER_STATS["error_queue"]["errors"] = SERVER_STATS["error_queue"]["errors"][-100:]
+        
+        return jsonify({
+            "success": True,
+            "message": "Error logged successfully",
+            "error_id": len(SERVER_STATS["error_queue"]["errors"]) - 1
+        })
+    except Exception as e:
+        SERVER_STATS["last_error"] = str(e)
+        logger.error(f"Error logging Instagram error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to log error"
+        }), 500
+
 @app.errorhandler(Exception)
 def handle_error(e):
     SERVER_STATS["last_error"] = str(e)
+    logger.error(f"Unhandled exception: {str(e)}")
     return jsonify({"error": str(e)}), 500
 
 def start_monitoring_server():
     """Start the monitoring server in a separate thread"""
     from werkzeug.serving import make_server
     import socket
-
-    port = 6002
+    port = 5001  # Changed to match documentation
     retries = 3
-
     for _ in range(retries):
         try:
             # Create a werkzeug server
@@ -364,20 +653,20 @@ def start_monitoring_server():
             thread.daemon = True
             thread.start()
             
-            print(f"Monitoring server started on http://0.0.0.0:{port}")
+            logger.info(f"Monitoring server started on http://0.0.0.0:{port}")
             return thread
         except socket.error as e:
             if "Address already in use" in str(e):
-                print(f"Port {port} is already in use, monitoring server may already be running")
+                logger.warning(f"Port {port} is already in use, monitoring server may already be running")
                 return None
             port += 1
     
-    print("Failed to start monitoring server after several attempts")
+    logger.error("Failed to start monitoring server after several attempts")
     return None
 
 if __name__ == '__main__':
     # Start server directly when run as script
-    app.run(host='0.0.0.0', port=6002, debug=False)  # Disabled debug mode for monitoring server
+    app.run(host='0.0.0.0', port=5001, debug=False)  # Changed to match documentation
 
 import streamlit as st
 import requests

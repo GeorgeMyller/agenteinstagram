@@ -19,7 +19,7 @@ class InstagramSend:
     # Keep track of rate limits
     last_rate_limit_time = 0
     rate_limit_window = 3600  # 1 hour window for rate limiting
-    max_rate_limit_hits = 5  # Maximum number of rate limit hits before enforcing longer delays
+    max_rate_limit_hits = 52  # Maximum number of rate limit hits before enforcing longer delays
     
     @staticmethod
     def queue_post(image_path, caption, inputs=None) -> str:
@@ -390,19 +390,65 @@ class InstagramSend:
             dict: Resultado do envio
         """
         try:
+            print(f"[CAROUSEL] Iniciando processamento do carrossel com {len(media_paths)} imagens")
+            
+            # Verificar se há pelo menos 2 imagens válidas
+            if len(media_paths) < 2:
+                raise Exception(f"Número insuficiente de imagens para criar um carrossel. Encontradas: {len(media_paths)}")
+            
+            # Verificar se os arquivos existem antes de prosseguir
+            valid_paths = []
+            for path in media_paths:
+                if os.path.exists(path):
+                    valid_paths.append(path)
+                else:
+                    print(f"[CAROUSEL] ERRO: Arquivo não encontrado: {path}")
+            
+            if len(valid_paths) < 2:
+                raise Exception(f"Número insuficiente de imagens válidas para criar um carrossel. Válidas: {len(valid_paths)}")
+            
+            print(f"[CAROUSEL] {len(valid_paths)} imagens válidas encontradas, iniciando upload")
+            
             # Instanciar o serviço de carrossel do Instagram
+            from src.instagram.instagram_carousel_service import InstagramCarouselService
+            from src.instagram.carousel_poster import upload_carousel_images
+            
+            # Certificar-se de que temos as dependências necessárias
             service = InstagramCarouselService()
             
+            # Verificar credenciais
+            if not service.instagram_account_id or not service.access_token:
+                raise Exception("Credenciais do Instagram não configuradas corretamente")
+            
+            print(f"[CAROUSEL] Credenciais verificadas, iniciando upload das imagens")
+            
             # Fazer upload das imagens e obter URLs
-            success, uploaded_images, image_urls = upload_carousel_images(media_paths)
+            def progress_update(current, total):
+                print(f"[CAROUSEL] Upload de imagens: {current}/{total}")
+                
+            success, uploaded_images, image_urls = upload_carousel_images(valid_paths, progress_callback=progress_update)
+            
+            print(f"[CAROUSEL] Resultado do upload: success={success}, {len(image_urls)} URLs obtidas")
+            
             if not success:
                 raise Exception("Falha no upload de uma ou mais imagens do carrossel")
             
+            if len(image_urls) < 2:
+                raise Exception(f"Número insuficiente de URLs para criar um carrossel: {len(image_urls)}")
+            
+            print(f"[CAROUSEL] URLs das imagens: {image_urls}")
+            
             # Postar o carrossel no Instagram
+            print(f"[CAROUSEL] Iniciando publicação do carrossel no Instagram")
             post_id = service.post_carousel(image_urls, caption)
+            
             if not post_id:
                 raise Exception("Falha ao publicar o carrossel no Instagram")
             
+            print(f"[CAROUSEL] Carrossel publicado com sucesso! ID: {post_id}")
             return {"status": "success", "post_id": post_id}
         except Exception as e:
+            print(f"[CAROUSEL] ERRO: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             raise Exception(f"Erro ao enviar carrossel: {e}")

@@ -874,7 +874,7 @@ class InstagramPostService:
             return None
 
         # Significantly longer delay between creation and publishing (3 minutes)
-        base_delay = 180  # Increased from 15s to 180s
+        base_delay = 20  # 
         if self.app_level_backoff > 300:
             base_delay = 300  # Increased from 45s to 300s when in backoff mode
         
