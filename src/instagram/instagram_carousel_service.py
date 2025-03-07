@@ -3,87 +3,112 @@ import requests
 import time
 import json
 from dotenv import load_dotenv
+from typing import Optional, List, Dict, Any
+
+class RateLimitError(Exception):
+    def __init__(self, message: str, retry_seconds: int = 300):
+        super().__init__(message)
+        self.retry_seconds = retry_seconds
 
 class InstagramCarouselService:
     """Classe para gerenciar o upload e publicação de carrosséis no Instagram."""
+    
+    API_VERSION = "v18.0"  # Latest stable version
+    SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png"]
+    MAX_MEDIA_SIZE = 8 * 1024 * 1024  # 8MB in bytes
     
     def __init__(self):
         """Inicializa o serviço com as credenciais do Instagram."""
         load_dotenv()
         self.instagram_account_id = os.getenv("INSTAGRAM_ACCOUNT_ID")
-        self.base_url = f'https://graph.facebook.com/v22.0/{self.instagram_account_id}'
-        self.access_token = os.getenv('INSTAGRAM_API_KEY')
-        self.session = requests.Session()
-
-    def _make_request(self, method, url, **kwargs):
-        """Faz uma requisição HTTP com melhor tratamento de erros."""
-        try:
-            # Logging para debug
-            if method == 'POST' and 'data' in kwargs:
-                print(f"Fazendo requisição para: {url}")
-                # Cria uma cópia do payload para não mostrar tokens de acesso
-                safe_payload = kwargs['data'].copy() if isinstance(kwargs['data'], dict) else {}
-                if 'access_token' in safe_payload:
-                    safe_payload['access_token'] = safe_payload['access_token'][:10] + '...'
-                print(f"Payload: {safe_payload}")
-                
-            response = self.session.request(method, url, **kwargs)
+        if not self.instagram_account_id:
+            raise ValueError("INSTAGRAM_ACCOUNT_ID environment variable is not set")
             
-            # Obter informações de rate limit dos cabeçalhos
+        self.access_token = os.getenv('INSTAGRAM_API_KEY')
+        if not self.access_token:
+            raise ValueError("INSTAGRAM_API_KEY environment variable is not set")
+            
+        self.base_url = f'https://graph.facebook.com/{self.API_VERSION}/{self.instagram_account_id}'
+        self.session = requests.Session()
+        self.rate_limit_window = 3600  # 1 hour
+        self.rate_limit_max_calls = 200  # Default safe limit
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # Minimum seconds between requests
+
+    def _validate_media(self, media_url: str) -> bool:
+        """Validates media URL and type before uploading."""
+        try:
+            # Check if URL is accessible
+            response = requests.head(media_url, timeout=10)
+            if response.status_code != 200:
+                print(f"Media URL not accessible: {media_url}")
+                return False
+                
+            # Check content type
+            content_type = response.headers.get('content-type', '').lower()
+            if content_type not in self.SUPPORTED_MEDIA_TYPES:
+                print(f"Unsupported media type: {content_type}")
+                return False
+                
+            # Check file size
+            content_length = int(response.headers.get('content-length', 0))
+            if content_length > self.MAX_MEDIA_SIZE:
+                print(f"Media file too large: {content_length} bytes")
+                return False
+                
+            return True
+        except Exception as e:
+            print(f"Error validating media: {str(e)}")
+            return False
+
+    def _respect_rate_limits(self):
+        """Ensures requests respect rate limits."""
+        current_time = time.time()
+        elapsed = current_time - self.last_request_time
+        
+        if elapsed < self.min_request_interval:
+            sleep_time = self.min_request_interval - elapsed
+            time.sleep(sleep_time)
+        
+        self.last_request_time = time.time()
+
+    def _make_request(self, method: str, url: str, **kwargs) -> Optional[Dict[str, Any]]:
+        """Faz uma requisição HTTP com melhor tratamento de erros."""
+        self._respect_rate_limits()
+        
+        try:
+            response = self.session.request(method, url, timeout=30, **kwargs)
             self._log_rate_limit_info(response)
             
-            # Verificar se tem conteúdo JSON na resposta
-            if response.content:
-                json_response = response.json()
-                print(f"Resposta da API: {json_response}")
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 300))
+                raise RateLimitError(f"Rate limit exceeded", retry_after)
                 
-                # Verificar se há erro na resposta
-                if 'error' in json_response:
-                    error = json_response['error']
-                    print("API Error Details:")
-                    print(f"  Code: {error.get('code')}")
-                    print(f"  Subcode: {error.get('error_subcode', 'N/A')}")
-                    print(f"  Type: {error.get('type', 'N/A')}")
-                    print(f"  Message: {error.get('message', 'N/A')}")
-                    print(f"  Trace ID: {error.get('fbtrace_id', 'N/A')}")
-                    
-                    # Verificar se é rate limit
-                    if error.get('code') == 4 or error.get('message', '').lower().find('rate') >= 0:
-                        retry_seconds = self._get_retry_time_from_error(error)
-                        print(f"Rate limit detectado. Recomendado aguardar {retry_seconds} segundos.")
-                        raise RateLimitError(f"Rate limit excedido", retry_seconds=retry_seconds)
-                    
-                    return None
+            response.raise_for_status()
+            
+            if not response.content:
+                return None
                 
-                return json_response
-            return {}
+            data = response.json()
+            
+            if 'error' in data:
+                error = data['error']
+                error_code = error.get('code')
+                error_message = error.get('message', '')
+                
+                if error_code in [4, 17, 32, 613]:  # Rate limit error codes
+                    retry_seconds = self._get_retry_time_from_error(error)
+                    raise RateLimitError(error_message, retry_seconds)
+                    
+                print(f"API Error: {error_message} (Code: {error_code})")
+                return None
+                
+            return data
             
         except requests.exceptions.RequestException as e:
-            error_msg = f"Erro na requisição HTTP: {e}"
-            if response := getattr(e, 'response', None):
-                try:
-                    error_data = response.json()
-                    if 'error' in error_data:
-                        error = error_data['error']
-                        error_msg += f"\nCódigo: {error.get('code')}"
-                        error_msg += f"\nMensagem: {error.get('message')}"
-                        error_msg += f"\nTipo: {error.get('type')}"
-                        if 'error_subcode' in error:
-                            error_msg += f"\nSubcódigo: {error.get('error_subcode')}"
-                except:
-                    error_msg += f"\nResposta da API: {response.text}"
-            print(error_msg)
-            
-            # Verificar se é rate limit
-            if response and response.status_code == 429:
-                retry_seconds = 300  # Default: 5 minutos
-                if 'error' in error_data and 'message' in error_data['error']:
-                    if 'rate' in error_data['error']['message'].lower():
-                        retry_seconds = self._get_retry_time_from_error(error_data['error'])
-                raise RateLimitError(f"Rate limit excedido", retry_seconds=retry_seconds)
-                
+            print(f"Request failed: {str(e)}")
             return None
-    
+
     def _log_rate_limit_info(self, response):
         """Extrai e loga informações de rate limit dos cabeçalhos da resposta"""
         if 'x-business-use-case-usage' in response.headers:
@@ -140,90 +165,80 @@ class InstagramCarouselService:
             print(f"Erro ao criar container filho: {e}")
             return None
 
-    def create_carousel_container(self, media_urls, caption):
+    def create_carousel_container(self, media_urls: List[str], caption: str) -> Optional[str]:
         """Cria um contêiner de carrossel no Instagram."""
-        url = f'{self.base_url}/media'
-        
-        # Create children containers first
-        children = []
+        # Validate all media first
         for media_url in media_urls:
-            child_container = self._create_child_container(media_url)
-            if child_container:
-                children.append(child_container)
-            else:
-                print(f"Falha ao criar container filho para: {media_url}")
+            if not self._validate_media(media_url):
                 return None
         
-        if not children:
-            print("Nenhum container filho foi criado.")
-            return None
+        # Create children containers with improved error handling
+        children = []
+        for media_url in media_urls:
+            child_id = self._create_child_container(media_url)
+            if not child_id:
+                print(f"Failed to create child container for {media_url}")
+                return None
+            children.append(child_id)
+            
+            # Respect rate limits between child creation
+            time.sleep(2)
         
-        # Create carousel container
+        if not children:
+            print("No child containers were created")
+            return None
+            
         params = {
             'media_type': 'CAROUSEL',
-            'caption': caption,
+            'caption': caption[:2200],  # Instagram caption limit
             'children': ','.join(children),
             'access_token': self.access_token
         }
         
         try:
-            data = self._make_request('POST', url, data=params)
-            
-            if not data or 'id' not in data:
-                print(f"Erro ao criar container do carrossel: {data}")
-                return None
-                
-            print(f"Container do carrossel criado com sucesso: {data['id']}")
-            return data['id']
-            
+            data = self._make_request('POST', f'{self.base_url}/media', data=params)
+            if data and 'id' in data:
+                print(f"Carousel container created successfully: {data['id']}")
+                return data['id']
+            return None
         except Exception as e:
-            print(f"Erro ao criar container do carrossel: {e}")
+            print(f"Error creating carousel container: {str(e)}")
             return None
 
-    def wait_for_container_status(self, container_id, max_attempts=20, delay=5):
+    def wait_for_container_status(self, container_id: str, max_attempts: int = 30, delay: int = 5) -> str:
         """Verifica o status do container até estar pronto ou falhar."""
         url = f'{self.base_url}/{container_id}'
+        params = {
+            'fields': 'status_code,status',
+            'access_token': self.access_token
+        }
         
         for attempt in range(max_attempts):
             try:
-                params = {
-                    'fields': 'status_code,status',
-                    'access_token': self.access_token
-                }
-                
                 data = self._make_request('GET', url, params=params)
-                
                 if not data:
-                    print("Erro ao verificar status do container")
-                    return 'ERROR'
-                
-                if 'error' in data:
-                    print(f"Erro ao verificar status do container: {data['error']}")
-                    return 'ERROR'
-                
+                    print(f"Failed to get container status (attempt {attempt + 1}/{max_attempts})")
+                    time.sleep(delay)
+                    continue
+                    
                 status = data.get('status_code', '')
-                print(f"Status do container (tentativa {attempt + 1}/{max_attempts}): {status}")
+                print(f"Container status (attempt {attempt + 1}/{max_attempts}): {status}")
                 
                 if status == 'FINISHED':
-                    print("Processamento do carrossel concluído!")
                     return status
                 elif status in ['ERROR', 'EXPIRED']:
-                    print(f"Erro no processamento do carrossel: {status}")
-                    if 'status' in data:
-                        print(f"Detalhes do status: {data['status']}")
+                    print(f"Container failed with status: {status}")
                     return status
-                elif status in ['IN_PROGRESS', 'PROCESSING']:
-                    print("Carrossel ainda em processamento...")
-                elif status == 'SCHEDULED':
-                    print("Carrossel agendado para publicação...")
                 
                 time.sleep(delay)
                 
+            except RateLimitError as e:
+                print(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
+                time.sleep(e.retry_seconds)
             except Exception as e:
-                print(f"Erro ao verificar status: {e}")
-                return 'ERROR'
+                print(f"Error checking container status: {str(e)}")
+                time.sleep(delay)
         
-        print("Tempo limite de processamento excedido")
         return 'TIMEOUT'
 
     def publish_carousel(self, container_id):
@@ -275,9 +290,3 @@ class InstagramCarouselService:
             
         # Publish carousel
         return self.publish_carousel(container_id)
-
-class RateLimitError(Exception):
-    """Exceção lançada quando um rate limit é atingido."""
-    def __init__(self, message, retry_seconds=300):
-        super().__init__(message)
-        self.retry_seconds = retry_seconds
