@@ -5,10 +5,12 @@ import uuid
 from src.instagram.crew_post_instagram import InstagramPostCrew
 from src.instagram.describe_image_tool import ImageDescriber
 from src.instagram.instagram_post_service import InstagramPostService
+from src.instagram.instagram_carousel_service import InstagramCarouselService
 from src.instagram.border import ImageWithBorder
 from src.instagram.filter import FilterImage
 from src.utils.paths import Paths
 from src.instagram.image_uploader import ImageUploader
+from src.instagram.carousel_poster import upload_carousel_images
 
 # Import new queue system
 from src.services.post_queue import post_queue, RateLimitExceeded, ContentPolicyViolation
@@ -387,21 +389,20 @@ class InstagramSend:
         Returns:
             dict: Resultado do envio
         """
-        # Implementar lógica para enviar carrossel de imagens
         try:
-            # Configurações adicionais do carrossel
-            carousel_options = {}
-            if inputs:
-                carousel_options = inputs
-                
-            # Simular envio de carrossel
-            result = {
-                "status": "success",
-                "media_ids": [str(uuid.uuid4()) for _ in media_paths],
-                "caption": caption,
-                "options": carousel_options
-            }
+            # Instanciar o serviço de carrossel do Instagram
+            service = InstagramCarouselService()
             
-            return result
+            # Fazer upload das imagens e obter URLs
+            success, uploaded_images, image_urls = upload_carousel_images(media_paths)
+            if not success:
+                raise Exception("Falha no upload de uma ou mais imagens do carrossel")
+            
+            # Postar o carrossel no Instagram
+            post_id = service.post_carousel(image_urls, caption)
+            if not post_id:
+                raise Exception("Falha ao publicar o carrossel no Instagram")
+            
+            return {"status": "success", "post_id": post_id}
         except Exception as e:
             raise Exception(f"Erro ao enviar carrossel: {e}")

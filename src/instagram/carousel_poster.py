@@ -3,7 +3,7 @@
 import os
 import time
 import requests
-from typing import List, Tuple, Callable, Dict, Any
+from typing import List, Tuple, Callable, Dict, Any, Optional
 from dotenv import load_dotenv
 from src.instagram.instagram_carousel_service import InstagramCarouselService  # Importe a classe
 from src.instagram.image_uploader import ImageUploader  # Para upload das imagens
