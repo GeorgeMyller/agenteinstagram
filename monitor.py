@@ -12,7 +12,7 @@ import logging
 import sqlite3
 import glob
 
-# Initialize the monitoring app on port 5001
+# Initialize the monitoring app on port 5002
 app = Flask(__name__, template_folder="monitoring_templates")
 
 # Configure logging
@@ -641,7 +641,7 @@ def start_monitoring_server():
     """Start the monitoring server in a separate thread"""
     from werkzeug.serving import make_server
     import socket
-    port = 5001  # Changed to match documentation
+    port = 5002  # Changed to match documentation
     retries = 3
     for _ in range(retries):
         try:
@@ -666,7 +666,7 @@ def start_monitoring_server():
 
 if __name__ == '__main__':
     # Start server directly when run as script
-    app.run(host='0.0.0.0', port=5001, debug=False)  # Changed to match documentation
+    app.run(host='0.0.0.0', port=5002, debug=False)  # Changed to match documentation
 
 import streamlit as st
 import requests
