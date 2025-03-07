@@ -36,7 +36,7 @@ class ReelsPublisher:
     """
     
     # API Graph do Instagram (versão atualizada)
-    API_VERSION = 'v18.0'
+    API_VERSION = 'v22.0'
     
     # Configurações específicas para Reels
     REELS_CONFIG = {

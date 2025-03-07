@@ -13,7 +13,7 @@ class RateLimitError(Exception):
 class InstagramCarouselService:
     """Classe para gerenciar o upload e publicação de carrosséis no Instagram."""
     
-    API_VERSION = "v18.0"  # Latest stable version
+    API_VERSION = "v22.0"  # Latest stable version
     SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png"]
     MAX_MEDIA_SIZE = 8 * 1024 * 1024  # 8MB in bytes
     
