@@ -1,12 +1,8 @@
 import os
 import io
 import time
-import json
 import base64
-import requests
-import mimetypes
 from PIL import Image
-from src.utils.paths import Paths
 import logging
 
 import sys

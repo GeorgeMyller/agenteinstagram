@@ -1,7 +1,5 @@
 import streamlit as st
 from src.services.instagram_send import InstagramSend
-from src.utils.image_decode_save import ImageDecodeSaver
-from src.utils.video_decode_save import VideoDecodeSaver
 import os
 from PIL import Image
 import io
@@ -148,8 +146,7 @@ else:  # Reels Video
         caption = st.text_area('Enter your caption or leave blank for AI-generated caption', height=100)
         
         st.subheader('Hashtags')
-        hashtags = st.text_area('Enter hashtags (comma separated, without #)', height=50, 
-                               placeholder="instagram, reels, ai, technology")
+        hashtags = st.text_area('Enter hashtags (comma separated, without #)', height=68, key='hashtags')
         
         share_to_feed = st.checkbox('Share to Feed', value=True)
         word_limit = st.slider('Caption Word Limit', min_value=50, max_value=300, value=150, step=50)

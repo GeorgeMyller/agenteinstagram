@@ -1,5 +1,4 @@
 import os
-import requests
 import time
 from dotenv import load_dotenv
 # from your_upload_service import YourUploadClient  # Substitua pelo seu cliente

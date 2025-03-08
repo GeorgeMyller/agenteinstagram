@@ -1,10 +1,8 @@
 import os
 import time
-import json
 import uuid
 import threading
 import logging
-from datetime import datetime
 from queue import Queue, Empty
 from threading import Thread
 
@@ -14,11 +12,9 @@ logger = logging.getLogger('PostQueue')
 
 class ContentPolicyViolation(Exception):
     """Exceção para violações de política de conteúdo"""
-    pass
 
 class RateLimitExceeded(Exception):
     """Exceção para limites de taxa excedidos"""
-    pass
 
 # Add PostStatus class that monitor.py is trying to import
 class PostStatus:
@@ -71,12 +67,12 @@ class PostQueue:
             self.worker_thread.join(timeout=5.0)
             logger.info("Worker de processamento encerrado")
     
-    def add_job(self, media_paths, caption, inputs=None) -> str:
+    def add_job(self, media_path, caption, inputs=None) -> str:
         """
         Adiciona um novo trabalho à fila
         
         Args:
-            media_paths (list): Lista de caminhos dos arquivos de mídia (imagens ou vídeos)
+            media_path (str or list): Caminho do arquivo de mídia ou lista de caminhos
             caption (str): Legenda do post
             inputs (dict): Configurações adicionais
             
@@ -85,9 +81,20 @@ class PostQueue:
         """
         job_id = str(uuid.uuid4())
         
+        # Converter media_path para lista se for string
+        media_paths = media_path if isinstance(media_path, list) else [media_path]
+        
         # Verificar tipo de conteúdo
-        is_video = any(path.lower().endswith(('.mp4', '.mov', '.avi', '.wmv')) for path in media_paths)
-        content_type = "carrossel" if len(media_paths) > 1 else ("reel" if is_video else "image")
+        content_type = "image"  # default
+        if inputs and "content_type" in inputs:
+            content_type = inputs["content_type"]  # Use explicit content type if provided
+        elif len(media_paths) > 1:
+            content_type = "carrossel"
+        else:
+            # Check file extension for video
+            path = media_paths[0]
+            if isinstance(path, str) and path.lower().endswith(('.mp4', '.mov', '.avi', '.wmv')):
+                content_type = "reel"
         
         job_data = {
             "id": job_id,
@@ -102,19 +109,24 @@ class PostQueue:
             "content_type": content_type
         }
         
-        # Armazenar informações do trabalho
+        # Validate paths exist
+        for path in media_paths:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Media file not found: {path}")
+        
+        # Store job information
         self.jobs[job_id] = job_data
         
-        # Adicionar à fila de processamento
+        # Add to processing queue
         self.job_queue.put(job_id)
         
-        # Atualizar estatísticas
+        # Update statistics
         with self.processing_lock:
             self.stats["total_jobs"] += 1
             if content_type == "reel":
                 self.stats["video_processing_jobs"] += 1
-            elif content_type == "carousel":
-                self.stats["image_processing_jobs"] += 1  # Considerar carrossel como imagem para estatísticas
+            else:
+                self.stats["image_processing_jobs"] += 1
         
         logger.info(f"Novo trabalho adicionado: {job_id} ({content_type})")
         return job_id

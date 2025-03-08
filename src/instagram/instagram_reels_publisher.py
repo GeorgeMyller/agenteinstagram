@@ -13,15 +13,10 @@ import json
 import logging
 import random
 import requests
-import traceback
-import sys
 from datetime import datetime
-from urllib.parse import urlencode
 from dotenv import load_dotenv
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from pathlib import Path
-from src.instagram.instagram_video_processor import VideoProcessor
 from src.instagram.instagram_video_uploader import VideoUploader
 from src.instagram.instagram_video_processor import InstagramVideoProcessor
 from imgurpython import ImgurClient
@@ -512,6 +507,12 @@ class ReelsPublisher:
                     is_video_optimized = True
                 else:
                     logger.warning("Falha na otimização automática. Tentando upload do vídeo original.")
+            
+            # Adicionar uma segunda validação após a otimização
+            is_valid, message = uploader.validate_video(video_to_upload)
+            if not is_valid:
+                logger.error(f"Vídeo ainda não atende aos requisitos após otimização: {message}")
+                return None
             
             # Processar thumbnail se fornecida
             if thumbnail_path and os.path.exists(thumbnail_path):

@@ -1,12 +1,9 @@
 import os
 import logging
-import subprocess
-import json
 import time
 import shutil
 from typing import Tuple, Dict, Any, Optional
 from moviepy.editor import VideoFileClip
-import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

@@ -23,6 +23,10 @@ from src.services.send import sender #Para enviar mensagens de volta
 
 app = Flask(__name__)
 
+# Initialize required directories
+os.makedirs(os.path.join(Paths.ROOT_DIR, "temp_videos"), exist_ok=True)
+os.makedirs(os.path.join(Paths.ROOT_DIR, "temp"), exist_ok=True)
+
 border_image = "moldura.png"
 
 # Variáveis de estado para o modo carrossel
@@ -197,7 +201,6 @@ def disable_firewall():
 # Install psutil if not already installed
 def ensure_dependencies():
     try:
-        import psutil
         print("Dependências já instaladas.")
     except ImportError:
         print("Instalando dependências necessárias...")

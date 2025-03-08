@@ -2,17 +2,15 @@ from flask import Flask, jsonify, request, render_template
 import threading
 import time
 import os
-import json
 import psutil
 from datetime import datetime
 from src.services.post_queue import post_queue, PostStatus
 from src.instagram.instagram_post_service import InstagramPostService
 from src.services.instagram_send import InstagramSend
 import logging
-import sqlite3
 import glob
 
-# Initialize the monitoring app on port 5002
+# Initialize the monitoring app on port 5501
 app = Flask(__name__, template_folder="monitoring_templates")
 
 # Configure logging
@@ -641,7 +639,7 @@ def start_monitoring_server():
     """Start the monitoring server in a separate thread"""
     from werkzeug.serving import make_server
     import socket
-    port = 5002  # Changed to match documentation
+    port = 5501  # Changed to match documentation
     retries = 3
     for _ in range(retries):
         try:
@@ -666,14 +664,13 @@ def start_monitoring_server():
 
 if __name__ == '__main__':
     # Start server directly when run as script
-    app.run(host='0.0.0.0', port=5002, debug=False)  # Changed to match documentation
+    app.run(host='0.0.0.0', port=5501, debug=False)  # Changed to match documentation
 
 import streamlit as st
 import requests
 import time
 import pandas as pd
 import plotly.express as px
-import matplotlib.pyplot as plt
 import datetime
 import os
 from src.services.instagram_send import InstagramSend
@@ -689,7 +686,7 @@ st.set_page_config(
 st.title('📊 Monitoramento do Agent Social Media')
 
 # Definir URL base da API
-API_BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:3000')
+API_BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:5001')
 
 # Sidebar para configurações
 st.sidebar.header('Configurações')

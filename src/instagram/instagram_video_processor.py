@@ -82,12 +82,10 @@ class VideoProcessor:
         """Verifica se a duração está dentro dos limites."""
         if post_type == 'reels':
             return 3 <= duration <= 90
-        elif post_type == 'feed':
-            return 3 <= duration <= 60 #duração máxima para feed é 60 segundos.
-        elif post_type == 'story':
-            return duration <= 60
+        elif post_type == 'carousel':
+            return 3 <= duration <= 60
         else:
-            return True  # Sem limite para outros tipos (ou você pode definir um limite padrão)
+            return False  # Não suportado
 
     @staticmethod
     def check_resolution(width, height, post_type):
@@ -106,14 +104,23 @@ class VideoProcessor:
     @staticmethod
     def check_aspect_ratio(width, height, post_type):
         """Verifica se a proporção está dentro dos limites."""
-        aspect_ratio = width / height
-        return 0.8 <= aspect_ratio <= 1.91  # Entre 4:5 e 1.91:1
+        if post_type == 'reels':
+            return 0.8 <= width / height <= 1.91
+        elif post_type == 'carousel':
+            return 0.8 <= width / height <= 1.91
+        else:
+            return False  # Não suportado
 
 
     @staticmethod
     def check_file_size(file_size, post_type):
         """Verifica se o tamanho do arquivo está dentro dos limites."""
-        max_size_mb = 100  # 100MB para Reels (ajuste se necessário)
+        if post_type == 'reels':
+            max_size_mb = 100
+        elif post_type == 'carousel':
+            max_size_mb = 100
+        else:
+            return False  # Não suportado
         max_size_bytes = max_size_mb * 1024 * 1024
         return file_size <= max_size_bytes
     
@@ -136,8 +143,11 @@ class VideoProcessor:
         return clip
 
     @staticmethod
-    def optimize_for_instagram(video_path, post_type='feed'):
+    def optimize_for_instagram(video_path, post_type='reels'):
         """Otimiza um vídeo para o Instagram usando moviepy."""
+        if post_type not in ['reels', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+
         video_info = VideoProcessor.get_video_info(video_path)
         if not video_info:
             return None
@@ -150,9 +160,7 @@ class VideoProcessor:
                     #Cortar ou estender o video
                     if post_type == 'reels':
                       max_duration = 90
-                    elif post_type == 'feed':
-                      max_duration = 60
-                    elif post_type == 'story':
+                    elif post_type == 'carousel':
                       max_duration = 60
                     else:
                       max_duration = video_info['duration'] #Não alterar
@@ -180,10 +188,8 @@ class VideoProcessor:
                     # Ajustar a proporção (cortando)
                     if post_type == 'reels':
                         target_aspect_ratio = 9/16
-                    elif post_type == 'feed':
+                    elif post_type == 'carousel':
                         target_aspect_ratio = 1 #Exemplo, pode ser outro
-                    elif post_type == 'story':
-                        target_aspect_ratio = 9/16
                     else:
                         target_aspect_ratio = clip.size[0] / clip.size[1] #Manter original
                     
@@ -222,11 +228,14 @@ class VideoProcessor:
         
         Args:
             video_path (str): Caminho para o arquivo de vídeo
-            post_type (str): Tipo de post ('reels', 'feed', 'story', 'igtv')
+            post_type (str): Tipo de post ('reels', 'carousel')
             
         Returns:
             tuple: (is_valid, message) - Se o vídeo é válido e mensagem explicativa
         """
+        if post_type not in ['reels', 'carousel']:
+            return False, "Tipo de post não suportado"
+
         if not os.path.exists(video_path):
             return False, "Arquivo de vídeo não encontrado"
             
@@ -244,13 +253,8 @@ class VideoProcessor:
             
             if post_type == 'reels':
                 max_duration = 90
-            elif post_type == 'feed':
+            elif post_type == 'carousel':
                 max_duration = 60
-            elif post_type == 'story':
-                max_duration = 60
-            else:  # IGTV
-                min_duration = 60
-                max_duration = 3600  # 1h
                 
             if info['duration'] < min_duration:
                 issues.append(f"Vídeo muito curto (duração: {info['duration']:.1f}s, mínimo: {min_duration}s)")
@@ -268,14 +272,10 @@ class VideoProcessor:
             # Verificar proporção
             aspect_ratio = info['width'] / info['height'] if info['height'] > 0 else 0
             
-            if post_type == 'reels' or post_type == 'story':
-                # Reels e Stories: proporção vertical (9:16 ideal, aceita 4:5 até 1.91:1)
+            if post_type == 'reels' or post_type == 'carousel':
+                # Reels e Carousel: proporção vertical (9:16 ideal, aceita 4:5 até 1.91:1)
                 if aspect_ratio > 0.8:  # Muito largo
                     issues.append(f"Proporção inadequada para {post_type} ({aspect_ratio:.2f}:1, ideal 9:16 = 0.56:1)")
-            elif post_type == 'feed':
-                # Feed: aceita proporções de 4:5 até 1.91:1
-                if aspect_ratio < 0.8 or aspect_ratio > 1.91:
-                    issues.append(f"Proporção inadequada para feed ({aspect_ratio:.2f}:1, aceitável: 0.8 a 1.91:1)")
             
             # Verificar tamanho do arquivo
             max_file_size_mb = 100
@@ -416,19 +416,22 @@ class VideoProcessor:
             return 0
 
     @staticmethod
-    def force_optimize_for_instagram(video_path, output_path=None, post_type='reels'):
+    def force_optimize_for_instagram(video_path: str, output_path: str = None, post_type: str = 'reels') -> str:
         """
-        Otimização forçada de vídeo usando ffmpeg diretamente, para casos 
+        Otimização forçada de vídeo usando ffmpeg diretamente, para casos
         onde a otimização normal falha. Útil para resolver o erro 2207026.
         
         Args:
             video_path (str): Caminho para o arquivo de vídeo
             output_path (str, optional): Caminho para salvar o vídeo otimizado
             post_type (str): Tipo de post ('reels', 'feed', 'story', 'igtv')
-            
+        
         Returns:
             str: Caminho para o vídeo otimizado ou None em caso de falha
         """
+        if post_type not in ['reels', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+
         try:
             # Verificar se ffmpeg está disponível
             try:
@@ -436,24 +439,21 @@ class VideoProcessor:
             except (subprocess.SubprocessError, FileNotFoundError):
                 logger.error("ffmpeg não disponível para otimização forçada")
                 return None
-                
+
             # Definir proporções ideais baseadas no tipo de post
-            if post_type in ['reels', 'story']:
+            if post_type in ['reels', 'carousel']:
                 target_width = 1080
                 target_height = 1920
-            elif post_type == 'feed':
-                target_width = 1080
-                target_height = 1080
-            else:  # IGTV
+            else:
                 target_width = 1080
                 target_height = 1920
-                
+
             # Gerar output_path se não fornecido
             if output_path is None:
                 base_name = os.path.basename(video_path)
                 name, _ = os.path.splitext(base_name)
                 output_path = os.path.join(tempfile.gettempdir(), f"{name}_optimized_{post_type}.mp4")
-                
+
             # Comando ffmpeg para otimização forçada
             cmd = [
                 'ffmpeg',
@@ -473,17 +473,17 @@ class VideoProcessor:
                 '-y',                      # Sobrescrever arquivo de saída
                 output_path
             ]
-            
+
             logger.info(f"Comando de otimização forçada: {' '.join(cmd)}")
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+
             if result.returncode != 0:
                 logger.error(f"Falha na otimização forçada: {result.stderr.decode('utf-8', errors='replace')}")
                 return None
-                
+
             logger.info(f"Otimização forçada concluída: {output_path}")
             return output_path
-            
+
         except Exception as e:
             logger.error(f"Erro na otimização forçada: {str(e)}")
             return None
@@ -493,22 +493,13 @@ class InstagramVideoProcessor:
     
     # Requisitos do Instagram
     INSTAGRAM_SPECS = {
-        'feed': {
-            'resolution': (1080, 1080),  # 1:1
-            'max_duration': 60,  # segundos
-        },
-        'story': {
-            'resolution': (1080, 1920),  # 9:16
-            'max_duration': 15,  # segundos
-        },
         'reel': {
             'resolution': (1080, 1920),  # 9:16
             'max_duration': 90,  # segundos
         },
-        'igtv': {
-            'resolution': (1080, 1920),  # 9:16
-            'max_duration': 3600,  # 60 minutos
-            'min_duration': 60,  # 1 minuto
+        'carousel': {
+            'resolution': (1080, 1080),  # 1:1
+            'max_duration': 60,  # segundos
         }
     }
     
@@ -558,23 +549,23 @@ class InstagramVideoProcessor:
             return composite_clip.set_duration(clip.duration)
     
     @staticmethod
-    def process_video(video_path, post_type='feed', output_path=None):
+    def process_video(video_path, post_type='reel', output_path=None):
         """
         Processa um vídeo para atender aos requisitos do Instagram
         
         Args:
             video_path (str): Caminho para o arquivo de vídeo original
-            post_type (str): Tipo de post ('feed', 'story', 'reel', 'igtv')
+            post_type (str): Tipo de post ('reel', 'carousel')
             output_path (str, optional): Caminho para salvar o vídeo processado
             
         Returns:
             str: Caminho para o vídeo processado
         """
+        if post_type not in ['reel', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+
         # Aplicar patch para a biblioteca PIL/Pillow
         _apply_pillow_patch()
-        
-        if post_type not in InstagramVideoProcessor.INSTAGRAM_SPECS:
-            raise ValueError(f"Tipo de post inválido: {post_type}. Use 'feed', 'story', 'reel' ou 'igtv'")
         
         # Carrega o vídeo
         clip = VideoFileClip(video_path)
@@ -592,10 +583,6 @@ class InstagramVideoProcessor:
         if clip.duration > max_duration:
             clip = clip.subclip(0, max_duration)
             
-        # Verifica duração mínima para IGTV
-        if post_type == 'igtv' and clip.duration < InstagramVideoProcessor.INSTAGRAM_SPECS[post_type]['min_duration']:
-            print(f"Aviso: Vídeo muito curto para IGTV (mínimo: {InstagramVideoProcessor.INSTAGRAM_SPECS[post_type]['min_duration']}s)")
-        
         # Define FPS para 30
         clip = clip.set_fps(30)
         
@@ -633,11 +620,14 @@ class InstagramVideoProcessor:
         
         Args:
             video_path (str): Caminho para o arquivo de vídeo
-            post_type (str): Tipo de post ('reels', 'feed', 'story', 'igtv')
+            post_type (str): Tipo de post ('reels', 'carousel')
             
         Returns:
             tuple: (is_valid, message) - Se o vídeo é válido e mensagem explicativa
         """
+        if post_type not in ['reels', 'carousel']:
+            return False, "Tipo de post não suportado"
+
         if not os.path.exists(video_path):
             return False, "Arquivo de vídeo não encontrado"
             
@@ -655,13 +645,8 @@ class InstagramVideoProcessor:
             
             if post_type == 'reels':
                 max_duration = 90
-            elif post_type == 'feed':
+            elif post_type == 'carousel':
                 max_duration = 60
-            elif post_type == 'story':
-                max_duration = 60
-            else:  # IGTV
-                min_duration = 60
-                max_duration = 3600  # 1h
                 
             if info['duration'] < min_duration:
                 issues.append(f"Vídeo muito curto (duração: {info['duration']:.1f}s, mínimo: {min_duration}s)")
@@ -679,17 +664,10 @@ class InstagramVideoProcessor:
             # Verificar proporção
             aspect_ratio = info['width'] / info['height'] if info['height'] > 0 else 0
             
-            if post_type == 'reels' or post_type == 'story':
-                # Reels e Stories: proporção vertical (9:16 ideal, aceita 4:5 até 1.91:1)
+            if post_type == 'reels' or post_type == 'carousel':
+                # Reels e Carousel: proporção vertical (9:16 ideal, aceita 4:5 até 1.91:1)
                 if aspect_ratio > 0.8:  # Muito largo
                     issues.append(f"Proporção inadequada para {post_type} ({aspect_ratio:.2f}:1, ideal 9:16 = 0.56:1)")
-            elif post_type == 'feed':
-                # Feed: aceita proporções de 4:5 até 1.91:1
-                if aspect_ratio < 0.8 or aspect_ratio > 1.91:
-                    issues.append(f"Proporção inadequada para feed ({aspect_ratio:.2f}:1, aceitável: 0.8 a 1.91:1)")
-            else:
-                if aspect_ratio < 1.77 or aspect_ratio > 1.91:
-                    issues.append(f"Proporção inadequada para IGTV ({aspect_ratio:.2f}:1, ideal 16:9 = 1.78:1)")
             
             # Verificar tamanho do arquivo
             max_file_size_mb = 100
@@ -785,7 +763,6 @@ class InstagramVideoProcessor:
             # Calcular aspect ratio
             if 'width' in video_info and 'height' in video_info and video_info['height'] > 0:
                 video_info['aspect_ratio'] = video_info['width'] / video_info['height']
-                video_info['aspect_ratio'] = video_info['width'] / video_info['height']
                 
             return video_info
             
@@ -831,19 +808,22 @@ class InstagramVideoProcessor:
             return 0
 
     @staticmethod
-    def force_optimize_for_instagram(video_path, output_path=None, post_type='reels'):
+    def force_optimize_for_instagram(video_path: str, output_path: str = None, post_type: str = 'reels') -> str:
         """
-        Otimização forçada de vídeo usando ffmpeg diretamente, para casos 
+        Otimização forçada de vídeo usando ffmpeg diretamente, para casos
         onde a otimização normal falha. Útil para resolver o erro 2207026.
         
         Args:
             video_path (str): Caminho para o arquivo de vídeo
             output_path (str, optional): Caminho para salvar o vídeo otimizado
             post_type (str): Tipo de post ('reels', 'feed', 'story', 'igtv')
-            
+        
         Returns:
             str: Caminho para o vídeo otimizado ou None em caso de falha
         """
+        if post_type not in ['reels', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+
         try:
             # Verificar se ffmpeg está disponível
             try:
@@ -851,24 +831,21 @@ class InstagramVideoProcessor:
             except (subprocess.SubprocessError, FileNotFoundError):
                 logger.error("ffmpeg não disponível para otimização forçada")
                 return None
-                
+
             # Definir proporções ideais baseadas no tipo de post
-            if post_type in ['reels', 'story']:
+            if post_type in ['reels', 'carousel']:
                 target_width = 1080
                 target_height = 1920
-            elif post_type == 'feed':
-                target_width = 1080
-                target_height = 1080
-            else:  # IGTV
+            else:
                 target_width = 1080
                 target_height = 1920
-                
+
             # Gerar output_path se não fornecido
             if output_path is None:
                 base_name = os.path.basename(video_path)
                 name, _ = os.path.splitext(base_name)
                 output_path = os.path.join(tempfile.gettempdir(), f"{name}_optimized_{post_type}.mp4")
-                
+
             # Comando ffmpeg para otimização forçada
             cmd = [
                 'ffmpeg',
@@ -888,17 +865,17 @@ class InstagramVideoProcessor:
                 '-y',                      # Sobrescrever arquivo de saída
                 output_path
             ]
-            
+
             logger.info(f"Comando de otimização forçada: {' '.join(cmd)}")
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
+
             if result.returncode != 0:
                 logger.error(f"Falha na otimização forçada: {result.stderr.decode('utf-8', errors='replace')}")
                 return None
-                
+
             logger.info(f"Otimização forçada concluída: {output_path}")
             return output_path
-            
+
         except Exception as e:
             logger.error(f"Erro na otimização forçada: {str(e)}")
             return None

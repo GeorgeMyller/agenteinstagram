@@ -2,10 +2,9 @@
 
 import os
 import time
-import requests
 import logging
 import mimetypes
-from typing import List, Tuple, Callable, Dict, Any, Optional
+from typing import List, Tuple, Callable, Dict, Optional
 from dotenv import load_dotenv
 from src.instagram.instagram_carousel_service import InstagramCarouselService, RateLimitError
 from src.instagram.image_uploader import ImageUploader  # Para upload das imagens
@@ -41,11 +40,9 @@ class CarouselError(Exception):
 
 class AuthenticationError(CarouselError):
     """Raised when there's an issue with authentication (codes 102, 190, etc)."""
-    pass
 
 class PermissionError(CarouselError):
     """Raised when there's an issue with permissions (codes 10, 200, 203, etc)."""
-    pass
 
 class ThrottlingError(CarouselError):
     """Raised when API rate limits are hit (codes 4, 17, 32, 613, etc)."""
@@ -55,19 +52,15 @@ class ThrottlingError(CarouselError):
 
 class ImageValidationError(CarouselError):
     """Raised when an image fails validation."""
-    pass
 
 class ImageUploadError(CarouselError):
     """Raised when an image fails to upload."""
-    pass
 
 class CarouselCreationError(CarouselError):
     """Raised when the carousel container fails to be created."""
-    pass
 
 class CarouselPublishError(CarouselError):
     """Raised when the carousel fails to publish."""
-    pass
 
 class ServerError(CarouselError):
     """Raised when Instagram/Facebook server errors occur (codes 1, 2, etc)."""

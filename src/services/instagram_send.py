@@ -1,19 +1,16 @@
 import os
 import time
 import requests
-import uuid
 from src.instagram.crew_post_instagram import InstagramPostCrew
 from src.instagram.describe_image_tool import ImageDescriber
 from src.instagram.instagram_post_service import InstagramPostService
-from src.instagram.instagram_carousel_service import InstagramCarouselService
 from src.instagram.border import ImageWithBorder
 from src.instagram.filter import FilterImage
 from src.utils.paths import Paths
 from src.instagram.image_uploader import ImageUploader
-from src.instagram.carousel_poster import upload_carousel_images
 
 # Import new queue system
-from src.services.post_queue import post_queue, RateLimitExceeded, ContentPolicyViolation
+from src.services.post_queue import post_queue, RateLimitExceeded
 
 class InstagramSend:
     # Keep track of rate limits
