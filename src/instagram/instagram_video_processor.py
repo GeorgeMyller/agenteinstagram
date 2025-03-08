@@ -13,6 +13,10 @@ import subprocess
 import re
 import json
 from pathlib import Path
+from typing import Optional
+import moviepy.editor as mp
+from moviepy.video.fx.all import resize
+from src.utils.paths import Paths
 
 # Defina um diretório temporário para o moviepy usar (opcional, mas recomendado)
 # change_settings({"TEMP_DIR": "/caminho/para/seu/diretorio/temporario"}) # Linux/macOS
@@ -489,393 +493,147 @@ class VideoProcessor:
             return None
 
 class InstagramVideoProcessor:
-    """Classe para processar vídeos para o Instagram usando moviepy"""
+    """
+    Class for processing and optimizing videos for Instagram.
+    """
     
-    # Requisitos do Instagram
     INSTAGRAM_SPECS = {
         'reel': {
-            'resolution': (1080, 1920),  # 9:16
-            'max_duration': 90,  # segundos
+            'width': 1080,
+            'height': 1920,
+            'aspect_ratio': 9/16,
+            'max_duration': 90,
+            'min_duration': 3,
+            'target_duration': 30,
+            'fps': 30,
+            'audio_bitrate': '128k',
+            'video_bitrate': '2000k'
         },
-        'carousel': {
-            'resolution': (1080, 1080),  # 1:1
-            'max_duration': 60,  # segundos
+        'post': {
+            'width': 1080,
+            'height': 1080,
+            'aspect_ratio': 1,
+            'max_duration': 60,
+            'min_duration': 3,
+            'target_duration': 30,
+            'fps': 30,
+            'audio_bitrate': '128k',
+            'video_bitrate': '2000k'
         }
     }
-    
-    @staticmethod
-    def _resize_video(clip, target_resolution):
-        """
-        Redimensiona um vídeo para a resolução alvo, preservando a proporção e preenchendo
-        áreas vazias com barras pretas se necessário.
-        
-        Args:
-            clip (VideoFileClip): Clip de vídeo para redimensionar
-            target_resolution (tuple): Resolução alvo no formato (largura, altura)
-            
-        Returns:
-            VideoFileClip: Clip de vídeo redimensionado
-        """
-        target_width, target_height = target_resolution
-        target_aspect_ratio = target_width / target_height
-        current_aspect_ratio = clip.size[0] / clip.size[1]
-        
-        # Determine se devemos ajustar com base na largura ou altura
-        if current_aspect_ratio > target_aspect_ratio:
-            # Vídeo é mais largo do que o alvo, ajustar pela largura
-            new_height = int(target_width / current_aspect_ratio)
-            resized_clip = clip.resize(width=target_width, height=new_height)
-            # Criar fundo preto
-            background = ColorClip(size=target_resolution, color=(0, 0, 0))
-            # Centralizar vídeo no fundo
-            y_offset = (target_height - new_height) // 2
-            composite_clip = CompositeVideoClip([
-                background,
-                resized_clip.set_position(('center', y_offset))
-            ])
-            return composite_clip.set_duration(clip.duration)
-        else:
-            # Vídeo é mais alto do que o alvo, ajustar pela altura
-            new_width = int(target_height * current_aspect_ratio)
-            resized_clip = clip.resize(width=new_width, height=target_height)
-            # Criar fundo preto
-            background = ColorClip(size=target_resolution, color=(0, 0, 0))
-            # Centralizar vídeo no fundo
-            x_offset = (target_width - new_width) // 2
-            composite_clip = CompositeVideoClip([
-                background,
-                resized_clip.set_position((x_offset, 'center'))
-            ])
-            return composite_clip.set_duration(clip.duration)
-    
-    @staticmethod
-    def process_video(video_path, post_type='reel', output_path=None):
-        """
-        Processa um vídeo para atender aos requisitos do Instagram
-        
-        Args:
-            video_path (str): Caminho para o arquivo de vídeo original
-            post_type (str): Tipo de post ('reel', 'carousel')
-            output_path (str, optional): Caminho para salvar o vídeo processado
-            
-        Returns:
-            str: Caminho para o vídeo processado
-        """
-        if post_type not in ['reel', 'carousel']:
-            raise ValueError(f"Tipo de post não suportado: {post_type}")
 
-        # Aplicar patch para a biblioteca PIL/Pillow
-        _apply_pillow_patch()
-        
-        # Carrega o vídeo
-        clip = VideoFileClip(video_path)
-        
-        # Ajusta a resolução
-        target_resolution = InstagramVideoProcessor.INSTAGRAM_SPECS[post_type]['resolution']
-        try:
-            clip = InstagramVideoProcessor._resize_video(clip, target_resolution)
-        except Exception as e:
-            print(f"Aviso: Erro ao redimensionar vídeo: {e}")
-            print("Continuando com o tamanho original")
-        
-        # Ajusta a duração
-        max_duration = InstagramVideoProcessor.INSTAGRAM_SPECS[post_type]['max_duration']
-        if clip.duration > max_duration:
-            clip = clip.subclip(0, max_duration)
-            
-        # Define FPS para 30
-        clip = clip.set_fps(30)
-        
-        # Configura caminho de saída
-        if output_path is None:
-            base_name = os.path.basename(video_path)
-            name, _ = os.path.splitext(base_name)
-            output_path = os.path.join(tempfile.gettempdir(), f"{name}_instagram_{post_type}.mp4")
-        
-        # Salva o vídeo processado
-        clip.write_videofile(
-            output_path,
-            codec="libx264",
-            audio_codec="aac",
-            temp_audiofile=os.path.join(tempfile.gettempdir(), "temp_audio.m4a"),
-            remove_temp=True,
-            preset="ultrafast",  # para testes; use "medium" para melhor qualidade/tamanho
-            threads=4
-        )
-        
-        clip.close()
-        
-        # Verificar se o vídeo processado atende aos requisitos do Instagram
-        is_valid, message = InstagramVideoProcessor.validate_video(output_path, post_type)
-        if not is_valid:
-            print(f"Erro: Vídeo processado não atende aos requisitos: {message}")
-            return None
-        
-        return output_path
-    
-    @staticmethod
-    def validate_video(video_path, post_type='reels'):
+    def __init__(self):
+        """Initialize paths."""
+        self.temp_dir = os.path.join(Paths.ROOT_DIR, "temp_videos")
+        os.makedirs(self.temp_dir, exist_ok=True)
+
+    def process_video(self, video_path: str, post_type: str = 'reel') -> Optional[str]:
         """
-        Valida se um vídeo atende aos requisitos do Instagram.
+        Process and optimize a video for Instagram.
         
         Args:
-            video_path (str): Caminho para o arquivo de vídeo
-            post_type (str): Tipo de post ('reels', 'carousel')
+            video_path: Path to input video
+            post_type: Type of post ('reel' or 'post')
             
         Returns:
-            tuple: (is_valid, message) - Se o vídeo é válido e mensagem explicativa
+            Optional[str]: Path to processed video if successful
         """
-        if post_type not in ['reels', 'carousel']:
-            return False, "Tipo de post não suportado"
+        if post_type not in self.INSTAGRAM_SPECS:
+            raise ValueError(f"Invalid post type: {post_type}")
 
-        if not os.path.exists(video_path):
-            return False, "Arquivo de vídeo não encontrado"
-            
-        try:
-            # Obter informações do vídeo
-            info = VideoProcessor.get_video_info(video_path)
-            
-            if not info:
-                return False, "Não foi possível analisar o vídeo"
-                
-            issues = []
-            
-            # Verificar duração
-            min_duration = 3  # Todos os tipos precisam de pelo menos 3s
-            
-            if post_type == 'reels':
-                max_duration = 90
-            elif post_type == 'carousel':
-                max_duration = 60
-                
-            if info['duration'] < min_duration:
-                issues.append(f"Vídeo muito curto (duração: {info['duration']:.1f}s, mínimo: {min_duration}s)")
-            
-            if info['duration'] > max_duration:
-                issues.append(f"Vídeo muito longo (duração: {info['duration']:.1f}s, máximo: {max_duration}s)")
-            
-            # Verificar resolução
-            min_resolution = 500
-            recommended_resolution = 1080
-            
-            if info['width'] < min_resolution or info['height'] < min_resolution:
-                issues.append(f"Resolução muito baixa ({info['width']}x{info['height']}, mínimo recomendado: {min_resolution}px)")
-                
-            # Verificar proporção
-            aspect_ratio = info['width'] / info['height'] if info['height'] > 0 else 0
-            
-            if post_type == 'reels' or post_type == 'carousel':
-                # Reels e Carousel: proporção vertical (9:16 ideal, aceita 4:5 até 1.91:1)
-                if aspect_ratio > 0.8:  # Muito largo
-                    issues.append(f"Proporção inadequada para {post_type} ({aspect_ratio:.2f}:1, ideal 9:16 = 0.56:1)")
-            
-            # Verificar tamanho do arquivo
-            max_file_size_mb = 100
-            file_size_mb = info['file_size_mb']
-            
-            if file_size_mb > max_file_size_mb:
-                issues.append(f"Tamanho do arquivo excede o limite ({file_size_mb:.1f}MB, máximo: {max_file_size_mb}MB)")
-            
-            # Verificar formato/codec se disponível
-            # Note: isso depende de como get_video_info é implementado
-            if 'video_codec' in info:
-                if info['video_codec'] not in ['h264', 'avc1']:
-                    issues.append(f"Codec de vídeo não recomendado ({info['video_codec']}, recomendado: h264)")
-                    
-            if 'audio_codec' in info and info['audio_codec']:  # Pode ser None para vídeos sem áudio
-                if info['audio_codec'] not in ['aac']:
-                    issues.append(f"Codec de áudio não recomendado ({info['audio_codec']}, recomendado: aac)")
-            
-            # Resumo da validação
-            if issues:
-                return False, "Problemas encontrados: " + "; ".join(issues)
-            else:
-                return True, f"Vídeo adequado para {post_type}"
-                
-        except Exception as e:
-            logger.error(f"Erro durante validação do vídeo: {str(e)}")
-            return False, f"Erro ao validar vídeo: {str(e)}"
-
-    @staticmethod
-    def get_video_info_ffprobe(video_path):
-        """
-        Obtém informações detalhadas do vídeo usando ffprobe, se disponível.
-        Fornece informações mais precisas sobre codecs.
+        specs = self.INSTAGRAM_SPECS[post_type]
         
-        Args:
-            video_path (str): Caminho para o arquivo de vídeo
-            
-        Returns:
-            dict: Informações do vídeo ou None em caso de erro
-        """
         try:
-            # Verificar se ffprobe está disponível
-            try:
-                subprocess.run(['ffprobe', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            except (subprocess.SubprocessError, FileNotFoundError):
-                logger.warning("ffprobe não disponível, usando fallback para informações de vídeo")
-                return None
-                
-            # Executar ffprobe para obter informações do vídeo em formato JSON
-            cmd = [
-                'ffprobe',
-                '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_format',
-                '-show_streams',
-                video_path
-            ]
+            # Load video
+            video = mp.VideoFileClip(video_path)
             
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            
-            if result.returncode != 0:
-                logger.warning(f"ffprobe falhou: {result.stderr}")
-                return None
-                
-            # Converter saída para JSON
-            probe_data = json.loads(result.stdout)
-            
-            # Extrair informações relevantes
-            video_info = {
-                'format': probe_data['format']['format_name'],
-                'duration': float(probe_data['format']['duration']),
-                'file_size_mb': float(probe_data['format']['size']) / (1024 * 1024),
-            }
-            
-            # Encontrar streams de vídeo e áudio
-            for stream in probe_data['streams']:
-                if stream['codec_type'] == 'video':
-                    video_info['width'] = int(stream['width'])
-                    video_info['height'] = int(stream['height'])
-                    video_info['video_codec'] = stream['codec_name'].lower()
-                    if 'r_frame_rate' in stream:
-                        # r_frame_rate é uma string como "30/1"
-                        nums = stream['r_frame_rate'].split('/')
-                        if len(nums) == 2 and int(nums[1]) > 0:
-                            video_info['fps'] = int(nums[0]) / int(nums[1])
-                        else:
-                            video_info['fps'] = float(stream['r_frame_rate'])
-                    
-                elif stream['codec_type'] == 'audio':
-                    video_info['audio_codec'] = stream['codec_name'].lower()
-                    video_info['audio_channels'] = int(stream.get('channels', 0))
-                    
-            # Calcular aspect ratio
-            if 'width' in video_info and 'height' in video_info and video_info['height'] > 0:
-                video_info['aspect_ratio'] = video_info['width'] / video_info['height']
-                
-            return video_info
-            
-        except Exception as e:
-            logger.error(f"Erro ao obter informações avançadas do vídeo: {str(e)}")
-            return None
-            
-    @staticmethod
-    def clean_temp_files(temp_dir, max_age_hours=24):
-        """
-        Remove arquivos temporários antigos.
-        
-        Args:
-            temp_dir (str): Diretório de arquivos temporários
-            max_age_hours (int): Idade máxima em horas para remoção
-            
-        Returns:
-            int: Número de arquivos removidos
-        """
-        try:
-            if not os.path.exists(temp_dir):
-                return 0
-                
-            files_removed = 0
-            current_time = datetime.now()
-            
-            for file_path in Path(temp_dir).glob("*"):
-                if file_path.is_file():
-                    file_age = current_time - datetime.fromtimestamp(file_path.stat().st_mtime)
-                    age_hours = file_age.total_seconds() / 3600
-                    
-                    if age_hours > max_age_hours:
-                        try:
-                            file_path.unlink()
-                            files_removed += 1
-                        except Exception as e:
-                            logger.warning(f"Não foi possível remover {file_path}: {e}")
-                            
-            return files_removed
-            
-        except Exception as e:
-            logger.error(f"Erro ao limpar arquivos temporários: {e}")
-            return 0
-
-    @staticmethod
-    def force_optimize_for_instagram(video_path: str, output_path: str = None, post_type: str = 'reels') -> str:
-        """
-        Otimização forçada de vídeo usando ffmpeg diretamente, para casos
-        onde a otimização normal falha. Útil para resolver o erro 2207026.
-        
-        Args:
-            video_path (str): Caminho para o arquivo de vídeo
-            output_path (str, optional): Caminho para salvar o vídeo otimizado
-            post_type (str): Tipo de post ('reels', 'feed', 'story', 'igtv')
-        
-        Returns:
-            str: Caminho para o vídeo otimizado ou None em caso de falha
-        """
-        if post_type not in ['reels', 'carousel']:
-            raise ValueError(f"Tipo de post não suportado: {post_type}")
-
-        try:
-            # Verificar se ffmpeg está disponível
-            try:
-                subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            except (subprocess.SubprocessError, FileNotFoundError):
-                logger.error("ffmpeg não disponível para otimização forçada")
+            # Process video
+            processed = self._optimize_video(video, specs)
+            if not processed:
                 return None
 
-            # Definir proporções ideais baseadas no tipo de post
-            if post_type in ['reels', 'carousel']:
-                target_width = 1080
-                target_height = 1920
-            else:
-                target_width = 1080
-                target_height = 1920
-
-            # Gerar output_path se não fornecido
-            if output_path is None:
-                base_name = os.path.basename(video_path)
-                name, _ = os.path.splitext(base_name)
-                output_path = os.path.join(tempfile.gettempdir(), f"{name}_optimized_{post_type}.mp4")
-
-            # Comando ffmpeg para otimização forçada
-            cmd = [
-                'ffmpeg',
-                '-i', video_path,
-                '-vf', f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2",
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-profile:v', 'baseline',  # Melhor compatibilidade
-                '-pix_fmt', 'yuv420p',     # Formato de pixel recomendado
-                '-b:v', '4000k',           # Bitrate de vídeo
-                '-maxrate', '4000k',       # Bitrate máximo
-                '-bufsize', '8000k',       # Tamanho do buffer
-                '-c:a', 'aac',             # Codec de áudio
-                '-b:a', '128k',            # Bitrate de áudio
-                '-ar', '44100',            # Taxa de amostragem de áudio
-                '-shortest',               # Usar a duração da mídia mais curta
-                '-y',                      # Sobrescrever arquivo de saída
-                output_path
-            ]
-
-            logger.info(f"Comando de otimização forçada: {' '.join(cmd)}")
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            if result.returncode != 0:
-                logger.error(f"Falha na otimização forçada: {result.stderr.decode('utf-8', errors='replace')}")
-                return None
-
-            logger.info(f"Otimização forçada concluída: {output_path}")
+            # Save processed video
+            output_path = os.path.join(
+                self.temp_dir,
+                f"processed_{os.path.basename(video_path)}"
+            )
+            
+            processed.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                fps=specs['fps'],
+                bitrate=specs['video_bitrate'],
+                audio_bitrate=specs['audio_bitrate'],
+                threads=4,
+                preset='medium'
+            )
+            
+            # Clean up
+            video.close()
+            if processed != video:
+                processed.close()
+                
             return output_path
 
         except Exception as e:
-            logger.error(f"Erro na otimização forçada: {str(e)}")
+            logger.exception(f"Error processing video: {str(e)}")
+            return None
+
+    def _optimize_video(self, video: mp.VideoFileClip, specs: dict) -> Optional[mp.VideoFileClip]:
+        """
+        Optimize video according to specifications.
+        """
+        try:
+            # Check and adjust duration
+            if video.duration > specs['max_duration']:
+                logger.info(f"Video duration ({video.duration}s) exceeds maximum ({specs['max_duration']}s). Trimming...")
+                video = video.subclip(0, specs['max_duration'])
+            elif video.duration < specs['min_duration']:
+                logger.error(f"Video too short ({video.duration}s). Minimum duration is {specs['min_duration']}s")
+                return None
+
+            # Calculate target dimensions while maintaining aspect ratio
+            target_width = specs['width']
+            target_height = specs['height']
+            
+            current_ratio = video.size[1] / video.size[0]
+            target_ratio = specs['aspect_ratio']
+
+            if abs(current_ratio - target_ratio) > 0.1:  # If aspect ratio needs adjustment
+                logger.info(f"Adjusting aspect ratio from {current_ratio:.2f} to {target_ratio:.2f}")
+                
+                if current_ratio < target_ratio:
+                    # Video is too wide, add black bars on top/bottom
+                    final_height = int(video.size[0] * target_ratio)
+                    final_width = video.size[0]
+                else:
+                    # Video is too tall, add black bars on sides
+                    final_width = int(video.size[1] / target_ratio)
+                    final_height = video.size[1]
+
+                # Create black background
+                bg = mp.ColorClip(
+                    size=(final_width, final_height),
+                    color=(0, 0, 0),
+                    duration=video.duration
+                )
+
+                # Center the video
+                x_center = (final_width - video.size[0]) / 2
+                y_center = (final_height - video.size[1]) / 2
+                video = video.set_position((x_center, y_center))
+                
+                # Composite video onto black background
+                video = mp.CompositeVideoClip([bg, video])
+
+            # Resize to target dimensions
+            if video.size != (target_width, target_height):
+                logger.info(f"Resizing video to {target_width}x{target_height}")
+                video = video.resize(width=target_width, height=target_height)
+
+            return video
+
+        except Exception as e:
+            logger.exception(f"Error optimizing video: {str(e)}")
             return None
