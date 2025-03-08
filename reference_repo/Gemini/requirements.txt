@@ -1,0 +1,17 @@
+# requirements.txt
+# This is an *approximate* list of dependencies.
+# You may need to adjust versions based on your specific project setup.
+
+flask>=2.0,<4.0
+requests>=2.25,<3.0
+streamlit>=1.0,<2.0
+python-dotenv>=0.19,<2.0
+Pillow>=9.0,<11.0
+moviepy>=1.0,<2.0
+imgurpython>=1.1,<2.0
+crewai>=0.1,<1.0  # Assuming a recent version
+google-generativeai>=0.1,<1.0
+Werkzeug>=2.0,<4.0
+psutil>=5.8,<6.0
+evolutionapi>=1.0.15  #Added from src/services/send.py
+pilgram>=0.1.1 #Added from src/instagram/filter.py
