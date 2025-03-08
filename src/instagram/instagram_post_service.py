@@ -35,6 +35,36 @@ class InstagramPostService:
         
         # Load previous state if available
         self._load_state()
+        
+        # Validate token before proceeding
+        self._validate_token()
+
+    def _validate_token(self):
+        """Valida o token de acesso antes de fazer requisições."""
+        url = f"https://graph.facebook.com/v22.0/debug_token"
+        params = {
+            "input_token": self.access_token,
+            "access_token": self.access_token
+        }
+        
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            if 'data' in data and data['data'].get('is_valid'):
+                print("Token de acesso validado com sucesso.")
+                
+                # Verificar se tem permissão para publicar
+                if 'instagram_basic' not in data['data'].get('scopes', []) or \
+                   'instagram_content_publish' not in data['data'].get('scopes', []):
+                    print("Token pode não ter permissões para publicar. Verifique se as permissões 'instagram_basic' e 'instagram_content_publish' estão habilitadas.")
+            else:
+                print("Token de acesso inválido ou expirado.")
+                raise ValueError("Token de acesso inválido ou expirado.")
+        except Exception as e:
+            print(f"Erro ao validar token: {e}")
+            raise ValueError("Erro ao validar token.")
 
     def _load_state(self):
         """Load previous API state if available"""
