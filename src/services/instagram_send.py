@@ -11,6 +11,7 @@ from src.instagram.image_uploader import ImageUploader
 
 # Import new queue system
 from src.services.post_queue import post_queue, RateLimitExceeded
+from src.instagram.instagram_post_publisher import PostPublisher
 
 class InstagramSend:
     # Keep track of rate limits
@@ -137,7 +138,7 @@ class InstagramSend:
     def send_instagram(image_path, caption, inputs=None):
         """
         Send an image to Instagram with a caption.
-        
+
         Args:
             image_path (str): Path to the image file
             caption (str): Caption text
@@ -247,10 +248,9 @@ class InstagramSend:
             
             # Post to Instagram with enhanced rate limit handling
             print("Iniciando processo de publicação no Instagram...")
+            
             try:
-                insta_post = InstagramPostService()
-                
-                # Check for severe rate limiting
+                # Verificar limites de requisição
                 stats = post_queue.get_queue_stats()
                 current_time = time.time()
                 
@@ -267,60 +267,27 @@ class InstagramSend:
                         InstagramSend.last_rate_limit_time = 0
                         stats["rate_limited_posts"] = 0
 
+                # Instanciar o serviço e publicar a foto
+                insta_post = InstagramPostService()
                 result = insta_post.post_image(final_image['url'], final_caption)
                 
                 if not result:
-                    print("Falha ao publicar no Instagram. Verificando status...")
-                    raise Exception("Falha na publicação")
-                    
-                print("Post processado e enviado ao Instagram com sucesso!")
+                    print(f"Failed to publish photo from {image_path}")
+                    return None
+
+                print(f"Photo published successfully! ID: {result.get('id')}")
                 return result
-                
             except Exception as e:
-                error_str = str(e).lower()
-                if "rate" in error_str and "limit" in error_str:
-                    InstagramSend.last_rate_limit_time = current_time
-                    raise RateLimitExceeded(f"Taxa de requisições excedida: {str(e)}")
-                print(f"Erro no processo de publicação no Instagram: {str(e)}")
-                raise
+                print(f"Error posting to Instagram: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
+                return None
 
         except Exception as e:
-            print(f"Erro durante o processo de publicação: {str(e)}")
+            print(f"Error publishing photo: {e}")
+            import traceback
+            print(traceback.format_exc())
             return None
-            
-        finally:
-            # Clean up temporary files regardless of success/failure
-            try:
-                # Clean up uploaded images
-                failed_deletions = []
-                for img in uploaded_images:
-                    try:
-                        if img.get("deletehash"):
-                            print(f"Tentando deletar imagem com deletehash: {img.get('deletehash')}...")
-                            if not uploader.delete_image(img["deletehash"]):
-                                failed_deletions.append(img["deletehash"])
-                    except requests.exceptions.HTTPError as e:
-                        if hasattr(e, 'response') and e.response.status_code == 404:
-                            print("Imagem já removida do servidor.")
-                        else:
-                            print(f"Erro ao deletar imagem: {str(e)}")
-                    except Exception as e:
-                        print(f"Erro ao deletar imagem: {str(e)}")
-                
-                if failed_deletions:
-                    print("Aviso: Algumas imagens não puderam ser deletadas:")
-                    for failed_hash in failed_deletions:
-                        print(f"- Deletehash: {failed_hash}")
-                
-                # Clean up local files
-                if image_path and image_path != original_image_path and os.path.exists(image_path):
-                    os.remove(image_path)
-                    print(f"A imagem local {image_path} foi apagada com sucesso.")
-                
-            except Exception as cleanup_error:
-                print(f"Erro ao limpar arquivos temporários: {str(cleanup_error)}")
-        
-        return result
 
     @staticmethod
     def send_reels(video_path, caption, inputs=None):

@@ -2,8 +2,10 @@ import os
 import time
 import json
 import logging
+import random
 from datetime import datetime
 from dotenv import load_dotenv
+from imgurpython import ImgurClient
 from src.instagram.base_instagram_service import (
     BaseInstagramService, AuthenticationError, PermissionError,
     RateLimitError, MediaError, TemporaryServerError, InstagramAPIError
@@ -16,7 +18,11 @@ class InstagramPostService(BaseInstagramService):
 
     def __init__(self, access_token=None, ig_user_id=None):
         load_dotenv()
-        access_token = access_token or os.getenv('INSTAGRAM_API_KEY')
+        access_token = access_token or (
+            os.getenv('INSTAGRAM_API_KEY') or
+            os.getenv('INSTAGRAM_ACCESS_TOKEN') or
+            os.getenv('FACEBOOK_ACCESS_TOKEN')
+        )
         ig_user_id = ig_user_id or os.getenv("INSTAGRAM_ACCOUNT_ID")
         
         if not access_token or not ig_user_id:
@@ -27,46 +33,16 @@ class InstagramPostService(BaseInstagramService):
 
         super().__init__(access_token, ig_user_id)
         self.state_file = 'api_state.json'
-        self.container_cache = {}
-        self._load_state()
-
-    def _load_state(self):
-        """Load previous API state if available"""
-        try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, 'r') as f:
-                    state = json.load(f)
-                    if 'container_cache' in state:
-                        for key, data in state['container_cache'].items():
-                            if 'timestamp' in data:
-                                data['timestamp'] = float(data['timestamp'])
-                        self.container_cache = state['container_cache']
-        except Exception as e:
-            logger.error(f"Failed to load API state: {str(e)}")
-
-    def _save_state(self):
-        """Save current API state for future use"""
-        try:
-            state = {
-                'container_cache': self.container_cache,
-            }
-            with open(self.state_file, 'w') as f:
-                json.dump(state, f)
-        except Exception as e:
-            logger.error(f"Failed to save API state: {str(e)}")
+        # Removendo o cache de containers que pode causar problemas
+        # self.container_cache = {}
+        # self._load_state()
 
     def create_media_container(self, image_url, caption):
         """Creates a media container for the post."""
-        # Check container cache first
-        cache_key = f"{image_url}:{caption[:50]}"
-        if cache_key in self.container_cache and time.time() - self.container_cache[cache_key]['timestamp'] < 3600:
-            container_id = self.container_cache[cache_key]['id']
-            logger.info(f"Reusing cached container ID: {container_id}")
-            return container_id
-
         params = {
             'image_url': image_url,
-            'caption': caption
+            'caption': caption,
+            'media_type': 'IMAGE'  # Explicitamente definindo como IMAGE
         }
 
         try:
@@ -74,91 +50,64 @@ class InstagramPostService(BaseInstagramService):
             if result and 'id' in result:
                 container_id = result['id']
                 logger.info(f"Media container created with ID: {container_id}")
-                
-                # Cache the container ID
-                self.container_cache[cache_key] = {
-                    'id': container_id,
-                    'timestamp': time.time()
-                }
-                self._save_state()
-                
                 return container_id
+            logger.error("Failed to create media container")
             return None
         except InstagramAPIError as e:
             logger.error(f"Failed to create media container: {e}")
             raise
 
-    def verify_media_status(self, media_id, max_attempts=5, delay=30):
-        """Verify if a media post exists and is published."""
-        known_status = {
-            'PUBLISHED': True,
-            'FINISHED': True,
-            'IN_PROGRESS': None,
-            'ERROR': False,
-            'EXPIRED': False,
-            'SCHEDULED': None
-        }
-
+    def check_container_status(self, container_id):
+        """Verifica o status do container de mídia."""
         params = {
-            'fields': 'id,status_code,status,permalink'
+            'fields': 'status_code,status'
         }
+        
+        try:
+            result = self._make_request('GET', f"{container_id}", params=params)
+            if result:
+                status = result.get('status_code')
+                logger.info(f"Status do container: {status}")
+                if status == 'ERROR' and 'status' in result:
+                    logger.error(f"Detalhes do erro: {result['status']}")
+                return status
+            return None
+        except InstagramAPIError as e:
+            logger.error(f"Failed to check container status: {e}")
+            raise
 
+    def wait_for_container_status(self, container_id, max_attempts=30, delay=10):
+        """Aguarda o container estar pronto, com backoff exponencial."""
         for attempt in range(max_attempts):
-            if attempt > 0:
-                wait_time = delay * (1.5 ** attempt)
-                logger.info(f"Checking status (attempt {attempt + 1}/{max_attempts}), waiting {int(wait_time)} seconds...")
-                time.sleep(wait_time)
-
             try:
-                data = self._make_request('GET', f"{media_id}", params=params)
+                status = self.check_container_status(container_id)
+                if status == 'FINISHED':
+                    logger.info(f"Container pronto para publicação após {attempt+1} verificações")
+                    return status
+                elif status in ['ERROR', 'EXPIRED']:
+                    logger.error(f"Container falhou com status: {status}")
+                    return status
                 
-                if 'id' in data:
-                    status = data.get('status_code') or data.get('status', 'UNKNOWN')
-                    logger.info(f"Post status: {status}")
-
-                    # Check if we have a permalink (usually means post is live)
-                    if data.get('permalink'):
-                        logger.info(f"Post is live with permalink: {data['permalink']}")
-                        return True
-
-                    # Handle known status
-                    if status in known_status:
-                        result = known_status[status]
-                        if result is not None:  # We have a definitive answer
-                            return result
-                        # For None results (like IN_PROGRESS), we continue waiting
-                        logger.info(f"Post is still processing (status: {status})")
-                        continue
-
-                    # For unknown status, if we have an ID and no error, assume success on last attempt
-                    if attempt == max_attempts - 1:
-                        logger.info(f"Unknown status '{status}' but post ID exists")
-                        return True
-
+                # Usar backoff exponencial como no ReelsPublisher
+                backoff_time = delay * (1.5 ** attempt) + random.uniform(0, 3)
+                max_backoff = 45  # Limitar o tempo máximo de espera
+                backoff_time = min(backoff_time, max_backoff)
+                
+                logger.info(f"Tentativa {attempt + 1}/{max_attempts}. Aguardando {backoff_time:.1f}s...")
+                time.sleep(backoff_time)
+                
             except RateLimitError as e:
-                logger.warning(f"Rate limit hit, waiting {e.retry_seconds}s...")
+                logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
                 time.sleep(e.retry_seconds)
             except Exception as e:
-                logger.error(f"Error checking status: {str(e)}")
-                if attempt == max_attempts - 1:
-                    logger.error("Max retries reached with errors")
-                    return False
-
-        logger.warning("Could not confirm post status after maximum attempts")
-        return False
+                logger.error(f"Error checking container status: {str(e)}")
+                time.sleep(delay)
+        
+        logger.error(f"Container status check timed out after {max_attempts} attempts.")
+        return 'TIMEOUT'
 
     def publish_media(self, media_container_id):
         """Publishes the media container to Instagram."""
-        # Initial stabilization wait
-        wait_time = 30
-        logger.info(f"Waiting {wait_time} seconds for container processing...")
-        time.sleep(wait_time)
-
-        # First verify if the container is ready
-        if not self.verify_media_status(media_container_id, max_attempts=3, delay=20):
-            logger.error("Media container not ready for publishing")
-            return None
-
         params = {
             'creation_id': media_container_id,
         }
@@ -169,62 +118,77 @@ class InstagramPostService(BaseInstagramService):
             if result and 'id' in result:
                 post_id = result['id']
                 logger.info(f"Publication initiated with ID: {post_id}")
-                
-                # Give Instagram time to process before verification
-                time.sleep(45)
-                
-                # Verify with new post ID first
-                if self.verify_media_status(post_id, max_attempts=4, delay=30):
-                    logger.info("Post publication confirmed with new ID!")
-                    return post_id
-                
-                # If that fails, try with original container ID
-                if post_id != media_container_id:
-                    logger.info("Trying verification with original container ID...")
-                    if self.verify_media_status(media_container_id, max_attempts=3, delay=30):
-                        logger.info("Post publication confirmed with container ID!")
-                        return media_container_id
+                return post_id
             
-            logger.error("Could not confirm post publication")
+            logger.error("Could not publish media")
             return None
             
         except InstagramAPIError as e:
             logger.error(f"Error publishing media: {e}")
             raise
 
+    def get_post_permalink(self, post_id):
+        """Obtém o permalink de um post."""
+        params = {
+            'fields': 'permalink'
+        }
+        
+        try:
+            result = self._make_request('GET', f"{post_id}", params=params)
+            if result and 'permalink' in result:
+                permalink = result['permalink']
+                logger.info(f"Permalink: {permalink}")
+                return permalink
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao obter permalink: {e}")
+            return None
+
     def post_image(self, image_url, caption):
-        """Handles the full flow of creating and publishing an Instagram post."""
+        """
+        Versão reescrita do método post_image para usar uma abordagem mais
+        similar ao upload_local_video_to_reels, que está funcionando corretamente.
+        """
         logger.info("Starting Instagram image publication...")
 
-        media_container_id = self.create_media_container(image_url, caption)
-        if not media_container_id:
-            logger.error("Failed to create media container.")
+        try:
+            # 1. Criar container
+            container_id = self.create_media_container(image_url, caption)
+            if not container_id:
+                logger.error("Failed to create media container.")
+                return None
+
+            # 2. Aguardar processamento do container com backoff exponencial
+            logger.info("Aguardando processamento do container...")
+            status = self.wait_for_container_status(container_id)
+            
+            if status != 'FINISHED':
+                logger.error(f"Processamento da imagem falhou com status: {status}")
+                return None
+
+            # 3. Publicar a mídia
+            post_id = self.publish_media(container_id)
+            if not post_id:
+                logger.error("Failed to publish media")
+                return None
+
+            # 4. Obter permalink (se possível)
+            permalink = self.get_post_permalink(post_id)
+            
+            # 5. Retornar resultado de sucesso
+            result = {
+                'id': post_id,
+                'container_id': container_id,
+                'permalink': permalink,
+                'media_type': 'IMAGE'
+            }
+            
+            logger.info(f"Foto publicada com sucesso! ID: {post_id}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error posting image to Instagram: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
-
-        # Add a delay for container stabilization
-        wait_time = 45
-        logger.info(f"Waiting {wait_time} seconds for container stabilization...")
-        time.sleep(wait_time)
-
-        # Verify container before attempting to publish
-        logger.info("Verifying media container...")
-        if not self.verify_media_status(media_container_id, max_attempts=3, delay=20):
-            logger.error("Media container verification failed")
-            return None
-
-        post_id = self.publish_media(media_container_id)
-        if post_id:
-            logger.info(f"Process completed successfully! Post ID: {post_id}")
-            return post_id
-
-        logger.info("Final verification of post status...")
-        time.sleep(60)  # Extended wait for final check
-        
-        # One last verification attempt with longer delays
-        if self.verify_media_status(media_container_id, max_attempts=3, delay=45):
-            logger.info("Post verified and confirmed on Instagram!")
-            return media_container_id
-
-        logger.error("Could not confirm post publication after multiple attempts.")
-        return None
 
