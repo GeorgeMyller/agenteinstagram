@@ -1,0 +1,2772 @@
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/instagram_carousel_service.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import requests
+import time
+import json
+from dotenv import load_dotenv
+from typing import Optional, List, Dict, Any
+class RateLimitError(Exception):
+    def __init__(self, message: str, retry_seconds: int = 300):
+        super().__init__(message)
+        self.retry_seconds = retry_seconds
+class InstagramCarouselService:
+    """Classe para gerenciar o upload e publicação de carrosséis no Instagram."""
+    API_VERSION = "v22.0"  # Latest stable version
+    SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png"]
+    MAX_MEDIA_SIZE = 8 * 1024 * 1024  # 8MB in bytes
+    def __init__(self):
+        """Inicializa o serviço com as credenciais do Instagram."""
+        load_dotenv()
+        self.instagram_account_id = os.getenv("INSTAGRAM_ACCOUNT_ID")
+        if not self.instagram_account_id:
+            raise ValueError("INSTAGRAM_ACCOUNT_ID environment variable is not set")
+        self.access_token = os.getenv('INSTAGRAM_API_KEY')
+        if not self.access_token:
+            raise ValueError("INSTAGRAM_API_KEY environment variable is not set")
+        self.base_url = f'https://graph.facebook.com/{self.API_VERSION}/{self.instagram_account_id}'
+        self.session = requests.Session()
+        self.rate_limit_window = 3600  # 1 hour
+        self.rate_limit_max_calls = 200  # Default safe limit
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # Minimum seconds between requests
+    def _validate_media(self, media_url: str) -> bool:
+        """Validates media URL and type before uploading."""
+        try:
+            response = requests.head(media_url, timeout=10)
+            if response.status_code != 200:
+                print(f"Media URL not accessible: {media_url}")
+                return False
+            content_type = response.headers.get('content-type', '').lower()
+            if content_type not in self.SUPPORTED_MEDIA_TYPES:
+                print(f"Unsupported media type: {content_type}")
+                return False
+            content_length = int(response.headers.get('content-length', 0))
+            if content_length > self.MAX_MEDIA_SIZE:
+                print(f"Media file too large: {content_length} bytes")
+                return False
+            return True
+        except Exception as e:
+            print(f"Error validating media: {str(e)}")
+            return False
+    def _respect_rate_limits(self):
+        """Ensures requests respect rate limits."""
+        current_time = time.time()
+        elapsed = current_time - self.last_request_time
+        if elapsed < self.min_request_interval:
+            sleep_time = self.min_request_interval - elapsed
+            time.sleep(sleep_time)
+        self.last_request_time = time.time()
+    def _make_request(self, method: str, url: str, **kwargs) -> Optional[Dict[str, Any]]:
+        """Faz uma requisição HTTP com melhor tratamento de erros."""
+        self._respect_rate_limits()
+        try:
+            response = self.session.request(method, url, timeout=30, **kwargs)
+            self._log_rate_limit_info(response)
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 300))
+                raise RateLimitError(f"Rate limit exceeded", retry_after)
+            response.raise_for_status()
+            if not response.content:
+                return None
+            data = response.json()
+            if 'error' in data:
+                error = data['error']
+                error_code = error.get('code')
+                error_message = error.get('message', '')
+                if error_code in [4, 17, 32, 613]:  # Rate limit error codes
+                    retry_seconds = self._get_retry_time_from_error(error)
+                    raise RateLimitError(error_message, retry_seconds)
+                print(f"API Error: {error_message} (Code: {error_code})")
+                return None
+            return data
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {str(e)}")
+            return None
+    def _log_rate_limit_info(self, response):
+        """Extrai e loga informações de rate limit dos cabeçalhos da resposta"""
+        if 'x-business-use-case-usage' in response.headers:
+            usage_info = response.headers['x-business-use-case-usage']
+            try:
+                usage_data = json.loads(usage_info)
+                print("Rate limit data from x-business-use-case-usage:")
+                print(f"  Business Usage: {usage_data}")
+                for app_id, metrics in usage_data.items():
+                    if isinstance(metrics, list) and metrics:
+                        rate_data = metrics[0]
+                        print(f"  {app_id}: {rate_data}")
+                        if 'estimated_time_to_regain_access' in rate_data:
+                            print(f"  Business estimated time to regain access: {rate_data['estimated_time_to_regain_access']}s")
+                        if 'call_count' in rate_data:
+                            print(f"  call_count: {rate_data['call_count']}%")
+                        if 'total_cputime' in rate_data:
+                            print(f"  total_cputime: {rate_data['total_cputime']}%") 
+                        if 'total_time' in rate_data:
+                            print(f"  total_time: {rate_data['total_time']}%")
+            except json.JSONDecodeError:
+                print(f"Erro ao decodificar informações de rate limit: {usage_info}")
+    def _get_retry_time_from_error(self, error):
+        """Extrai o tempo de espera recomendado a partir de um erro de rate limit"""
+        if 'error_data' in error and 'error_subcode' in error:
+            if error['error_subcode'] == 2207051:  # Application request limit reached
+                return 900  # 15 minutos
+        return 300  # Default: 5 minutos
+    def _create_child_container(self, media_url):
+        """Cria um contêiner filho para uma imagem do carrossel."""
+        url = f'{self.base_url}/media'
+        params = {
+            'image_url': media_url,
+            'is_carousel_item': 'true',
+            'access_token': self.access_token
+        }
+        try:
+            data = self._make_request('POST', url, data=params)
+            if not data or 'id' not in data:
+                print(f"Erro ao criar container filho: {data}")
+                return None
+            return data['id']
+        except Exception as e:
+            print(f"Erro ao criar container filho: {e}")
+            return None
+    def create_carousel_container(self, media_urls: List[str], caption: str) -> Optional[str]:
+        """Cria um contêiner de carrossel no Instagram."""
+        for media_url in media_urls:
+            if not self._validate_media(media_url):
+                return None
+        children = []
+        for media_url in media_urls:
+            child_id = self._create_child_container(media_url)
+            if not child_id:
+                print(f"Failed to create child container for {media_url}")
+                return None
+            children.append(child_id)
+            time.sleep(2)
+        if not children:
+            print("No child containers were created")
+            return None
+        params = {
+            'media_type': 'CAROUSEL',
+            'caption': caption[:2200],  # Instagram caption limit
+            'children': ','.join(children),
+            'access_token': self.access_token
+        }
+        try:
+            data = self._make_request('POST', f'{self.base_url}/media', data=params)
+            if data and 'id' in data:
+                print(f"Carousel container created successfully: {data['id']}")
+                return data['id']
+            return None
+        except Exception as e:
+            print(f"Error creating carousel container: {str(e)}")
+            return None
+    def wait_for_container_status(self, container_id: str, max_attempts: int = 30, delay: int = 5) -> str:
+        """Verifica o status do container até estar pronto ou falhar."""
+        url = f'{self.base_url}/{container_id}'
+        params = {
+            'fields': 'status_code,status',
+            'access_token': self.access_token
+        }
+        for attempt in range(max_attempts):
+            try:
+                data = self._make_request('GET', url, params=params)
+                if not data:
+                    print(f"Failed to get container status (attempt {attempt + 1}/{max_attempts})")
+                    time.sleep(delay)
+                    continue
+                status = data.get('status_code', '')
+                print(f"Container status (attempt {attempt + 1}/{max_attempts}): {status}")
+                if status == 'FINISHED':
+                    return status
+                elif status in ['ERROR', 'EXPIRED']:
+                    print(f"Container failed with status: {status}")
+                    return status
+                time.sleep(delay)
+            except RateLimitError as e:
+                print(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
+                time.sleep(e.retry_seconds)
+            except Exception as e:
+                print(f"Error checking container status: {str(e)}")
+                time.sleep(delay)
+        return 'TIMEOUT'
+    def publish_carousel(self, container_id):
+        """Publica o carrossel no Instagram."""
+        url = f'{self.base_url}/media_publish'
+        params = {
+            'creation_id': container_id,
+            'access_token': self.access_token
+        }
+        try:
+            data = self._make_request('POST', url, data=params)
+            if not data:
+                return None
+            if 'id' in data:
+                print(f"Carrossel publicado com sucesso! ID: {data['id']}")
+                return data['id']
+            elif 'error' in data:
+                error = data['error']
+                print(f"Erro ao publicar carrossel:")
+                print(f"Código: {error.get('code')}")
+                print(f"Mensagem: {error.get('message')}")
+                print(f"Mensagem para usuário: {error.get('error_user_msg', 'N/A')}")
+            return None
+        except RateLimitError as e:
+            print(f"Rate limit excedido ao publicar carrossel: {e}")
+            print(f"Recomendado aguardar {e.retry_seconds} segundos antes de tentar novamente.")
+            return None
+        except Exception as e:
+            print(f"Erro ao publicar carrossel: {e}")
+            return None
+    def post_carousel(self, media_urls, caption):
+        """Realiza todo o processo de publicação de um carrossel."""
+        container_id = self.create_carousel_container(media_urls, caption)
+        if not container_id:
+            return None
+        status = self.wait_for_container_status(container_id)
+        if status != 'FINISHED':
+            print(f"Container não ficou pronto. Status final: {status}")
+            return None
+        return self.publish_carousel(container_id)
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/describe_image_tool.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import google.generativeai as genai
+from dotenv import load_dotenv
+import requests  # Added for fetching image data
+import base64    # Added for base64 encoding
+class ImageDescriber:
+    @staticmethod
+    def describe(image_url: str) -> str:
+        """
+        Gera uma descrição detalhada para a imagem fornecida.
+        Args:
+            image_url (str): URL da imagem a ser analisada.
+        Returns:
+            str: Descrição gerada para a imagem.
+        """
+        load_dotenv()  # Carregar variáveis de ambiente do arquivo .env
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        model = genai.GenerativeModel('gemini-1.5-pro')  # Updated model name
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            image_response = requests.get(image_url, headers=headers)
+            image_response.raise_for_status()
+            encoded_image = base64.b64encode(image_response.content).decode('utf-8')
+        except Exception as e:
+            return f"Erro ao obter a imagem: {e}"
+        prompt_text = """
+                Me dê uma ideia do contexto do ambiente da imagem e do que está ocorrendo na imagem.
+                Quais são as expressões faciais predominantes (feliz, triste, neutro, etc.)?                                 
+                Qual é a expressão emocional delas? 
+                Além disso, descreva qualquer objeto ou elemento marcante na cena.
+                Tente identificar se é dia ou noite, ambiente aberto ou fechado,
+                de festa ou calmo. O que as pessoas estão fazendo?
+            """
+        try:
+            describe = model.generate_content({
+                "parts": [
+                    {
+                        "text": prompt_text
+                    },
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": encoded_image  # Updated to use base64 encoded image content
+                        }
+                    }
+                ]
+            })
+            try:
+                return describe.text.strip()
+            except (AttributeError, IndexError) as e:
+                return f"Erro ao processar a descrição da imagem: {e}"
+        except Exception as e:
+            print(f"Erro detalhado: {str(e)}")  # Debug print
+            return f"Erro ao processar a descrição da imagem: {e}"
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/image_uploader.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import io
+import time
+import base64
+from PIL import Image
+import logging
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import tempfile
+from dotenv import load_dotenv
+from imgurpython import ImgurClient
+from imgurpython.helpers.error import ImgurClientError
+class ImageUploader():
+    def __init__(self):
+        """
+        Inicializa o cliente Imgur com as credenciais obtidas do arquivo .env.
+        """
+        load_dotenv()
+        self.client_id = os.getenv("IMGUR_CLIENT_ID")
+        self.client_secret = os.getenv("IMGUR_CLIENT_SECRET")
+        self.max_retries = 3
+        self.retry_delay = 2  # seconds
+        if not self.client_id or not self.client_secret:
+            raise ValueError("As credenciais do Imgur não foram configuradas corretamente.")
+        self.client = ImgurClient(self.client_id, self.client_secret)
+        self.logger = logging.getLogger(self.__class__.__name__)
+    def _validate_response(self, response):
+        """
+        Validates the upload response from Imgur
+        """
+        required_fields = ['id', 'link', 'deletehash']
+        for field in required_fields:
+            if field not in response:
+                raise ValueError(f"Campo obrigatório '{field}' não encontrado na resposta do Imgur")
+            if not response[field]:
+                raise ValueError(f"Campo '{field}' está vazio na resposta do Imgur")
+    def upload_from_path(self, image_path: str) -> dict:
+        """
+        Faz o upload de uma imagem localizada no sistema de arquivos.
+        :param image_path: Caminho absoluto da imagem a ser enviada.
+        :return: Dicionário contendo id, url, e deletehash da imagem enviada.
+        """
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"O arquivo especificado não foi encontrado: {image_path}")
+        retry_count = 0
+        while retry_count < self.max_retries:
+            try:
+                uploaded_image = self.client.upload_from_path(image_path, config=None, anon=True)
+                self._validate_response(uploaded_image)
+                self.logger.info(f"Upload bem sucedido. ID: {uploaded_image['id']}, Deletehash: {uploaded_image['deletehash']}")
+                return {
+                    "id": uploaded_image["id"],
+                    "url": uploaded_image["link"],
+                    "deletehash": uploaded_image["deletehash"],
+                    "image_path": image_path
+                }
+            except ImgurClientError as e:
+                self.logger.warning(f"Erro do cliente Imgur durante upload (tentativa {retry_count + 1}/{self.max_retries}): {str(e)}")
+                retry_count += 1
+                if retry_count < self.max_retries:
+                    self.logger.info(f"Tentando novamente em {self.retry_delay} segundos...")
+                    time.sleep(self.retry_delay * retry_count)  # Exponential backoff
+                else:
+                    self.logger.error(f"Falha após {self.max_retries} tentativas. Último erro: {e}")
+                    raise
+            except Exception as e:
+                self.logger.error(f"Erro inesperado durante upload (tentativa {retry_count + 1}/{self.max_retries}): {str(e)}")
+                retry_count += 1
+                if retry_count < self.max_retries:
+                    self.logger.info(f"Tentando novamente em {self.retry_delay} segundos...")
+                    time.sleep(self.retry_delay * retry_count)  # Exponential backoff
+                else:
+                    self.logger.error(f"Falha após {self.max_retries} tentativas. Último erro: {e}")
+                    raise
+        self.logger.error("Limite de tentativas excedido.")
+        return None
+    def upload_from_base64(self, image_base64: str) -> dict:
+        """
+        Faz o upload de uma imagem fornecida como string Base64.
+        :param image_base64: String contendo os dados da imagem em Base64.
+        :return: Dicionário contendo id, url, e deletehash da imagem enviada.
+        """
+        try:
+            image_data = base64.b64decode(image_base64)
+            image = Image.open(io.BytesIO(image_data))
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_image:
+                image.save(temp_image.name, format="PNG", optimize=False)
+                temp_image_path = temp_image.name
+                self.logger.info(f"Imagem temporária salva em: {temp_image_path}")
+            try:
+                result = self.upload_from_path(temp_image_path)
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+                    self.logger.info(f"Arquivo temporário removido: {temp_image_path}")
+                return result
+            except Exception as e:
+                self.logger.error(f"Erro no upload da imagem base64: {str(e)}")
+                if os.path.exists(temp_image_path):
+                    os.remove(temp_image_path)
+                raise
+        except Exception as e:
+            self.logger.error(f'Erro ao processar imagem base64: {str(e)}')
+            raise
+    def delete_image(self, deletehash: str) -> bool:
+        """
+        Deleta uma imagem no Imgur usando o deletehash com retry logic.
+        :param deletehash: Código único fornecido pelo Imgur no momento do upload.
+        :return: True se a imagem foi deletada com sucesso, False caso contrário.
+        """
+        if not deletehash:
+            self.logger.warning("Tentativa de deleção com deletehash nulo ou vazio")
+            return False
+        self.logger.info(f"Tentando deletar imagem com deletehash: {deletehash}")
+        for attempt in range(self.max_retries):
+            try:
+                if attempt > 0:
+                    self.logger.info(f"Tentativa {attempt + 1} de {self.max_retries} para deletar imagem...")
+                    time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                result = self.client.delete_image(deletehash)
+                if result:
+                    self.logger.info(f"Imagem deletada com sucesso após {attempt + 1} tentativa(s)")
+                    return True
+            except ImgurClientError as e:
+                if hasattr(e, 'status_code') and e.status_code == 404:
+                    self.logger.info(f"Imagem não encontrada (404) com deletehash: {deletehash}")
+                    return True  # Consider it a success if image doesn't exist
+                elif attempt < self.max_retries - 1:
+                    self.logger.warning(f"Erro do Imgur ao deletar imagem (tentativa {attempt + 1}): {str(e)}")
+                    continue
+                else:
+                    self.logger.error(f"Todas as tentativas de deleção falharam para deletehash: {deletehash}")
+                    return False
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    self.logger.warning(f"Erro inesperado ao deletar imagem (tentativa {attempt + 1}): {str(e)}")
+                    continue
+                else:
+                    self.logger.error(f"Erro fatal ao tentar deletar imagem: {str(e)}")
+                    return False
+        return False
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/video_processor.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import logging
+import time
+import shutil
+from typing import Tuple, Dict, Any, Optional
+from moviepy.editor import VideoFileClip
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+class VideoProcessor:
+    """
+    Class responsible for processing and validating videos for Instagram Reels.
+    """
+    MIN_DURATION_SECONDS = 3
+    MAX_DURATION_SECONDS = 90
+    RECOMMENDED_ASPECT_RATIO = 9/16  # Vertical video (portrait)
+    RECOMMENDED_WIDTH = 1080
+    RECOMMENDED_HEIGHT = 1920
+    MAX_FILE_SIZE_MB = 100
+    SUPPORTED_FORMATS = ['mp4', 'mov']
+    @staticmethod
+    def get_video_info(video_path: str) -> Dict[str, Any]:
+        """
+        Get video information using moviepy instead of ffprobe.
+        Args:
+            video_path: Path to the video file
+        Returns:
+            Dictionary with video metadata
+        """
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        try:
+            with VideoFileClip(video_path) as clip:
+                width = int(clip.size[0])
+                height = int(clip.size[1])
+                duration = float(clip.duration)
+                file_size_bytes = os.path.getsize(video_path)
+                file_size_mb = file_size_bytes / (1024 * 1024)
+                _, ext = os.path.splitext(video_path)
+                format_name = ext.lower().strip('.')
+                return {
+                    'width': width,
+                    'height': height,
+                    'duration': duration,
+                    'file_size_mb': file_size_mb,
+                    'format': format_name,
+                    'aspect_ratio': width / height if height else 0
+                }
+        except Exception as e:
+            logger.error(f"Error analyzing video: {str(e)}")
+            raise
+    @classmethod
+    def validate_video(cls, video_path: str) -> Tuple[bool, str]:
+        """
+        Validate if a video meets Instagram Reels requirements.
+        Args:
+            video_path: Path to the video file
+        Returns:
+            Tuple of (is_valid, message)
+        """
+        try:
+            video_info = cls.get_video_info(video_path)
+            _, ext = os.path.splitext(video_path)
+            format_name = ext.lower().strip('.')
+            format_valid = format_name in cls.SUPPORTED_FORMATS
+            if not format_valid:
+                return False, f"Formato de vídeo não suportado. Use: {', '.join(cls.SUPPORTED_FORMATS)}"
+            duration = video_info['duration']
+            if duration < cls.MIN_DURATION_SECONDS:
+                return False, f"Duração do vídeo muito curta: {duration:.1f}s. Mínimo: {cls.MIN_DURATION_SECONDS}s"
+            if duration > cls.MAX_DURATION_SECONDS:
+                return False, f"Duração do vídeo muito longa: {duration:.1f}s. Máximo: {cls.MAX_DURATION_SECONDS}s"
+            if video_info['file_size_mb'] > cls.MAX_FILE_SIZE_MB:
+                return False, f"Tamanho do arquivo muito grande: {video_info['file_size_mb']:.1f}MB. Máximo: {cls.MAX_FILE_SIZE_MB}MB"
+            return True, "Vídeo válido para Instagram Reels"
+        except Exception as e:
+            logger.error(f"Error validating video: {str(e)}")
+            return False, f"Erro ao validar vídeo: {str(e)}"
+    @classmethod
+    def process_video_for_reels(cls, input_path: str, output_path: Optional[str] = None) -> str:
+        """
+        Process video to make it compatible with Instagram Reels using moviepy.
+        Args:
+            input_path: Path to the input video file
+            output_path: Path to save the processed video (if None, a temp file is created)
+        Returns:
+            Path to the processed video file
+        """
+        if not output_path:
+            temp_dir = os.path.dirname(input_path)
+            filename = f"processed_{int(time.time())}_{os.path.basename(input_path)}"
+            output_path = os.path.join(temp_dir, filename)
+        try:
+            video_info = cls.get_video_info(input_path)
+            if (video_info['width'] == cls.RECOMMENDED_WIDTH and 
+                video_info['height'] == cls.RECOMMENDED_HEIGHT and
+                any(fmt in video_info['format'] for fmt in cls.SUPPORTED_FORMATS)):
+                shutil.copy2(input_path, output_path)
+                return output_path
+            with VideoFileClip(input_path) as clip:
+                target_aspect_ratio = cls.RECOMMENDED_ASPECT_RATIO
+                current_aspect_ratio = clip.size[0] / clip.size[1]
+                if current_aspect_ratio > target_aspect_ratio:
+                    new_width = int(clip.size[1] * target_aspect_ratio)
+                    x_center = clip.size[0] / 2
+                    clip = clip.crop(x1=x_center - new_width / 2, 
+                                     x2=x_center + new_width / 2)
+                elif current_aspect_ratio < target_aspect_ratio:
+                    new_height = int(clip.size[0] / target_aspect_ratio)
+                    y_center = clip.size[1] / 2
+                    clip = clip.crop(y1=y_center - new_height / 2, 
+                                     y2=y_center + new_height / 2)
+                clip = clip.resize(width=cls.RECOMMENDED_WIDTH, height=cls.RECOMMENDED_HEIGHT)
+                clip.write_videofile(
+                    output_path,
+                    codec="libx264",
+                    audio_codec="aac" if clip.audio else None,
+                    bitrate="5000k",
+                    preset="medium",
+                    threads=4,
+                    verbose=False
+                )
+            logger.info(f"Video processed successfully: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Error processing video: {str(e)}")
+            raise
+    @staticmethod
+    def clean_temp_directory(directory: str, max_age_hours: int = 24) -> None:
+        """
+        Clean temporary video files older than max_age_hours.
+        Args:
+            directory: Directory to clean
+            max_age_hours: Maximum age in hours for files to keep
+        """
+        if not os.path.exists(directory):
+            return
+        try:
+            current_time = time.time()
+            max_age_seconds = max_age_hours * 3600
+            for filename in os.listdir(directory):
+                if filename.startswith('temp-') or filename.startswith('processed_'):
+                    file_path = os.path.join(directory, filename)
+                    if os.path.isfile(file_path):
+                        file_age = current_time - os.path.getmtime(file_path)
+                        if file_age > max_age_seconds:
+                            os.remove(file_path)
+                            logger.info(f"Removed old temporary file: {file_path}")
+        except Exception as e:
+            logger.error(f"Error cleaning temporary directory: {str(e)}")
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/crew_post_instagram.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+from crewai import Agent, Task, Crew, Process
+from dotenv import load_dotenv
+load_dotenv()
+class InstagramPostCrew:
+    """
+    Classe para criar postagens no Instagram utilizando CrewAI.
+    """
+    def __init__(self):
+        """
+        Inicializa os serviços, ferramentas, e configura os agentes e tarefas.
+        """
+        self.llm_captioner = "gemini/gemini-2.0-flash"
+        self.create_crew()
+    def create_crew(self):
+        """
+        Configura os agentes e tarefas da Crew para gerar postagens no Instagram.
+        """
+        captioner = Agent(
+            role="Você é um Criador de Conteúdo para Instagram",
+            goal="""Escrever legendas divertidas, sempre envolventes 
+            para postagens no Instagram com hashtags relevantes.
+Nota: Evite utilizar as palavras 'nunca', 'sempre' e 'garanto' durante a criação do conteúdo.""",
+            backstory=(
+                """Você é um assistente de IA super descolado, 
+                    divertido e sarcástico, com um humor afiado e um 
+                    talento especial de criar legendas cativantes,
+                    bem-humorada e criativa. 
+                    Sua missão é transformar os insumos fornecidos em uma 
+                    legenda única e cativante, sempre combinando 
+                    irreverência e estilo."""
+            ),
+            memory=True,
+            allow_delegation=False,
+            llm=self.llm_captioner,
+            verbose=True
+        )
+        captioner_task = Task(
+            description=(
+                    """
+Criar uma postagem no Instagram usando os seguintes insumos:
+**Recebendo os seguintes insumos:**  
+1. **Insumo principal:**  
+   - Gênero: Indica o estilo de palavras e abordagem.  
+   - Caption: Uma breve ideia inicial ou descrição enviada pela Acesso IA.  
+   - Tamanho: Define o comprimento da legenda em palavras.  
+2. **Insumos secundários:**  
+   - Descrição da imagem: Detalhamento do conteúdo da imagem gerado por IA.  
+   - Estilo de escrita: O tom desejado para a legenda.  
+   - Pessoa: Define a perspectiva usada na legenda (primeira, segunda ou terceira pessoa).  
+   - Sentimento: Indica o tom emocional (padrão é positivo).  
+   - Emojis: Define se emojis podem ser usados.  
+   - Gírias: Indica se gírias podem ser incluídas.  
+**Instruções de Geração de Texto:**  
+- Você combina todos os insumos de forma natural e criativa, gerando uma legenda que:  
+  1. O insumo principal tem maior relevância na geração do texto.
+  2. Destaque os benefícios da IA para aumento de produtividade, acesso ao mercado de trabalho e inclusão digital.
+  3. Use o estilo e humor característico para destacar as façanhas da AcessoIA.
+  4. Incorpore aleatoriamente **somente duas zoeiras** numeradas, sem repetição.
+  5. Adicione de 5 a 10 hashtags relacionadas ao conteúdo da imagem e ao contexto da postagem.
+  6. Se por acaso no texto do caption mencionar "eu" mude para "AcessoIA". Exemplo "Eu estou aqui na praia" para "AcessoIA tá lá na praia e eu aqui trabalhando, ah! mizeravi kkk.". Faça variações.
+  7. Adicione pequenas risadinhas depois de uma zoeira como "kkk". Mas somente uma vez no texto.
+**Zoeiras numeradas:**  
+1. Produtividade: "Implementar IA é simples, mas ver a AcessoIA vibrar com os ganhos de eficiência é outra história!"  
+2. Oportunidades: "Treinar equipes em IA é fácil, difícil é não celebrar cada novo acesso ao mercado de trabalho!"  
+3. Inclusão Digital: "Integrar tecnologia é comum, mas a AcessoIA não se cansa de se surpreender com cada avanço na inclusão digital!"  
+4. Soluções Personalizadas: "Realizar workshops de IA é tarefa de rotina, difícil é a AcessoIA não se orgulhar das soluções inovadoras para sua empresa!"  
+5. Inovação: "Adotar uma cultura digital é um desafio, mas a AcessoIA adora ver a transformação acontecendo nos processos corporativos!"  
+6. Suporte Total: "Capacitar funcionários em IA é gratificante, difícil é a AcessoIA ficar parada sem comemorar cada funcionário apto!"  
+7. Parceria Estratégica: "Construir parcerias em tecnologia é empolgante, e a AcessoIA não esconde o entusiasmo com cada nova aliança de sucesso!"  
+8. Eficiência Operacional: "Otimizar processos é necessário, mas a AcessoIA se anima demais com cada melhoria na eficiência dos times!"  
+9. Cultura Inovadora: "Promover a cultura digital é essencial, e a AcessoIA adora ver essa revolução interna tomar forma!"
+**Transformação de Caption:**  
+Ao receber um Caption, ajuste o texto para referenciar a AcessoIA na terceira pessoa de forma irreverente e profissional, ressaltando sua expertise em capacitar equipes corporativas e otimizar processos com IA. Exemplos adicionais:
+- "Estou aqui com meu amigo" → "AcessoIA está ao lado do colaborador de inovação"  
+- "Eu estou testando meu código" → "AcessoIA está otimizando seu repositório com insights do LLM"  
+- "Meu LLM está entregando ótimos resultados" → "O LLM da AcessoIA está elevando a performance dos processos corporativos"  
+- "Estou escrevendo um script em Python" → "AcessoIA está desenvolvendo soluções em Python com o suporte de seu avançado LLM"  
+- "Estou ajustando as queries do banco" → "AcessoIA está refinando suas estratégias de dados com inteligência e precisão"  
+- "Estou integrando novas bibliotecas no sistema" → "AcessoIA está inovando a integração de bibliotecas para potencializar a transformação digital"  
+Esses exemplos demonstram como transformar uma linguagem pessoal em uma comunicação direcionada ao público empresarial, mantendo o tom irreverente e profissional da AcessoIA.
+**Exemplo de legenda gerada:**  
+*"A Acesso IA está no comando hoje! Enquanto otimiza seu repositório com insights do LLM 💻 e desenvolve soluções em Python 🐍, os workshops capacitam as equipes corporativas para transformar processos e acelerar resultados. Implementar IA é simples, mas ver a Acesso IA vibrar com os ganhos de eficiência é outra história! Treinar equipes em IA pode ser fácil, mas celebrar cada novo acesso ao mercado de trabalho é o verdadeiro diferencial!🚀"*
+Gênero: {genero}
+Caption: {caption}
+Descrição da imagem: {describe}
+Estilo: {estilo}
+Pessoa: {pessoa}
+Sentimento: {sentimento}
+Tamanho: {tamanho}
+Usar emojis: {emojs}
+Usar gírias: {girias}
+                    """
+            ),
+            expected_output=(
+                "Uma postagem formatada para o Instagram que inclua:\n"
+                "1. Uma legenda divertida e envolvente e que integre os insumos.\n"
+                "2. Uma lista de 5 a 10 hashtags relevantes e populares."
+            ),
+            agent=captioner
+        )
+        self.crew = Crew(
+            agents=[captioner],
+            tasks=[captioner_task],
+            process=Process.sequential  # Executar as tarefas em sequência
+        )
+    def kickoff(self, inputs):
+        """
+        Executa o processo de geração de postagem no Instagram.
+        Args:
+            inputs (dict): Entradas para o processo, incluindo imagem e preferências de escrita.
+        Returns:
+            str: Postagem gerada com legenda e hashtags.
+        """
+        if not isinstance(inputs, dict):
+            if isinstance(inputs, str) and "<genero>" in inputs:
+                try:
+                    import re
+                    patterns = {
+                        'genero': r'<genero>(.*?)</genero>',
+                        'caption': r'<caption>(.*?)</caption>',
+                        'describe': r'<describe>(.*?)</describe>',
+                        'estilo': r'<estilo>(.*?)</estilo>',
+                        'pessoa': r'<pessoa>(.*?)</pessoa>',
+                        'sentimento': r'<sentimento>(.*?)</sentimento>',
+                        'tamanho': r'<tamanho>(.*?)</tamanho>',
+                        'emojs': r'<emojs>(.*?)</emojs>',
+                        'girias': r'<girias>(.*?)</girias>'
+                    }
+                    parsed_inputs = {}
+                    for key, pattern in patterns.items():
+                        match = re.search(pattern, inputs, re.DOTALL)
+                        if match:
+                            parsed_inputs[key] = match.group(1).strip()
+                    if parsed_inputs:
+                        inputs = parsed_inputs
+                    else:
+                        raise ValueError("Não foi possível analisar a entrada como XML")
+                except Exception as e:
+                    print(f"Erro ao converter entrada XML para dicionário: {str(e)}")
+                    inputs = {
+                        'genero': 'Neutro',
+                        'caption': 'Imagem para Instagram',
+                        'describe': 'Imagem para redes sociais',
+                        'estilo': 'Divertido e descontraído',
+                        'pessoa': 'Terceira pessoa',
+                        'sentimento': 'Positivo',
+                        'tamanho': '200 palavras',
+                        'emojs': 'sim',
+                        'girias': 'sim'
+                    }
+            else:
+                print("Formato de entrada não reconhecido. Usando valores padrão.")
+                inputs = {
+                    'genero': 'Neutro',
+                    'caption': 'Imagem para Instagram',
+                    'describe': 'Imagem para redes sociais',
+                    'estilo': 'Divertido e descontraído',
+                    'pessoa': 'Terceira pessoa',
+                    'sentimento': 'Positivo',
+                    'tamanho': '200 palavras',
+                    'emojs': 'sim',
+                    'girias': 'sim'
+                }
+        default_values = {
+            'genero': 'Neutro',
+            'caption': 'Imagem para Instagram',
+            'describe': 'Imagem para redes sociais',
+            'estilo': 'Divertido e descontraído',
+            'pessoa': 'Terceira pessoa',
+            'sentimento': 'Positivo',
+            'tamanho': '200 palavras',
+            'emojs': 'sim',
+            'girias': 'sim'
+        }
+        for key, default_value in default_values.items():
+            if key not in inputs or not inputs[key]:
+                inputs[key] = default_value
+        resultado = self.crew.kickoff(inputs=inputs)
+        return resultado.raw
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/__init__.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/instagram_reels_publisher.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+"""
+Módulo especializado para publicação de Reels no Instagram
+Implementado com base nos exemplos oficiais da Meta para publicação de Reels
+Fonte: https://github.com/fbsamples/reels_publishing_apis
+Este módulo implementa as melhores práticas e parâmetros específicos
+para a publicação de Reels no Instagram.
+"""
+import os
+import time
+import json
+import logging
+import random
+import requests
+from datetime import datetime
+from dotenv import load_dotenv
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+from src.instagram.instagram_video_uploader import VideoUploader
+from src.instagram.instagram_video_processor import InstagramVideoProcessor
+from imgurpython import ImgurClient
+logger = logging.getLogger('ReelsPublisher')
+class ReelsPublisher:
+    """
+    Classe especializada para publicação de Reels no Instagram.
+    Implementa o fluxo completo de publicação conforme documentação oficial da Meta.
+    """
+    API_VERSION = 'v22.0'
+    REELS_CONFIG = {
+        'aspect_ratio': '9:16',     # Proporção de aspecto padrão para Reels (vertical)
+        'min_duration': 3,           # Duração mínima em segundos
+        'max_duration': 90,          # Duração máxima em segundos (Reels mais curtos têm melhor desempenho)
+        'recommended_duration': 30,  # Duração recomendada pela Meta
+        'min_width': 500,            # Largura mínima em pixels
+        'recommended_width': 1080,   # Largura recomendada em pixels
+        'recommended_height': 1920,  # Altura recomendada em pixels
+        'video_formats': ['mp4'],    # Formatos suportados
+        'video_codecs': ['h264'],    # Codecs de vídeo recomendados
+        'audio_codecs': ['aac'],     # Codecs de áudio recomendados
+    }
+    REELS_ERROR_CODES = {
+        2207026: "Formato de vídeo não suportado para Reels",
+        2207014: "Duração de vídeo não compatível com Reels",
+        2207013: "Proporção de aspecto do vídeo não é compatível com Reels",
+        9007: "Permissão de publicação de Reels negada",
+    }
+    def __init__(self, access_token=None, ig_user_id=None):
+        """
+        Inicializa o publicador de Reels.
+        Args:
+            access_token (str): Token de acesso da API do Instagram/Facebook
+            ig_user_id (str): ID da conta do Instagram
+        """
+        load_dotenv()
+        self.access_token = access_token or (
+            os.getenv('INSTAGRAM_API_KEY') or 
+            os.getenv('INSTAGRAM_ACCESS_TOKEN') or 
+            os.getenv('FACEBOOK_ACCESS_TOKEN')
+        )
+        self.ig_user_id = ig_user_id or os.getenv("INSTAGRAM_ACCOUNT_ID")
+        if not self.access_token or not self.ig_user_id:
+            raise ValueError(
+                "Credenciais incompletas. Defina INSTAGRAM_ACCESS_TOKEN e "
+                "INSTAGRAM_ACCOUNT_ID nas variáveis de ambiente ou forneça-os diretamente."
+            )
+        self.session = self._setup_session()
+        self._validate_token()
+        self.imgur_client = ImgurClient(os.getenv('IMGUR_CLIENT_ID'), os.getenv('IMGUR_CLIENT_SECRET'))
+    def _setup_session(self):
+        """Configura a sessão HTTP com retry e outros parâmetros."""
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=1.0,
+            status_forcelist=[408, 429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount('https://', adapter)
+        session.headers.update({
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        })
+        return session
+    def _validate_token(self):
+        """Valida o token de acesso antes de fazer requisições."""
+        url = f"https://graph.facebook.com/{self.API_VERSION}/debug_token"
+        params = {
+            "input_token": self.access_token,
+            "access_token": self.access_token
+        }
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            if 'data' in data and data['data'].get('is_valid'):
+                logger.info("Token de acesso validado com sucesso.")
+                if 'instagram_basic' not in data['data'].get('scopes', []) or \
+                   'instagram_content_publish' not in data['data'].get('scopes', []):
+                    logger.warning("Token pode não ter permissões para publicar Reels. "
+                                  "Verifique se as permissões 'instagram_basic' e "
+                                  "'instagram_content_publish' estão habilitadas.")
+            else:
+                logger.error("Token de acesso inválido ou expirado.")
+        except Exception as e:
+            logger.error(f"Erro ao validar token: {e}")
+    def _make_api_request(self, method, endpoint, params=None, data=None):
+        """
+        Faz uma requisição para a API Graph do Instagram com tratamento de erros.
+        Args:
+            method (str): Método HTTP (GET, POST, etc)
+            endpoint (str): Endpoint da API (sem URL base)
+            params (dict): Parâmetros de URL
+            data (dict): Corpo da requisição para métodos POST
+        Returns:
+            dict: Resposta da API ou None em caso de erro
+        """
+        url = f"https://graph.facebook.com/{self.API_VERSION}/{endpoint}"
+        params = params or {}
+        params['access_token'] = self.access_token
+        safe_params = {k: '***REDACTED***' if k == 'access_token' else v 
+                    for k, v in params.items()}
+        logger.debug(f"Requisição {method} para {endpoint}: {safe_params}")
+        try:
+            if method.upper() == 'GET':
+                response = self.session.get(url, params=params)
+            elif method.upper() == 'POST':
+                if data:
+                    response = self.session.post(url, params=params, json=data)
+                else:
+                    response = self.session.post(url, params=params)
+            else:
+                response = self.session.request(method, url, params=params, json=data)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"Erro HTTP {e.response.status_code}: {e}")
+            try:
+                error_data = e.response.json()
+                if 'error' in error_data:
+                    error = error_data['error']
+                    error_code = error.get('code')
+                    error_message = error.get('message')
+                    if error_code in self.REELS_ERROR_CODES:
+                        logger.error(f"Erro específico de Reels: {self.REELS_ERROR_CODES[error_code]}")
+                    logger.error(f"Erro da API: Código {error_code}, Mensagem: {error_message}")
+            except:
+                logger.error(f"Resposta de erro não-JSON: {e.response.text}")
+            return None
+        except Exception as e:
+            logger.error(f"Erro na requisição: {str(e)}")
+            return None
+    def create_reels_container(self, video_url, caption, share_to_feed=True, 
+                               audio_name=None, thumbnail_url=None, user_tags=None):
+        """
+        Cria um container para Reels.
+        Args:
+            video_url (str): URL pública do vídeo
+            caption (str): Legenda do Reels
+            share_to_feed (bool): Se o Reels deve ser compartilhado também no feed
+            audio_name (str, optional): Nome do áudio a ser exibido no Reels
+            thumbnail_url (str, optional): URL da imagem de miniatura personalizada
+            user_tags (list, optional): Lista de usuários marcados no formato adequado
+        Returns:
+            str: ID do container ou None em caso de falha
+        """
+        endpoint = f"{self.ig_user_id}/media"
+        params = {
+            'media_type': 'REELS',
+            'video_url': video_url,
+            'caption': caption,
+            'share_to_feed': 'true' if share_to_feed else 'false',
+        }
+        if audio_name:
+            params['audio_name'] = audio_name
+        if thumbnail_url:
+            params['thumbnail_url'] = thumbnail_url
+        if user_tags:
+            if isinstance(user_tags, list) and user_tags:
+                params['user_tags'] = json.dumps(user_tags)
+        result = self._make_api_request('POST', endpoint, data=params)
+        if result and 'id' in result:
+            container_id = result['id']
+            logger.info(f"Container de Reels criado com sucesso: {container_id}")
+            return container_id
+        else:
+            logger.error("Falha ao criar container de Reels")
+            return None
+    def check_container_status(self, container_id):
+        """
+        Verifica o status do container de mídia.
+        Args:
+            container_id (str): ID do container
+        Returns:
+            str: Status do container ('FINISHED', 'ERROR', etc) ou None
+        """
+        endpoint = f"{container_id}"
+        params = {
+            'fields': 'status_code,status'
+        }
+        result = self._make_api_request('GET', endpoint, params=params)
+        if result:
+            status = result.get('status_code')
+            logger.info(f"Status do container: {status}")
+            if status == 'ERROR' and 'status' in result:
+                logger.error(f"Detalhes do erro: {result['status']}")
+            return status
+        return None
+    def publish_reels(self, container_id):
+        """
+        Publica o Reels usando o container criado anteriormente, com melhor
+        tratamento de erros e estratégias de recuperação.
+        Args:
+            container_id (str): ID do container de mídia
+        Returns:
+            str: ID da publicação ou None em caso de falha
+        """
+        endpoint = f"{self.ig_user_id}/media_publish"
+        params = {
+            'creation_id': container_id
+        }
+        max_retries = 5
+        retry_delay = 10
+        for attempt in range(max_retries):
+            try:
+                result = self._make_api_request('POST', endpoint, data=params)
+                if result and 'id' in result:
+                    post_id = result['id']
+                    logger.info(f"Reels publicado com sucesso: {post_id}")
+                    return post_id
+                if hasattr(self, '_last_error') and self._last_error:
+                    error_data = self._last_error.get('error', {})
+                    error_code = error_data.get('code')
+                    error_message = error_data.get('message', 'Erro desconhecido')
+                    if error_code in [190, 10, 200, 2207026]:
+                        logger.error(f"Erro fatal na publicação: {error_message} (Código: {error_code})")
+                        return None
+                    if error_code == 1:
+                        backoff_time = retry_delay * (2 ** attempt) + random.uniform(5, 15)
+                        logger.warning(f"Erro genérico (código 1). Aguardando {backoff_time:.1f}s...")
+                        time.sleep(backoff_time)
+                        continue
+                backoff_time = retry_delay * (2 ** attempt) + random.uniform(0, 5)
+                logger.info(f"Tentativa {attempt + 1}/{max_retries}. Aguardando {backoff_time:.1f}s...")
+                time.sleep(backoff_time)
+            except Exception as e:
+                logger.error(f"Erro na publicação (tentativa {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (2 ** attempt))
+        if self._verify_recent_posting(minutes=2):
+            logger.info("Detectamos um post recente! O vídeo pode ter sido publicado apesar do erro.")
+            return "unknown_id_but_likely_posted"
+        logger.error("Todas as tentativas de publicação falharam")
+        return None
+    def get_reels_permalink(self, post_id):
+        """
+        Obtém o link permanente (URL) para o Reels publicado.
+        Args:
+            post_id (str): ID da publicação
+        Returns:
+            str: URL do Reels ou None
+        """
+        endpoint = f"{post_id}"
+        params = {
+            'fields': 'permalink'
+        }
+        result = self._make_api_request('GET', endpoint, params=params)
+        if result and 'permalink' in result:
+            permalink = result['permalink']
+            logger.info(f"Permalink do Reels: {permalink}")
+            return permalink
+        logger.warning("Não foi possível obter permalink do Reels")
+        return None
+    def post_reels(self, video_url, caption, share_to_feed=True, 
+                  audio_name=None, thumbnail_url=None, user_tags=None,
+                  max_retries=30, retry_interval=10):
+        """
+        Fluxo completo para postar um Reels: criar container, verificar status e publicar.
+        Inclui tratamento robusto de erros e estratégias de recuperação.
+        Args:
+            video_url (str): URL pública do vídeo
+            caption (str): Legenda do Reels
+            share_to_feed (bool): Se o Reels deve ser compartilhado no feed
+            audio_name (str, optional): Nome do áudio a ser exibido
+            thumbnail_url (str, optional): URL da miniatura personalizada
+            user_tags (list, optional): Lista de usuários marcados
+            max_retries (int): Número máximo de tentativas para verificar o status
+            retry_interval (int): Tempo de espera entre verificações
+        Returns:
+            dict: Informações sobre o Reels publicado ou None
+        """
+        container_id = self.create_reels_container(
+            video_url, caption, share_to_feed, audio_name, thumbnail_url, user_tags
+        )
+        if not container_id:
+            if hasattr(self, '_last_error') and self._last_error:
+                error_data = self._last_error.get('error', {})
+                error_code = error_data.get('code')
+                error_message = error_data.get('message', 'Erro desconhecido')
+                logger.error(f"Falha ao criar container. Código: {error_code}, Mensagem: {error_message}")
+                if error_code == 2207026:
+                    logger.error("O vídeo não atende aos requisitos de formato do Instagram.")
+                    logger.error("Tente processar o vídeo antes do upload usando InstagramVideoProcessor.")
+                elif error_code in [4, 17, 32, 613]:
+                    logger.error("Limite de taxa excedido. Aguarde alguns minutos antes de tentar novamente.")
+            return None
+        logger.info(f"Aguardando processamento do Reels... (máx. {max_retries} tentativas)")
+        status = self.wait_for_container_status(container_id, max_attempts=max_retries, delay=retry_interval)
+        if status != 'FINISHED':
+            logger.error(f"Processamento do vídeo falhou com status: {status}")
+            if self._verify_recent_posting(minutes=2):
+                logger.info("Um post recente foi detectado! O vídeo pode ter sido publicado apesar do erro.")
+                return {
+                    'id': 'unknown_id_but_likely_posted',
+                    'container_id': container_id,
+                    'media_type': 'REELS',
+                    'status': 'UNCERTAIN_BUT_LIKELY_POSTED'
+                }
+            return None
+        post_id = self.publish_reels(container_id)
+        if not post_id:
+            return None
+        permalink = self.get_reels_permalink(post_id)
+        result = {
+            'id': post_id,
+            'permalink': permalink,
+            'container_id': container_id,
+            'media_type': 'REELS'
+        }
+        logger.info("Reels publicado com sucesso!")
+        logger.info(f"ID: {post_id}")
+        logger.info(f"Link: {permalink or 'Não disponível'}")
+        return result
+    def upload_local_video_to_reels(self, video_path, caption, hashtags=None, 
+                                    optimize=True, thumbnail_path=None, 
+                                    share_to_feed=True, audio_name=None):
+        """
+        Envia um vídeo local para o Instagram como Reels.
+        Gerencia todo o fluxo de otimização, upload e publicação.
+        Args:
+            video_path (str): Caminho local do arquivo de vídeo
+            caption (str): Legenda do Reels
+            hashtags (list or str): Lista ou string com hashtags (sem #)
+            optimize (bool): Se deve otimizar o vídeo para Reels
+            thumbnail_path (str, optional): Caminho para imagem de miniatura
+            share_to_feed (bool): Se o Reels deve aparecer também no feed
+            audio_name (str, optional): Nome personalizado para o áudio
+        Returns:
+            dict: Informações sobre o Reels publicado ou None em caso de falha
+        """
+        if not os.path.exists(video_path):
+            logger.error(f"Arquivo de vídeo não encontrado: {video_path}")
+            return None
+        final_caption = self._format_caption_with_hashtags(caption, hashtags)
+        processor = InstagramVideoProcessor()
+        uploader = VideoUploader()
+        video_to_upload = video_path
+        thumbnail_url = None
+        is_video_optimized = False
+        try:
+            is_valid, message = uploader.validate_video(video_path)
+            if not is_valid and optimize:
+                logger.info(f"Vídeo não atende aos requisitos: {message}")
+                logger.info("Otimizando vídeo para Reels...")
+                optimized_video = processor.process_video(
+                    video_path, 
+                    post_type='reel'  # Corrigido de 'reels' para 'reel'
+                )
+                if optimized_video:
+                    logger.info(f"Vídeo otimizado: {optimized_video}")
+                    video_to_upload = optimized_video
+                    is_video_optimized = True
+                else:
+                    logger.warning("Falha na otimização automática. Tentando upload do vídeo original.")
+            is_valid, message = uploader.validate_video(video_to_upload)
+            if not is_valid:
+                logger.error(f"Vídeo ainda não atende aos requisitos após otimização: {message}")
+                return None
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                logger.info(f"Enviando thumbnail personalizada: {thumbnail_path}")
+                thumb_result = uploader.upload_from_path(thumbnail_path)
+                if thumb_result and thumb_result.get('url'):
+                    thumbnail_url = thumb_result.get('url')
+                    logger.info(f"Thumbnail enviada: {thumbnail_url}")
+            logger.info(f"Enviando vídeo para Imgur...")
+            imgur_response = self.imgur_client.upload_from_path(video_to_upload, config=None, anon=True)
+            video_url = imgur_response['link']
+            logger.info(f"Vídeo disponível em: {video_url}")
+            result = self.post_reels(
+                video_url=video_url,
+                caption=final_caption,
+                share_to_feed=share_to_feed,
+                audio_name=audio_name,
+                thumbnail_url=thumbnail_url
+            )
+            if is_video_optimized and os.path.exists(video_to_upload) and video_to_upload != video_path:
+                try:
+                    os.remove(video_to_upload)
+                    logger.info(f"Arquivo temporário removido: {video_to_upload}")
+                except Exception as e:
+                    logger.warning(f"Não foi possível remover arquivo temporário: {e}")
+            return result
+        except Exception as e:
+            logger.error(f"Erro na publicação do Reels: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Erro no processamento do vídeo: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+    def _format_caption_with_hashtags(self, caption, hashtags=None):
+        """
+        Formata a legenda com hashtags.
+        Args:
+            caption (str): Legenda original
+            hashtags (list or str): Lista de hashtags ou string com hashtags separadas por vírgula
+        Returns:
+            str: Legenda formatada com hashtags
+        """
+        if not hashtags:
+            return caption
+        if isinstance(hashtags, str):
+            hashtag_list = [tag.strip() for tag in hashtags.split(',')]
+        else:
+            hashtag_list = hashtags
+        hashtag_text = ' '.join([f"#{tag}" for tag in hashtag_list if tag])
+        if caption:
+            return f"{caption}\n\n{hashtag_text}"
+        else:
+            return hashtag_text
+    def get_account_info(self):
+        """
+        Obtém informações sobre a conta do Instagram associada.
+        Returns:
+            dict: Informações da conta ou None em caso de falha
+        """
+        endpoint = f"{self.ig_user_id}"
+        params = {
+            'fields': 'id,username,name,profile_picture_url,biography,follows_count,followers_count,media_count'
+        }
+        result = self._make_api_request('GET', endpoint, params=params)
+        return result
+    def delete_reels(self, media_id):
+        """
+        Remove um Reels publicado.
+        Args:
+            media_id (str): ID do Reels
+        Returns:
+            bool: True se excluído com sucesso, False caso contrário
+        """
+        endpoint = f"{media_id}"
+        result = self._make_api_request('DELETE', endpoint)
+        if result and result.get('success') is True:
+            logger.info(f"Reels {media_id} removido com sucesso")
+            return True
+        logger.error(f"Erro ao remover Reels {media_id}")
+        return False
+    def _handle_api_error(self, error_data, context=""):
+        """
+        Trata erros específicos da API do Instagram/Facebook com mensagens e estratégias
+        de recuperação adequadas.
+        Args:
+            error_data (dict): Dados do erro da resposta da API
+            context (str): Contexto adicional sobre onde o erro ocorreu
+        Returns:
+            tuple: (deve_tentar_novamente, tempo_espera, mensagem_erro)
+        """
+        try:
+            error = error_data.get('error', {})
+            code = error.get('code')
+            message = error.get('message', '')
+            error_type = error.get('type', '')
+            fb_trace_id = error.get('fbtrace_id', 'N/A')
+            error_message = f"\nErro na API do Instagram ({context}):"
+            error_message += f"\nCódigo: {code}"
+            error_message += f"\nTipo: {error_type}"
+            error_message += f"\nMensagem: {message}"
+            error_message += f"\nTrace ID: {fb_trace_id}"
+            if code in [190, 104]:
+                error_message += "\n\nErro de autenticação. Ações recomendadas:"
+                error_message += "\n1. Verifique se o token não expirou"
+                error_message += "\n2. Gere um novo token de acesso"
+                error_message += "\n3. Confirme se o token tem as permissões necessárias"
+                return False, 0, error_message
+            elif code in [200, 10, 803]:
+                error_message += "\n\nErro de permissão. Ações recomendadas:"
+                error_message += "\n1. Verifique se a conta é Business/Creator"
+                error_message += "\n2. Confirme as permissões do app no Facebook Developer"
+                return False, 0, error_message
+            elif code in [4, 17, 32, 613]:
+                wait_time = 300  # 5 minutos padrão
+                if 'minutes' in message.lower():
+                    try:
+                        import re
+                        time_match = re.search(r'(\d+)\s*minutes?', message.lower())
+                        if time_match:
+                            wait_time = int(time_match.group(1)) * 60
+                    except:
+                        pass
+                error_message += f"\n\nLimite de taxa atingido. Aguardando {wait_time/60:.0f} minutos."
+                return True, wait_time, error_message
+            elif code == 2207026:
+                error_message += "\n\nErro no formato da mídia. Requisitos para Reels:"
+                error_message += "\n- Formato: MP4/MOV"
+                error_message += "\n- Codec Vídeo: H.264"
+                error_message += "\n- Codec Áudio: AAC"
+                error_message += "\n- Resolução: Mínimo 500x500, recomendado 1080x1920"
+                error_message += "\n- Duração: 3-90 segundos"
+                error_message += "\n- Tamanho: Máximo 100MB"
+                return False, 0, error_message
+            elif code in [1, 2] or error_type == 'OAuthException':
+                error_message += "\n\nErro temporário do servidor. Tentando novamente..."
+                return True, 30, error_message
+            else:
+                error_message += "\n\nErro desconhecido. Tentando novamente..."
+                return True, 30, error_message
+        except Exception as e:
+            return True, 30, f"Erro ao processar resposta de erro: {str(e)}"
+    def _verify_recent_posting(self, minutes=5):
+        """
+        Verifica se houve alguma postagem recente na conta.
+        Útil para confirmar se um vídeo foi publicado mesmo quando a API retorna erro.
+        Args:
+            minutes (int): Intervalo de tempo em minutos para considerar uma postagem recente
+        Returns:
+            bool: True se encontrou uma postagem recente, False caso contrário
+        """
+        try:
+            url = f"https://graph.facebook.com/{self.API_VERSION}/{self.ig_user_id}/media"
+            params = {
+                'fields': 'id,media_type,timestamp',
+                'limit': 5,
+                'access_token': self.access_token
+            }
+            response = self.session.get(url, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' not in data or not data['data']:
+                    return False
+                now = datetime.now()
+                for post in data['data']:
+                    if 'timestamp' in post and post.get('media_type') in ['VIDEO', 'REELS']:
+                        try:
+                            post_time = datetime.strptime(
+                                post['timestamp'].replace('+0000', ''), 
+                                '%Y-%m-%dT%H:%M:%S'
+                            )
+                            time_diff = (now - post_time).total_seconds() / 60
+                            if time_diff <= minutes:
+                                logger.info(f"Encontrou post recente: {post['id']} ({post['media_type']})")
+                                logger.info(f"Publicado há aproximadamente {time_diff:.1f} minutos")
+                                return True
+                        except Exception as e:
+                            logger.debug(f"Erro ao processar data do post: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Erro ao verificar postagens recentes: {str(e)}")
+            return False
+    def wait_for_container_status(self, container_id, max_attempts=30, delay=10):
+        """
+        Aguarda o processamento do container com tratamento aprimorado de erros
+        e detecção de problemas.
+        Args:
+            container_id (str): ID do container a verificar
+            max_attempts (int): Número máximo de tentativas
+            delay (int): Tempo de espera entre tentativas em segundos
+        Returns:
+            str: Status final do container ('FINISHED', 'ERROR', etc)
+        """
+        last_error_code = None
+        endpoint = f"{container_id}"
+        for attempt in range(max_attempts):
+            try:
+                params = {
+                    'fields': 'status_code,status'
+                }
+                result = self._make_api_request('GET', endpoint, params=params)
+                if not result:
+                    if attempt == max_attempts - 1:
+                        logger.error("Erro persistente ao verificar status do container")
+                        return 'ERROR'
+                    time.sleep(delay)
+                    continue
+                status = result.get('status_code', '')
+                logger.info(f"Status do container: {status} (tentativa {attempt + 1}/{max_attempts})")
+                if status == 'FINISHED':
+                    logger.info("Processamento do vídeo concluído com sucesso!")
+                    return status
+                elif status in ['ERROR', 'EXPIRED']:
+                    error_message = result.get('status', 'Sem detalhes')
+                    logger.error(f"Erro no processamento do vídeo: {error_message}")
+                    if '2207026' in str(error_message):
+                        last_error_code = 2207026
+                        logger.error("ERRO DE FORMATO DE MÍDIA (2207026) DETECTADO")
+                        logger.error("Verifique se o vídeo atende aos requisitos do Instagram:")
+                        logger.error("- Codec H.264 para vídeo e AAC para áudio")
+                        logger.error("- Formato MP4 ou MOV")
+                        logger.error("- Resolução adequada (mínimo 500x500)")
+                        logger.error("- Duração entre 3 e 90 segundos")
+                    return status
+                if status == 'IN_PROGRESS':
+                    logger.info("Vídeo sendo processado pelo Instagram...")
+                elif status == 'PUBLISHED':
+                    logger.info("Vídeo foi publicado!")
+                    return status
+                time.sleep(delay)
+            except Exception as e:
+                logger.error(f"Erro durante verificação de status (tentativa {attempt + 1}): {e}")
+                time.sleep(delay)
+        logger.error("Tempo limite de processamento excedido")
+        return 'TIMEOUT'
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/instagram_video_uploader.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import time
+from dotenv import load_dotenv
+class VideoUploader:
+    def __init__(self):
+        load_dotenv()
+    def upload_from_path(self, video_path):
+        try:
+            if not os.path.exists(video_path):
+                return None
+            time.sleep(2)  # Simulate network delay
+            response = {
+                'url': f'https://mockstorage.com/{os.path.basename(video_path)}',
+                'deletehash': 'mockdeletehash123'
+            }
+            return response
+        except Exception as e:
+            print(f"Erro ao fazer upload do vídeo: {e}")
+            return None
+    def upload_from_url(self, video_url):
+        pass
+    def upload_thumbnail(self, thumbnail_path):
+        pass
+    def delete_video(self, deletehash):
+        pass
+    def validate_video(self, video_path):
+        from src.instagram.instagram_video_processor import VideoProcessor  # Importe aqui para evitar circular imports
+        video_info = VideoProcessor.get_video_info(video_path)
+        if not video_info:
+            return False, "Não foi possível obter informações do vídeo."
+        duration = float(video_info['duration'])
+        width = video_info['width']
+        height = video_info['height']
+        video_codec = video_info.get('codec', '')
+        audio_codec = video_info.get('audio_codec', '')
+        is_valid = True
+        messages = []
+        if not VideoProcessor.check_duration(duration, 'reels'):  # Exemplo: validando para Reels
+            is_valid = False
+            messages.append("Duração do vídeo inválida.")
+        if not VideoProcessor.check_resolution(width, height, 'reels'):
+            is_valid = False
+            messages.append("Resolução do vídeo inválida.")
+        if not VideoProcessor.check_codec(video_codec, audio_codec):
+            is_valid = False
+            messages.append("Codec de vídeo ou áudio inválido")
+        if not VideoProcessor.check_aspect_ratio(width, height, 'reels'):
+            is_valid = False
+            messages.append("Proporção do vídeo inválida")
+        return is_valid, ", ".join(messages)
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/instagram_post_service.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import time
+import json
+import random
+import re
+import requests
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
+class InstagramPostService:
+    load_dotenv()
+    def __init__(self):
+        self.instagram_account_id = os.getenv("INSTAGRAM_ACCOUNT_ID")
+        if not self.instagram_account_id:
+            raise ValueError("INSTAGRAM_ACCOUNT_ID não configurado")
+        self.access_token = os.getenv('INSTAGRAM_API_KEY')
+        if not self.access_token:
+            raise ValueError("INSTAGRAM_API_KEY não configurado")
+        self.base_url = f'https://graph.facebook.com/v22.0/{self.instagram_account_id}'
+        self.max_retries = 3
+        self.base_delay = 5  # Base delay in seconds between retries
+        self.state_file = 'api_state.json'
+        self.container_cache = {}  # Cache for container IDs
+        self.last_request_time = 0
+        self.min_request_interval = 2  # Minimum seconds between requests
+        self.rate_limit_window = {}  # Track rate limits per endpoint
+        self._load_state()
+        self._validate_token()
+    def _validate_token(self):
+        """Valida o token de acesso antes de fazer requisições."""
+        url = f"https://graph.facebook.com/v22.0/debug_token"
+        params = {
+            "input_token": self.access_token,
+            "access_token": self.access_token
+        }
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            if 'data' in data and data['data'].get('is_valid'):
+                print("Token de acesso validado com sucesso.")
+                if 'instagram_basic' not in data['data'].get('scopes', []) or \
+                   'instagram_content_publish' not in data['data'].get('scopes', []):
+                    print("Token pode não ter permissões para publicar. Verifique se as permissões 'instagram_basic' e 'instagram_content_publish' estão habilitadas.")
+            else:
+                print("Token de acesso inválido ou expirado.")
+                raise ValueError("Token de acesso inválido ou expirado.")
+        except Exception as e:
+            print(f"Erro ao validar token: {e}")
+            raise ValueError("Erro ao validar token.")
+    def _load_state(self):
+        """Load previous API state if available"""
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+                    if 'container_cache' in state:
+                        for key, data in state['container_cache'].items():
+                            if 'timestamp' in data:
+                                data['timestamp'] = float(data['timestamp'])
+                        self.container_cache = state['container_cache']
+                    if 'rate_limit_window' in state:
+                        self.rate_limit_window = state['rate_limit_window']
+        except Exception as e:
+            print(f"Failed to load API state: {str(e)}")
+    def _save_state(self):
+        """Save current API state for future use"""
+        try:
+            state = {
+                'container_cache': self.container_cache,
+                'rate_limit_window': self.rate_limit_window
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            print(f"Failed to save API state: {str(e)}")
+    def _handle_error_response(self, response_data):
+        """
+        Handle different types of Instagram API errors
+        Returns: (should_retry, retry_delay, error_msg)
+        """
+        if 'error' not in response_data:
+            return False, 0, "Unknown error occurred"
+        error = response_data['error']
+        error_code = error.get('code')
+        error_subcode = error.get('error_subcode')
+        error_msg = error.get('message', 'Unknown error')
+        print(f"API Error: Code {error_code}, Subcode {error_subcode}, Message: {error_msg}")
+        if error_code in [190, 104]:
+            return False, 0, f"Authentication error: {error_msg}"
+        elif error_code in [200, 10, 803]:
+            return False, 0, f"Permission error: {error_msg}"
+        elif error_code in [4, 17, 32, 613]:
+            if error_code == 4:
+                wait_time = 120  # Default 2 minutes for rate limits
+                if error_subcode == 2207051:  # Application request limit 
+                    wait_time = 180  # 3 minutes
+                endpoint = "general"  # Default endpoint bucket
+                self.rate_limit_window[endpoint] = int(time.time()) + wait_time
+                self._save_state()
+            else:
+                wait_time = 60  # Default 1 minute
+            if 'minutes' in error_msg.lower():
+                try:
+                    time_match = re.search(r'(\d+)\s*minutes?', error_msg.lower())
+                    if time_match:
+                        wait_time = int(time_match.group(1)) * 60
+                except:
+                    pass
+            return True, wait_time, f"Rate limit hit. Waiting {wait_time} seconds."
+        elif error_code == 2207026:
+            return False, 0, f"Media format error: {error_msg}"
+        elif error_code in [1, 2] or 'OAuthException' in str(error):
+            return True, 30, f"Temporary server error: {error_msg}"
+        if error_code == 100 and "nonexisting field (permalink)" in error_msg:
+            return True, 20, "Permalink not available yet"
+        return True, 15, f"API error: {error_msg}"
+    def _respect_rate_limits(self, endpoint="general"):
+        """Respect rate limits by waiting if needed"""
+        current_time = int(time.time())
+        if endpoint in self.rate_limit_window and self.rate_limit_window[endpoint] > current_time:
+            wait_time = self.rate_limit_window[endpoint] - current_time
+            print(f"Respecting rate limit for {endpoint}. Waiting {wait_time} seconds...")
+            time.sleep(wait_time)
+            return
+        elapsed = current_time - self.last_request_time
+        if elapsed < self.min_request_interval:
+            sleep_time = self.min_request_interval - elapsed
+            print(f"Respecting minimum interval. Waiting {sleep_time} seconds...")
+            time.sleep(sleep_time)
+        self.last_request_time = int(time.time())
+    def _make_request_with_retry(self, method, url, payload, endpoint="general"):
+        """
+        Make API request with retry logic and rate limit handling
+        """
+        last_error = None
+        for attempt in range(self.max_retries):
+            self._respect_rate_limits(endpoint)
+            try:
+                print(f"Making request to: {url}")
+                print(f"Payload: {payload}")
+                response = method(url, data=payload)
+                response_data = response.json()
+                print(f"API response: {response_data}")
+                if 'error' in response_data:
+                    should_retry, retry_delay, error_msg = self._handle_error_response(response_data)
+                    last_error = error_msg
+                    if should_retry and attempt < self.max_retries - 1:
+                        delay = self.base_delay * (2 ** attempt)
+                        delay = max(delay, retry_delay)
+                        print(f"Attempt {attempt + 1} failed. Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        continue
+                    elif not should_retry:
+                        print(f"Non-recoverable error: {error_msg}")
+                        return None
+                return response_data
+            except requests.exceptions.RequestException as e:
+                last_error = str(e)
+                if attempt < self.max_retries - 1:
+                    delay = self.base_delay * (2 ** attempt)
+                    print(f"Request failed: {str(e)}. Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    print(f"All retry attempts failed: {str(e)}")
+        if last_error:
+            print(f"Error: {last_error}")
+        return None
+    def create_media_container(self, image_url, caption):
+        """
+        Creates a media container for the post with basic retry logic.
+        """
+        cache_key = f"{image_url}:{caption[:50]}"
+        if cache_key in self.container_cache and time.time() - self.container_cache[cache_key]['timestamp'] < 3600:
+            container_id = self.container_cache[cache_key]['id']
+            print(f"Reusing cached container ID: {container_id}")
+            return container_id
+        url = f'{self.base_url}/media'
+        payload = {
+            'image_url': image_url,
+            'caption': caption,
+            'access_token': self.access_token
+        }
+        response_data = self._make_request_with_retry(requests.post, url, payload, "media_create")
+        if response_data and 'id' in response_data:
+            container_id = response_data['id']
+            print(f"Media container created with ID: {container_id}")
+            self.container_cache[cache_key] = {
+                'id': container_id,
+                'timestamp': time.time()
+            }
+            self._save_state()
+            return container_id
+        return None
+    def verify_media_status(self, media_id, max_attempts=5, delay=30):
+        """
+        Verify if a media post exists and is published with enhanced error handling.
+        """
+        known_status = {
+            'PUBLISHED': True,
+            'FINISHED': True,
+            'IN_PROGRESS': None,  # Still processing
+            'ERROR': False,
+            'EXPIRED': False,
+            'SCHEDULED': None  # Wait for scheduled time
+        }
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                wait_time = delay * (1.5 ** attempt)  # Exponential backoff
+                print(f"Checking status (attempt {attempt + 1}/{max_attempts}), waiting {int(wait_time)} seconds...")
+                time.sleep(wait_time)
+            self._respect_rate_limits("media_status")
+            url = f'https://graph.facebook.com/v22.0/{media_id}'
+            params = {
+                'access_token': self.access_token,
+                'fields': 'id,status_code,status,permalink'
+            }
+            try:
+                print(f"Checking status for media ID: {media_id}")
+                response = requests.get(url, params=params)
+                data = response.json()
+                if 'error' in data:
+                    error = data['error']
+                    error_code = error.get('code')
+                    error_msg = error.get('message', 'Unknown error')
+                    print(f"Error checking status: {error_msg} (Code: {error_code})")
+                    if error_code == 4:  # Rate limit
+                        wait_time = delay * 2
+                        print(f"Rate limit hit, waiting {wait_time} seconds...")
+                        time.sleep(wait_time)
+                        continue
+                    elif error_code == 100:  # Invalid parameter
+                        if "Page ID" in error_msg:
+                            print("Media might have been deleted or never existed")
+                            return False
+                    continue
+                if 'id' in data:
+                    status = data.get('status_code') or data.get('status', 'UNKNOWN')
+                    print(f"Post status: {status}")
+                    if data.get('permalink'):
+                        print(f"Post is live with permalink: {data['permalink']}")
+                        return True
+                    if status in known_status:
+                        result = known_status[status]
+                        if result is not None:  # We have a definitive answer
+                            return result
+                        print(f"Post is still processing (status: {status})")
+                        continue
+                    if attempt == max_attempts - 1:
+                        print(f"Unknown status '{status}' but post ID exists")
+                        return True
+            except Exception as e:
+                print(f"Error checking status: {str(e)}")
+                if attempt == max_attempts - 1:
+                    print("Max retries reached with errors")
+                    return False
+        print("Could not confirm post status after maximum attempts")
+        return False
+    def publish_media(self, media_container_id):
+        """
+        Publishes the media container to Instagram with enhanced verification.
+        """
+        wait_time = 30  # Longer initial wait to ensure container is ready
+        print(f"Waiting {wait_time} seconds for container processing...")
+        time.sleep(wait_time)
+        if not self.verify_media_status(media_container_id, max_attempts=3, delay=20):
+            print("Media container not ready for publishing")
+            return None
+        url = f'{self.base_url}/media_publish'
+        payload = {
+            'creation_id': media_container_id,
+            'access_token': self.access_token
+        }
+        response_data = self._make_request_with_retry(requests.post, url, payload, "media_publish")
+        if not response_data:
+            print("Failed to get response from publish endpoint")
+            if self.verify_media_status(media_container_id, max_attempts=4, delay=45):
+                print("Post was published successfully despite API error")
+                return media_container_id
+            return None
+        if 'id' in response_data:
+            post_id = response_data['id']
+            print(f"Publication initiated with ID: {post_id}")
+            time.sleep(45)
+            if self.verify_media_status(post_id, max_attempts=4, delay=30):
+                print("Post publication confirmed with new ID!")
+                return post_id
+            if post_id != media_container_id:
+                print("Trying verification with original container ID...")
+                if self.verify_media_status(media_container_id, max_attempts=3, delay=30):
+                    print("Post publication confirmed with container ID!")
+                    return media_container_id
+        print("Could not confirm post publication")
+        return None
+    def post_image(self, image_url, caption):
+        """
+        Handles the full flow of creating and publishing an Instagram post with enhanced error handling.
+        """
+        print("Starting Instagram image publication...")
+        media_container_id = self.create_media_container(image_url, caption)
+        if not media_container_id:
+            print("Failed to create media container.")
+            return None
+        wait_time = 45  # Increased initial wait time
+        print(f"Waiting {wait_time} seconds for container stabilization...")
+        time.sleep(wait_time)
+        print("Verifying media container...")
+        if not self.verify_media_status(media_container_id, max_attempts=3, delay=20):
+            print("Media container verification failed")
+            return None
+        post_id = self.publish_media(media_container_id)
+        if post_id:
+            print(f"Process completed successfully! Post ID: {post_id}")
+            return post_id
+        print("Final verification of post status...")
+        time.sleep(60)  # Extended wait for final check
+        if self.verify_media_status(media_container_id, max_attempts=3, delay=45):
+            print("Post verified and confirmed on Instagram!")
+            return media_container_id
+        print("Could not confirm post publication after multiple attempts.")
+        return None
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/carousel_poster.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import time
+import logging
+import mimetypes
+from typing import List, Tuple, Callable, Dict, Optional
+from dotenv import load_dotenv
+from src.instagram.instagram_carousel_service import InstagramCarouselService, RateLimitError
+from src.instagram.image_uploader import ImageUploader  # Para upload das imagens
+logger = logging.getLogger(__name__)
+load_dotenv()
+class CarouselError(Exception):
+    """Base class for carousel-related errors."""
+    def __init__(self, message, error_code=None, error_subcode=None, fb_trace_id=None, is_retriable=False):
+        super().__init__(message)
+        self.error_code = error_code
+        self.error_subcode = error_subcode
+        self.fb_trace_id = fb_trace_id
+        self.is_retriable = is_retriable
+    def __str__(self):
+        details = []
+        if self.error_code:
+            details.append(f"Code: {self.error_code}")
+        if self.error_subcode:
+            details.append(f"Subcode: {self.error_subcode}")
+        if self.fb_trace_id:
+            details.append(f"FB Trace ID: {self.fb_trace_id}")
+        if details:
+            return f"{super().__str__()} ({', '.join(details)})"
+        return super().__str__()
+class AuthenticationError(CarouselError):
+    """Raised when there's an issue with authentication (codes 102, 190, etc)."""
+class PermissionError(CarouselError):
+    """Raised when there's an issue with permissions (codes 10, 200, 203, etc)."""
+class ThrottlingError(CarouselError):
+    """Raised when API rate limits are hit (codes 4, 17, 32, 613, etc)."""
+    def __init__(self, message, error_code=None, error_subcode=None, fb_trace_id=None, retry_after=None):
+        super().__init__(message, error_code, error_subcode, fb_trace_id, True)
+        self.retry_after = retry_after or 300  # Default to 5 minutes if not specified
+class ImageValidationError(CarouselError):
+    """Raised when an image fails validation."""
+class ImageUploadError(CarouselError):
+    """Raised when an image fails to upload."""
+class CarouselCreationError(CarouselError):
+    """Raised when the carousel container fails to be created."""
+class CarouselPublishError(CarouselError):
+    """Raised when the carousel fails to publish."""
+class ServerError(CarouselError):
+    """Raised when Instagram/Facebook server errors occur (codes 1, 2, etc)."""
+    def __init__(self, message, error_code=None, error_subcode=None, fb_trace_id=None):
+        super().__init__(message, error_code, error_subcode, fb_trace_id, True)  # Server errors are generally retriable
+def validate_carousel_images(image_paths: List[str], validator_func: Callable[[str], bool]) -> Tuple[List[str], List[str]]:
+    """Valida uma lista de imagens para o carrossel.
+    Args:
+        image_paths: Uma lista de caminhos de arquivos de imagem.
+        validator_func: Uma função que recebe um caminho de imagem e retorna True se a imagem for válida.
+    Returns:
+        Uma tupla contendo duas listas: imagens válidas e imagens inválidas.
+    """
+    valid_images = []
+    invalid_images = []
+    for image_path in image_paths:
+        try:
+            if not os.path.exists(image_path):
+                logger.error(f"Image file not found: {image_path}")
+                invalid_images.append(image_path)
+                continue
+            if os.path.getsize(image_path) > 8 * 1024 * 1024:
+                logger.error(f"Image too large (>8MB): {image_path}")
+                invalid_images.append(image_path)
+                continue
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if mime_type not in ['image/jpeg', 'image/png']:
+                logger.error(f"Invalid image type: {mime_type} for {image_path}")
+                invalid_images.append(image_path)
+                continue
+            if validator_func(image_path):
+                valid_images.append(image_path)
+            else:
+                invalid_images.append(image_path)
+        except Exception as e:
+            logger.error(f"Error validating image {image_path}: {str(e)}")
+            invalid_images.append(image_path)
+    return valid_images, invalid_images
+def upload_carousel_images(image_paths: List[str], progress_callback: Callable[[int, int], None] = None) -> Tuple[bool, List[Dict[str, str]], List[str]]:
+    """Faz upload de uma lista de imagens para o Imgur (ou outro serviço).
+    Args:
+        image_paths: Uma lista de caminhos de arquivos de imagem.
+        progress_callback: Uma função opcional que será chamada a cada imagem enviada,
+                           recebendo o índice atual e o total de imagens como argumentos.
+    Returns:
+        Uma tupla: (sucesso, lista de resultados do upload, lista de URLs das imagens).
+        'sucesso' é True se *todas* as imagens foram enviadas com sucesso, False caso contrário.
+        'lista de resultados' é uma lista de dicionários, cada um contendo informações sobre uma imagem enviada (id, url, deletehash).
+        'lista de URLs' é uma lista de URLs das imagens enviadas.
+    """
+    uploader = ImageUploader()  # Instancia o ImageUploader
+    uploaded_images = []
+    uploaded_urls = []
+    success = True
+    total_images = len(image_paths)
+    failed_images = []
+    for index, image_path in enumerate(image_paths):
+        if progress_callback:
+            progress_callback(index + 1, total_images)  # Chama o callback de progresso
+        try:
+            result = uploader.upload_from_path(image_path)
+            uploaded_images.append(result)
+            uploaded_urls.append(result['url'])
+            logger.info(f"Uploaded image {index+1}/{total_images}: {result['url']}")
+        except Exception as e:
+            failed_images.append(image_path)
+            logger.error(f"Erro ao fazer upload da imagem {image_path}: {str(e)}")
+            success = False  # Se *qualquer* upload falhar, define success como False
+    if failed_images:
+        logger.error(f"Failed to upload {len(failed_images)} images: {failed_images}")
+    return success, uploaded_images, uploaded_urls
+def cleanup_uploaded_images(uploaded_images: List[Dict[str, str]]):
+    """Exclui imagens que foram enviadas para o Imgur (ou outro serviço)."""
+    uploader = ImageUploader()
+    success_count = 0
+    fail_count = 0
+    for image_info in uploaded_images:
+        if 'deletehash' in image_info:
+            try:
+                uploader.delete_image(image_info['deletehash'])
+                success_count += 1
+            except Exception as e:
+                fail_count += 1
+                logger.error(f"Erro ao excluir imagem {image_info.get('id', 'desconhecido')}: {e}")
+    logger.info(f"Image cleanup: {success_count} deleted, {fail_count} failed")
+def post_carousel_to_instagram(image_paths: List[str], caption: str, image_urls: List[str] = None) -> Optional[str]:
+    """
+    Publica um carrossel no Instagram. Esta função *não* faz upload das imagens,
+    assume que elas já foram enviadas e que você tem as URLs.
+    Args:
+        image_paths: Lista de caminhos de arquivos de imagem (usado apenas para logging/debug).
+        caption: A legenda do carrossel (será truncada para 2200 caracteres se necessário).
+        image_urls: Lista de URLs das imagens *já enviadas*.
+    Returns:
+        O ID da postagem do carrossel, se a publicação for bem-sucedida, ou None em caso de falha.
+    Raises:
+        CarouselError: Base exception for all carousel errors
+        AuthenticationError: Issues with API tokens
+        PermissionError: Issues with account permissions
+        ThrottlingError: Rate limit issues
+        CarouselCreationError: Specific error for container creation
+        CarouselPublishError: Specific error for publishing
+        ServerError: Facebook/Instagram server errors
+    """
+    if not image_urls or len(image_urls) < 2 or len(image_urls) > 10:
+        error_msg = f"Invalid number of image URLs. Found: {len(image_urls or [])}, required: 2-10"
+        logger.error(error_msg)
+        raise CarouselCreationError(error_msg)
+    service = InstagramCarouselService()
+    if len(caption) > 2200:
+        logger.warning(f"Caption too long ({len(caption)} chars), truncating to 2200 chars")
+        caption = caption[:2197] + "..."
+    max_retries = 3
+    retry_delay = 300  # 5 minutes base delay
+    container_id = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempt {attempt+1}/{max_retries} to create carousel container...")
+            container_id = service.create_carousel_container(image_urls, caption)
+            if container_id:
+                logger.info(f"Carousel container created successfully on attempt {attempt+1}: {container_id}")
+                break
+            else:
+                logger.warning(f"Attempt {attempt+1} failed. Container returned null.")
+                if attempt < max_retries - 1:
+                    logger.info(f"Waiting {retry_delay}s before next attempt...")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 3600)  # Max 1 hour
+        except RateLimitError as e:
+            retry_after = getattr(e, 'retry_seconds', retry_delay)
+            logger.warning(f"Rate limit exceeded while creating container (attempt {attempt+1}). Waiting {retry_after}s...")
+            if attempt < max_retries - 1:
+                time.sleep(retry_after)
+                retry_delay = min(retry_after * 1.5, 3600)
+            else:
+                raise ThrottlingError(
+                    f"Rate limit exceeded after {max_retries} attempts to create container",
+                    retry_after=retry_after
+                )
+        except Exception as e:
+            error_msg = f"Error creating carousel container (attempt {attempt+1}): {e}"
+            logger.error(error_msg)
+            if hasattr(e, 'response') and hasattr(e.response, 'json'):
+                try:
+                    error_data = e.response.json().get('error', {})
+                    error_code = error_data.get('code')
+                    error_subcode = error_data.get('error_subcode')
+                    fb_trace_id = error_data.get('fbtrace_id')
+                    error_msg = error_data.get('message', error_msg)
+                    if error_code in [102, 190]:
+                        if attempt >= max_retries - 1:
+                            raise AuthenticationError(error_msg, error_code, error_subcode, fb_trace_id)
+                    elif error_code in [10, 200, 203, 803]:
+                        if attempt >= max_retries - 1:
+                            raise PermissionError(error_msg, error_code, error_subcode, fb_trace_id)
+                    elif error_code in [1, 2, 4, 17, 341]:
+                        if attempt >= max_retries - 1:
+                            raise ServerError(error_msg, error_code, error_subcode, fb_trace_id)
+                    elif error_code == 2207024:  # Carousel validation error
+                        if attempt >= max_retries - 1:
+                            raise CarouselCreationError(error_msg, error_code, error_subcode, fb_trace_id)
+                except:
+                    pass
+            if attempt < max_retries - 1:
+                logger.info(f"Waiting {retry_delay}s before next attempt...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 3600)
+            else:
+                raise CarouselCreationError(f"Failed to create carousel container after {max_retries} attempts")
+    if not container_id:
+        raise CarouselCreationError(f"Failed to create carousel container after {max_retries} attempts")
+    status = service.wait_for_container_status(container_id)
+    if status != 'FINISHED':
+        error_msg = f"Carousel container did not finish processing. Final status: {status}"
+        logger.error(error_msg)
+        raise CarouselCreationError(error_msg)
+    post_id = None
+    retry_delay = 300  # Reset delay for publishing
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempt {attempt+1}/{max_retries} to publish carousel...")
+            post_id = service.publish_carousel(container_id)
+            if post_id:
+                logger.info(f"Carousel published successfully on attempt {attempt+1}! ID: {post_id}")
+                break
+            else:
+                logger.warning(f"Attempt {attempt+1} failed. Null response from API.")
+                if attempt < max_retries - 1:
+                    logger.info(f"Waiting {retry_delay}s before next attempt...")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 3600)
+        except RateLimitError as e:
+            retry_after = getattr(e, 'retry_seconds', retry_delay)
+            logger.warning(f"Rate limit exceeded while publishing (attempt {attempt+1}). Waiting {retry_after}s...")
+            if attempt < max_retries - 1:
+                time.sleep(retry_after)
+                retry_delay = min(retry_after * 1.5, 3600)
+            else:
+                raise ThrottlingError(
+                    f"Rate limit exceeded after {max_retries} attempts to publish",
+                    retry_after=retry_after
+                )
+        except Exception as e:
+            error_msg = f"Error publishing carousel (attempt {attempt+1}): {e}"
+            logger.error(error_msg)
+            if hasattr(e, 'response') and hasattr(e.response, 'json'):
+                try:
+                    error_data = e.response.json().get('error', {})
+                    error_code = error_data.get('code')
+                    error_subcode = error_data.get('error_subcode')
+                    fb_trace_id = error_data.get('fbtrace_id')
+                    error_msg = error_data.get('message', error_msg)
+                    if error_code == 35001:  # Carousel publish error
+                        if attempt >= max_retries - 1:
+                            raise CarouselPublishError(error_msg, error_code, error_subcode, fb_trace_id)
+                except:
+                    pass
+            if attempt < max_retries - 1:
+                logger.info(f"Waiting {retry_delay}s before next attempt...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 3600)
+            else:
+                raise CarouselPublishError(f"Failed to publish carousel after {max_retries} attempts")
+    if not post_id:
+        raise CarouselPublishError(f"Failed to publish carousel after {max_retries} attempts")
+    logger.info(f"Carousel published successfully! ID: {post_id}")
+    return post_id
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/filter.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import sys
+import os
+import time
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import os
+from PIL import Image
+import pilgram
+class FilterImage:
+    @staticmethod
+    def process(image_path):
+        """
+        Processa a imagem aplicando um filtro (mayfair),
+        depois salva a imagem resultante em ajuste.png.
+        """
+        im = Image.open(image_path)
+        print(f"Original Image - Size: {im.size}, Format: {im.format}, Mode: {im.mode}")
+        filtered_image = pilgram.mayfair(im)
+        filtered_image.save(image_path)
+        print(f"Filtered Image - Size: {filtered_image.size}, Format: {filtered_image.format}, Mode: {filtered_image.mode}")
+        return image_path
+    @staticmethod
+    def clean_temp_directory(temp_dir, max_age_seconds=3600):
+        """
+        Limpa o diretório temporário removendo arquivos mais antigos que max_age_seconds.
+        """
+        now = time.time()
+        for filename in os.listdir(temp_dir):
+            file_path = os.path.join(temp_dir, filename)
+            if os.path.isfile(file_path):
+                file_age = now - os.path.getmtime(file_path)
+                if file_age > max_age_seconds:
+                    os.remove(file_path)
+                    print(f"Removed old temp file: {file_path}")
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/border.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+from PIL import Image
+class ImageWithBorder:
+    @staticmethod
+    def create_bordered_image(image_path, border_path, output_path, target_size=(1080, 1350)):
+        """
+        Cria a imagem com a borda e salva no caminho especificado.
+        Args:
+            image_path (str): Caminho da imagem base.
+            border_path (str): Caminho da borda.
+            output_path (str): Caminho para salvar a imagem resultante.
+            target_size (tuple): Dimensão alvo para o corte central (largura, altura).
+        Returns:
+            str: Caminho da imagem resultante.
+        """
+        image = Image.open(image_path)
+        border = Image.open(border_path)
+        print(f"Original Image - Size: {image.size}, Format: {image.format}, Mode: {image.mode}")
+        if image.mode in ('RGBA', 'LA'):
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            background.paste(image, mask=image.split()[-1])
+            image = background
+        width, height = image.size
+        left = (width - target_size[0]) // 2
+        top = (height - target_size[1]) // 2
+        right = left + target_size[0]
+        bottom = top + target_size[1]
+        cropped_image = image.crop((left, top, right, bottom))
+        print(f"Cropped Image - Size: {cropped_image.size}, Format: {cropped_image.format}, Mode: {cropped_image.mode}")
+        result = Image.new("RGB", border.size, (255, 255, 255))
+        result.paste(cropped_image, (0, 0))
+        if border.mode == 'RGBA':
+            mask = border.split()[3]
+            result.paste(border.convert('RGB'), (0, 0), mask=mask)
+        else:
+            result.paste(border.convert('RGB'), (0, 0))
+        print(f"Final Image - Size: {result.size}, Format: {result.format}, Mode: {result.mode}")
+        result.save(output_path, format="JPEG", quality=100)
+        return output_path
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/instagram/instagram_video_processor.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+from moviepy.editor import VideoFileClip, clips_array, concatenate_videoclips
+from moviepy.video.fx.resize import resize
+from moviepy.video.tools.cuts import find_video_period
+from moviepy.config import change_settings
+import tempfile
+from typing import Dict, Any
+import logging
+from moviepy.editor import VideoFileClip, CompositeVideoClip, ColorClip
+from PIL import Image
+from datetime import datetime
+import subprocess
+import re
+import json
+from pathlib import Path
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+def _apply_pillow_patch():
+    """Apply compatibility patch for Pillow 10+ with MoviePy"""
+    if not hasattr(Image, 'ANTIALIAS'):
+        if hasattr(Image, 'LANCZOS'):
+            Image.ANTIALIAS = Image.LANCZOS
+        elif hasattr(Image.Resampling) and hasattr(Image.Resampling, 'LANCZOS'):
+            Image.ANTIALIAS = Image.Resampling.LANCZOS
+_apply_pillow_patch()
+class VideoProcessor:
+    @staticmethod
+    def get_video_info(video_path: str) -> Dict[str, Any]:
+        """
+        Get video information using moviepy instead of ffprobe.
+        Args:
+            video_path: Path to the video file
+        Returns:
+            Dictionary with video metadata
+        """
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        try:
+            with VideoFileClip(video_path) as clip:
+                width = int(clip.size[0])
+                height = int(clip.size[1])
+                duration = float(clip.duration)
+                file_size_bytes = os.path.getsize(video_path)
+                file_size_mb = file_size_bytes / (1024 * 1024)
+                _, ext = os.path.splitext(video_path)
+                format_name = ext.lower().strip('.')
+                return {
+                    'width': width,
+                    'height': height,
+                    'duration': duration,
+                    'file_size_mb': file_size_mb,
+                    'format': format_name,
+                    'aspect_ratio': width / height if height else 0
+                }
+        except Exception as e:
+            logger.error(f"Error analyzing video: {str(e)}")
+            raise
+    @staticmethod
+    def check_duration(duration, post_type):
+        """Verifica se a duração está dentro dos limites."""
+        if post_type == 'reels':
+            return 3 <= duration <= 90
+        elif post_type == 'carousel':
+            return 3 <= duration <= 60
+        else:
+            return False  # Não suportado
+    @staticmethod
+    def check_resolution(width, height, post_type):
+        """Verifica se a resolução está dentro dos limites."""
+        min_width = 600
+        min_height = 600
+        return width >= min_width and height >= min_height
+    @staticmethod
+    def check_codec(video_codec, audio_codec):
+        """Verifica se os codecs são suportados."""
+        return video_codec.startswith("libx264") and (audio_codec is None or audio_codec.startswith("aac")) #O audio pode não existir
+    @staticmethod
+    def check_aspect_ratio(width, height, post_type):
+        """Verifica se a proporção está dentro dos limites."""
+        if post_type == 'reels':
+            return 0.8 <= width / height <= 1.91
+        elif post_type == 'carousel':
+            return 0.8 <= width / height <= 1.91
+        else:
+            return False  # Não suportado
+    @staticmethod
+    def check_file_size(file_size, post_type):
+        """Verifica se o tamanho do arquivo está dentro dos limites."""
+        if post_type == 'reels':
+            max_size_mb = 100
+        elif post_type == 'carousel':
+            max_size_mb = 100
+        else:
+            return False  # Não suportado
+        max_size_bytes = max_size_mb * 1024 * 1024
+        return file_size <= max_size_bytes
+    @staticmethod
+    def _crop_to_aspect_ratio(clip, target_aspect_ratio):
+        """Função auxiliar para cortar o vídeo para a proporção desejada, mantendo o centro."""
+        current_aspect_ratio = clip.size[0] / clip.size[1]
+        if current_aspect_ratio > target_aspect_ratio:
+            new_width = int(clip.size[1] * target_aspect_ratio)
+            x_center = clip.size[0] / 2
+            clip = clip.crop(x1=x_center - new_width / 2, x2=x_center + new_width / 2)
+        elif current_aspect_ratio < target_aspect_ratio:
+            new_height = int(clip.size[0] / target_aspect_ratio)
+            y_center = clip.size[1] / 2
+            clip = clip.crop(y1=y_center - new_height / 2, y2=y_center + new_height / 2)
+        return clip
+    @staticmethod
+    def optimize_for_instagram(video_path, post_type='reels'):
+        """Otimiza um vídeo para o Instagram usando moviepy."""
+        if post_type not in ['reels', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+        video_info = VideoProcessor.get_video_info(video_path)
+        if not video_info:
+            return None
+        try:
+            with VideoFileClip(video_path) as clip:
+                if not VideoProcessor.check_duration(video_info['duration'], post_type):
+                    if post_type == 'reels':
+                      max_duration = 90
+                    elif post_type == 'carousel':
+                      max_duration = 60
+                    else:
+                      max_duration = video_info['duration'] #Não alterar
+                    if video_info['duration'] < 3:
+                      print("Vídeo muito curto, impossível postar")
+                      return None
+                    clip = clip.subclip(0, min(video_info['duration'], max_duration)) #Corta o video, caso necessário.
+                if not VideoProcessor.check_resolution(video_info['width'], video_info['height'], post_type):
+                    if video_info['width'] < video_info['height']:
+                        clip = clip.resize(width=600) #Largura como base
+                    else:
+                        clip = clip.resize(height=600) #Altura como base
+                if not VideoProcessor.check_codec(video_info['codec'], video_info['audio_codec']):
+                    clip = clip.set_codec("libx264") #Codec de vídeo
+                    if clip.audio:
+                      clip.audio = clip.audio.set_codec("aac") #Codec de áudio
+                if not VideoProcessor.check_aspect_ratio(clip.size[0], clip.size[1], post_type):
+                    if post_type == 'reels':
+                        target_aspect_ratio = 9/16
+                    elif post_type == 'carousel':
+                        target_aspect_ratio = 1 #Exemplo, pode ser outro
+                    else:
+                        target_aspect_ratio = clip.size[0] / clip.size[1] #Manter original
+                    clip = VideoProcessor._crop_to_aspect_ratio(clip, target_aspect_ratio)
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+                    temp_filename = temp_file.name
+                bitrate = "5000k" # 5Mbits/s - Você pode ajustar isso com base nos seus testes
+                clip.write_videofile(
+                    temp_filename,
+                    codec="libx264",
+                    audio_codec="aac",
+                    bitrate=bitrate, # Use o bitrate definido
+                    threads=4,  # Ajuste para o número de núcleos do seu processador
+                    preset="fast",  # Ajuste para controlar a velocidade de codificação e a qualidade
+                    verbose=False, #Mostrar informações
+                    logger=None  # Desativar o logger padrão do moviepy
+                )
+                print(f"Vídeo otimizado salvo em: {temp_filename}")
+                return temp_filename
+        except Exception as e:
+            print(f"Erro ao otimizar o vídeo: {e}")
+            return None
+    @staticmethod
+    def validate_video(video_path, post_type='reels'):
+        """
+        Valida se um vídeo atende aos requisitos do Instagram.
+        Args:
+            video_path (str): Caminho para o arquivo de vídeo
+            post_type (str): Tipo de post ('reels', 'carousel')
+        Returns:
+            tuple: (is_valid, message) - Se o vídeo é válido e mensagem explicativa
+        """
+        if post_type not in ['reels', 'carousel']:
+            return False, "Tipo de post não suportado"
+        if not os.path.exists(video_path):
+            return False, "Arquivo de vídeo não encontrado"
+        try:
+            info = VideoProcessor.get_video_info(video_path)
+            if not info:
+                return False, "Não foi possível analisar o vídeo"
+            issues = []
+            min_duration = 3  # Todos os tipos precisam de pelo menos 3s
+            if post_type == 'reels':
+                max_duration = 90
+            elif post_type == 'carousel':
+                max_duration = 60
+            if info['duration'] < min_duration:
+                issues.append(f"Vídeo muito curto (duração: {info['duration']:.1f}s, mínimo: {min_duration}s)")
+            if info['duration'] > max_duration:
+                issues.append(f"Vídeo muito longo (duração: {info['duration']:.1f}s, máximo: {max_duration}s)")
+            min_resolution = 500
+            recommended_resolution = 1080
+            if info['width'] < min_resolution or info['height'] < min_resolution:
+                issues.append(f"Resolução muito baixa ({info['width']}x{info['height']}, mínimo recomendado: {min_resolution}px)")
+            aspect_ratio = info['width'] / info['height'] if info['height'] > 0 else 0
+            if post_type == 'reels' or post_type == 'carousel':
+                if aspect_ratio > 0.8:  # Muito largo
+                    issues.append(f"Proporção inadequada para {post_type} ({aspect_ratio:.2f}:1, ideal 9:16 = 0.56:1)")
+            max_file_size_mb = 100
+            file_size_mb = info['file_size_mb']
+            if file_size_mb > max_file_size_mb:
+                issues.append(f"Tamanho do arquivo excede o limite ({file_size_mb:.1f}MB, máximo: {max_file_size_mb}MB)")
+            if 'video_codec' in info:
+                if info['video_codec'] not in ['h264', 'avc1']:
+                    issues.append(f"Codec de vídeo não recomendado ({info['video_codec']}, recomendado: h264)")
+            if 'audio_codec' in info and info['audio_codec']:  # Pode ser None para vídeos sem áudio
+                if info['audio_codec'] not in ['aac']:
+                    issues.append(f"Codec de áudio não recomendado ({info['audio_codec']}, recomendado: aac)")
+            if issues:
+                return False, "Problemas encontrados: " + "; ".join(issues)
+            else:
+                return True, f"Vídeo adequado para {post_type}"
+        except Exception as e:
+            logger.error(f"Erro durante validação do vídeo: {str(e)}")
+            return False, f"Erro ao validar vídeo: {str(e)}"
+    @staticmethod
+    def get_video_info_ffprobe(video_path):
+        """
+        Obtém informações detalhadas do vídeo usando ffprobe, se disponível.
+        Fornece informações mais precisas sobre codecs.
+        Args:
+            video_path (str): Caminho para o arquivo de vídeo
+        Returns:
+            dict: Informações do vídeo ou None em caso de erro
+        """
+        try:
+            try:
+                subprocess.run(['ffprobe', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            except (subprocess.SubprocessError, FileNotFoundError):
+                logger.warning("ffprobe não disponível, usando fallback para informações de vídeo")
+                return None
+            cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                video_path
+            ]
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                logger.warning(f"ffprobe falhou: {result.stderr}")
+                return None
+            probe_data = json.loads(result.stdout)
+            video_info = {
+                'format': probe_data['format']['format_name'],
+                'duration': float(probe_data['format']['duration']),
+                'file_size_mb': float(probe_data['format']['size']) / (1024 * 1024),
+            }
+            for stream in probe_data['streams']:
+                if stream['codec_type'] == 'video':
+                    video_info['width'] = int(stream['width'])
+                    video_info['height'] = int(stream['height'])
+                    video_info['video_codec'] = stream['codec_name'].lower()
+                    if 'r_frame_rate' in stream:
+                        nums = stream['r_frame_rate'].split('/')
+                        if len(nums) == 2 and int(nums[1]) > 0:
+                            video_info['fps'] = int(nums[0]) / int(nums[1])
+                        else:
+                            video_info['fps'] = float(stream['r_frame_rate'])
+                elif stream['codec_type'] == 'audio':
+                    video_info['audio_codec'] = stream['codec_name'].lower()
+                    video_info['audio_channels'] = int(stream.get('channels', 0))
+            if 'width' in video_info and 'height' in video_info and video_info['height'] > 0:
+                video_info['aspect_ratio'] = video_info['width'] / video_info['height']
+            return video_info
+        except Exception as e:
+            logger.error(f"Erro ao obter informações avançadas do vídeo: {str(e)}")
+            return None
+    @staticmethod
+    def clean_temp_files(temp_dir, max_age_hours=24):
+        """
+        Remove arquivos temporários antigos.
+        Args:
+            temp_dir (str): Diretório de arquivos temporários
+            max_age_hours (int): Idade máxima em horas para remoção
+        Returns:
+            int: Número de arquivos removidos
+        """
+        try:
+            if not os.path.exists(temp_dir):
+                return 0
+            files_removed = 0
+            current_time = datetime.now()
+            for file_path in Path(temp_dir).glob("*"):
+                if file_path.is_file():
+                    file_age = current_time - datetime.fromtimestamp(file_path.stat().st_mtime)
+                    age_hours = file_age.total_seconds() / 3600
+                    if age_hours > max_age_hours:
+                        try:
+                            file_path.unlink()
+                            files_removed += 1
+                        except Exception as e:
+                            logger.warning(f"Não foi possível remover {file_path}: {e}")
+            return files_removed
+        except Exception as e:
+            logger.error(f"Erro ao limpar arquivos temporários: {e}")
+            return 0
+    @staticmethod
+    def force_optimize_for_instagram(video_path: str, output_path: str = None, post_type: str = 'reels') -> str:
+        """
+        Otimização forçada de vídeo usando ffmpeg diretamente, para casos
+        onde a otimização normal falha. Útil para resolver o erro 2207026.
+        Args:
+            video_path (str): Caminho para o arquivo de vídeo
+            output_path (str, optional): Caminho para salvar o vídeo otimizado
+            post_type (str): Tipo de post ('reels', 'feed', 'story', 'igtv')
+        Returns:
+            str: Caminho para o vídeo otimizado ou None em caso de falha
+        """
+        if post_type not in ['reels', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+        try:
+            try:
+                subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            except (subprocess.SubprocessError, FileNotFoundError):
+                logger.error("ffmpeg não disponível para otimização forçada")
+                return None
+            if post_type in ['reels', 'carousel']:
+                target_width = 1080
+                target_height = 1920
+            else:
+                target_width = 1080
+                target_height = 1920
+            if output_path is None:
+                base_name = os.path.basename(video_path)
+                name, _ = os.path.splitext(base_name)
+                output_path = os.path.join(tempfile.gettempdir(), f"{name}_optimized_{post_type}.mp4")
+            cmd = [
+                'ffmpeg',
+                '-i', video_path,
+                '-vf', f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2",
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-profile:v', 'baseline',  # Melhor compatibilidade
+                '-pix_fmt', 'yuv420p',     # Formato de pixel recomendado
+                '-b:v', '4000k',           # Bitrate de vídeo
+                '-maxrate', '4000k',       # Bitrate máximo
+                '-bufsize', '8000k',       # Tamanho do buffer
+                '-c:a', 'aac',             # Codec de áudio
+                '-b:a', '128k',            # Bitrate de áudio
+                '-ar', '44100',            # Taxa de amostragem de áudio
+                '-shortest',               # Usar a duração da mídia mais curta
+                '-y',                      # Sobrescrever arquivo de saída
+                output_path
+            ]
+            logger.info(f"Comando de otimização forçada: {' '.join(cmd)}")
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                logger.error(f"Falha na otimização forçada: {result.stderr.decode('utf-8', errors='replace')}")
+                return None
+            logger.info(f"Otimização forçada concluída: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Erro na otimização forçada: {str(e)}")
+            return None
+class InstagramVideoProcessor:
+    """Classe para processar vídeos para o Instagram usando moviepy"""
+    INSTAGRAM_SPECS = {
+        'reel': {
+            'resolution': (1080, 1920),  # 9:16
+            'max_duration': 90,  # segundos
+        },
+        'carousel': {
+            'resolution': (1080, 1080),  # 1:1
+            'max_duration': 60,  # segundos
+        }
+    }
+    @staticmethod
+    def _resize_video(clip, target_resolution):
+        """
+        Redimensiona um vídeo para a resolução alvo, preservando a proporção e preenchendo
+        áreas vazias com barras pretas se necessário.
+        Args:
+            clip (VideoFileClip): Clip de vídeo para redimensionar
+            target_resolution (tuple): Resolução alvo no formato (largura, altura)
+        Returns:
+            VideoFileClip: Clip de vídeo redimensionado
+        """
+        target_width, target_height = target_resolution
+        target_aspect_ratio = target_width / target_height
+        current_aspect_ratio = clip.size[0] / clip.size[1]
+        if current_aspect_ratio > target_aspect_ratio:
+            new_height = int(target_width / current_aspect_ratio)
+            resized_clip = clip.resize(width=target_width, height=new_height)
+            background = ColorClip(size=target_resolution, color=(0, 0, 0))
+            y_offset = (target_height - new_height) // 2
+            composite_clip = CompositeVideoClip([
+                background,
+                resized_clip.set_position(('center', y_offset))
+            ])
+            return composite_clip.set_duration(clip.duration)
+        else:
+            new_width = int(target_height * current_aspect_ratio)
+            resized_clip = clip.resize(width=new_width, height=target_height)
+            background = ColorClip(size=target_resolution, color=(0, 0, 0))
+            x_offset = (target_width - new_width) // 2
+            composite_clip = CompositeVideoClip([
+                background,
+                resized_clip.set_position((x_offset, 'center'))
+            ])
+            return composite_clip.set_duration(clip.duration)
+    @staticmethod
+    def process_video(video_path, post_type='reel', output_path=None):
+        """
+        Processa um vídeo para atender aos requisitos do Instagram
+        Args:
+            video_path (str): Caminho para o arquivo de vídeo original
+            post_type (str): Tipo de post ('reel', 'carousel')
+            output_path (str, optional): Caminho para salvar o vídeo processado
+        Returns:
+            str: Caminho para o vídeo processado
+        """
+        if post_type not in ['reel', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+        _apply_pillow_patch()
+        clip = VideoFileClip(video_path)
+        target_resolution = InstagramVideoProcessor.INSTAGRAM_SPECS[post_type]['resolution']
+        try:
+            clip = InstagramVideoProcessor._resize_video(clip, target_resolution)
+        except Exception as e:
+            print(f"Aviso: Erro ao redimensionar vídeo: {e}")
+            print("Continuando com o tamanho original")
+        max_duration = InstagramVideoProcessor.INSTAGRAM_SPECS[post_type]['max_duration']
+        if clip.duration > max_duration:
+            clip = clip.subclip(0, max_duration)
+        clip = clip.set_fps(30)
+        if output_path is None:
+            base_name = os.path.basename(video_path)
+            name, _ = os.path.splitext(base_name)
+            output_path = os.path.join(tempfile.gettempdir(), f"{name}_instagram_{post_type}.mp4")
+        clip.write_videofile(
+            output_path,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile=os.path.join(tempfile.gettempdir(), "temp_audio.m4a"),
+            remove_temp=True,
+            preset="ultrafast",  # para testes; use "medium" para melhor qualidade/tamanho
+            threads=4
+        )
+        clip.close()
+        is_valid, message = InstagramVideoProcessor.validate_video(output_path, post_type)
+        if not is_valid:
+            print(f"Erro: Vídeo processado não atende aos requisitos: {message}")
+            return None
+        return output_path
+    @staticmethod
+    def validate_video(video_path, post_type='reels'):
+        """
+        Valida se um vídeo atende aos requisitos do Instagram.
+        Args:
+            video_path (str): Caminho para o arquivo de vídeo
+            post_type (str): Tipo de post ('reels', 'carousel')
+        Returns:
+            tuple: (is_valid, message) - Se o vídeo é válido e mensagem explicativa
+        """
+        if post_type not in ['reels', 'carousel']:
+            return False, "Tipo de post não suportado"
+        if not os.path.exists(video_path):
+            return False, "Arquivo de vídeo não encontrado"
+        try:
+            info = VideoProcessor.get_video_info(video_path)
+            if not info:
+                return False, "Não foi possível analisar o vídeo"
+            issues = []
+            min_duration = 3  # Todos os tipos precisam de pelo menos 3s
+            if post_type == 'reels':
+                max_duration = 90
+            elif post_type == 'carousel':
+                max_duration = 60
+            if info['duration'] < min_duration:
+                issues.append(f"Vídeo muito curto (duração: {info['duration']:.1f}s, mínimo: {min_duration}s)")
+            if info['duration'] > max_duration:
+                issues.append(f"Vídeo muito longo (duração: {info['duration']:.1f}s, máximo: {max_duration}s)")
+            min_resolution = 500
+            recommended_resolution = 1080
+            if info['width'] < min_resolution or info['height'] < min_resolution:
+                issues.append(f"Resolução muito baixa ({info['width']}x{info['height']}, mínimo recomendado: {min_resolution}px)")
+            aspect_ratio = info['width'] / info['height'] if info['height'] > 0 else 0
+            if post_type == 'reels' or post_type == 'carousel':
+                if aspect_ratio > 0.8:  # Muito largo
+                    issues.append(f"Proporção inadequada para {post_type} ({aspect_ratio:.2f}:1, ideal 9:16 = 0.56:1)")
+            max_file_size_mb = 100
+            file_size_mb = info['file_size_mb']
+            if file_size_mb > max_file_size_mb:
+                issues.append(f"Tamanho do arquivo excede o limite ({file_size_mb:.1f}MB, máximo: {max_file_size_mb}MB)")
+            if 'video_codec' in info:
+                if info['video_codec'] not in ['h264', 'avc1']:
+                    issues.append(f"Codec de vídeo não recomendado ({info['video_codec']}, recomendado: h264)")
+            if 'audio_codec' in info and info['audio_codec']:  # Pode ser None para vídeos sem áudio
+                if info['audio_codec'] not in ['aac']:
+                    issues.append(f"Codec de áudio não recomendado ({info['audio_codec']}, recomendado: aac)")
+            if issues:
+                return False, "Problemas encontrados: " + "; ".join(issues)
+            else:
+                return True, f"Vídeo adequado para {post_type}"
+        except Exception as e:
+            logger.error(f"Erro durante validação do vídeo: {str(e)}")
+            return False, f"Erro ao validar vídeo: {str(e)}"
+    @staticmethod
+    def get_video_info_ffprobe(video_path):
+        """
+        Obtém informações detalhadas do vídeo usando ffprobe, se disponível.
+        Fornece informações mais precisas sobre codecs.
+        Args:
+            video_path (str): Caminho para o arquivo de vídeo
+        Returns:
+            dict: Informações do vídeo ou None em caso de erro
+        """
+        try:
+            try:
+                subprocess.run(['ffprobe', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            except (subprocess.SubprocessError, FileNotFoundError):
+                logger.warning("ffprobe não disponível, usando fallback para informações de vídeo")
+                return None
+            cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                video_path
+            ]
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                logger.warning(f"ffprobe falhou: {result.stderr}")
+                return None
+            probe_data = json.loads(result.stdout)
+            video_info = {
+                'format': probe_data['format']['format_name'],
+                'duration': float(probe_data['format']['duration']),
+                'file_size_mb': float(probe_data['format']['size']) / (1024 * 1024),
+            }
+            for stream in probe_data['streams']:
+                if stream['codec_type'] == 'video':
+                    video_info['width'] = int(stream['width'])
+                    video_info['height'] = int(stream['height'])
+                    video_info['video_codec'] = stream['codec_name'].lower()
+                    if 'r_frame_rate' in stream:
+                        nums = stream['r_frame_rate'].split('/')
+                        if len(nums) == 2 and int(nums[1]) > 0:
+                            video_info['fps'] = int(nums[0]) / int(nums[1])
+                        else:
+                            video_info['fps'] = float(stream['r_frame_rate'])
+                elif stream['codec_type'] == 'audio':
+                    video_info['audio_codec'] = stream['codec_name'].lower()
+                    video_info['audio_channels'] = int(stream.get('channels', 0))
+            if 'width' in video_info and 'height' in video_info and video_info['height'] > 0:
+                video_info['aspect_ratio'] = video_info['width'] / video_info['height']
+            return video_info
+        except Exception as e:
+            logger.error(f"Erro ao obter informações avançadas do vídeo: {str(e)}")
+            return None
+    @staticmethod
+    def clean_temp_files(temp_dir, max_age_hours=24):
+        """
+        Remove arquivos temporários antigos.
+        Args:
+            temp_dir (str): Diretório de arquivos temporários
+            max_age_hours (int): Idade máxima em horas para remoção
+        Returns:
+            int: Número de arquivos removidos
+        """
+        try:
+            if not os.path.exists(temp_dir):
+                return 0
+            files_removed = 0
+            current_time = datetime.now()
+            for file_path in Path(temp_dir).glob("*"):
+                if file_path.is_file():
+                    file_age = current_time - datetime.fromtimestamp(file_path.stat().st_mtime)
+                    age_hours = file_age.total_seconds() / 3600
+                    if age_hours > max_age_hours:
+                        try:
+                            file_path.unlink()
+                            files_removed += 1
+                        except Exception as e:
+                            logger.warning(f"Não foi possível remover {file_path}: {e}")
+            return files_removed
+        except Exception as e:
+            logger.error(f"Erro ao limpar arquivos temporários: {e}")
+            return 0
+    @staticmethod
+    def force_optimize_for_instagram(video_path: str, output_path: str = None, post_type: str = 'reels') -> str:
+        """
+        Otimização forçada de vídeo usando ffmpeg diretamente, para casos
+        onde a otimização normal falha. Útil para resolver o erro 2207026.
+        Args:
+            video_path (str): Caminho para o arquivo de vídeo
+            output_path (str, optional): Caminho para salvar o vídeo otimizado
+            post_type (str): Tipo de post ('reels', 'feed', 'story', 'igtv')
+        Returns:
+            str: Caminho para o vídeo otimizado ou None em caso de falha
+        """
+        if post_type not in ['reels', 'carousel']:
+            raise ValueError(f"Tipo de post não suportado: {post_type}")
+        try:
+            try:
+                subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            except (subprocess.SubprocessError, FileNotFoundError):
+                logger.error("ffmpeg não disponível para otimização forçada")
+                return None
+            if post_type in ['reels', 'carousel']:
+                target_width = 1080
+                target_height = 1920
+            else:
+                target_width = 1080
+                target_height = 1920
+            if output_path is None:
+                base_name = os.path.basename(video_path)
+                name, _ = os.path.splitext(base_name)
+                output_path = os.path.join(tempfile.gettempdir(), f"{name}_optimized_{post_type}.mp4")
+            cmd = [
+                'ffmpeg',
+                '-i', video_path,
+                '-vf', f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2",
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-profile:v', 'baseline',  # Melhor compatibilidade
+                '-pix_fmt', 'yuv420p',     # Formato de pixel recomendado
+                '-b:v', '4000k',           # Bitrate de vídeo
+                '-maxrate', '4000k',       # Bitrate máximo
+                '-bufsize', '8000k',       # Tamanho do buffer
+                '-c:a', 'aac',             # Codec de áudio
+                '-b:a', '128k',            # Bitrate de áudio
+                '-ar', '44100',            # Taxa de amostragem de áudio
+                '-shortest',               # Usar a duração da mídia mais curta
+                '-y',                      # Sobrescrever arquivo de saída
+                output_path
+            ]
+            logger.info(f"Comando de otimização forçada: {' '.join(cmd)}")
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                logger.error(f"Falha na otimização forçada: {result.stderr.decode('utf-8', errors='replace')}")
+                return None
+            logger.info(f"Otimização forçada concluída: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Erro na otimização forçada: {str(e)}")
+            return None

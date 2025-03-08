@@ -1,0 +1,105 @@
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/utils/video_decode_save.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+import base64
+import time
+import logging
+from src.utils.paths import Paths
+class VideoDecodeSaver:
+    """
+    Classe para decodificar e salvar vídeos em base64 recebidos via webhook
+    """
+    @staticmethod
+    def process(video_base64):
+        """
+        Processa um vídeo em formato base64, salvando-o como um arquivo MP4
+        Args:
+            video_base64 (str): String base64 do vídeo
+        Returns:
+            str: Caminho do arquivo salvo
+        """
+        try:
+            if "base64," in video_base64:
+                video_base64 = video_base64.split("base64,")[1]
+            video_data = base64.b64decode(video_base64)
+            temp_dir = os.path.join(Paths.ROOT_DIR, "temp_videos")
+            os.makedirs(temp_dir, exist_ok=True)
+            filename = f"temp-{int(time.time() * 1000)}.mp4"
+            filepath = os.path.join(temp_dir, filename)
+            with open(filepath, "wb") as f:
+                f.write(video_data)
+            logging.info(f"Vídeo base64 salvo em: {filepath}")
+            return filepath
+        except Exception as e:
+            logging.error(f"Erro ao processar vídeo base64: {str(e)}")
+            raise Exception(f"Falha ao processar vídeo: {str(e)}")
+    @staticmethod
+    def cleanup_old_videos(max_age_hours=24):
+        """
+        Remove vídeos temporários antigos para gerenciar espaço em disco
+        Args:
+            max_age_hours (int): Idade máxima em horas antes da remoção
+        """
+        try:
+            temp_dir = os.path.join(Paths.ROOT_DIR, "temp_videos")
+            if not os.path.exists(temp_dir):
+                return
+            current_time = time.time()
+            max_age_seconds = max_age_hours * 3600
+            for file in os.listdir(temp_dir):
+                if file.startswith("temp-") and file.endswith(".mp4"):
+                    file_path = os.path.join(temp_dir, file)
+                    file_age = current_time - os.path.getmtime(file_path)
+                    if file_age > max_age_seconds:
+                        os.remove(file_path)
+                        logging.info(f"Removido vídeo antigo: {file_path}")
+        except Exception as e:
+            logging.error(f"Erro ao limpar vídeos antigos: {str(e)}")
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/utils/paths.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import os
+class Paths:
+    """
+    Classe responsável por armazenar e fornecer caminhos
+    de arquivos e pastas utilizados no sistema.
+    """
+    ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    SRC_DIR = os.path.join(ROOT_DIR, 'src')
+    BOOK_AGENTS = os.path.join(ROOT_DIR,'book_agents')
+    ROOT_IMAGES = os.path.join(ROOT_DIR,'images')
+    TEMP = os.path.join(ROOT_DIR,'temp')
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/utils/__init__.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ src/utils/image_decode_save.py
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+import base64
+import os
+import time
+from src.utils.paths import Paths
+class ImageDecodeSaver:
+    @staticmethod
+    def process(base64_str, directory='temp'):
+        timestamp_ms = int(time.time() * 1000)
+        timestamp_str_ms = str(timestamp_ms)
+        file_name = f"temp-{timestamp_str_ms}.png"
+        """
+        Cria o diretório se necessário e salva a imagem no local especificado.
+        Retorna o caminho completo do arquivo salvo.
+        """
+        os.makedirs(directory, exist_ok=True)
+        filepath = os.path.join(Paths.ROOT_DIR, directory, file_name)
+        image_data = base64.b64decode(base64_str)
+        with open(filepath, 'wb') as f:
+            f.write(image_data)
+        return filepath

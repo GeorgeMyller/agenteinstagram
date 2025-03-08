@@ -1,0 +1,692 @@
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ README.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+Este projeto é uma ferramenta completa para automação e gerenciamento de postagens em redes sociais, com foco especial no Instagram. Ele integra a biblioteca CrewAI para gerar legendas criativas, além de oferecer serviços robustos de processamento de imagens – incluindo aplicação de filtros, adição de bordas, upload via Imgur e publicação no Instagram. Também conta com descrição inteligente de imagens utilizando a API Gemini do Google, processamento de mensagens (texto, áudio, imagem e documentos) e integração com a Evolution API.
+- Geração de legendas com CrewAI
+- Processamento de imagens: filtros, correção e bordas
+- Upload de imagens via Imgur
+- Publicação de posts no Instagram
+- Descrição inteligente de imagens com API Gemini
+- Processamento e envio de mensagens via Evolution API
+- Endpoints Flask para webhooks e integração de serviços
+1. Instale as dependências:
+   ```bash
+   uv sync
+   ```
+2. Execute a interface Streamlit:
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+3. Acesse a interface web em `http://localhost:8501`
+4. Use o painel lateral para configurar:
+   - Estilo de escrita
+   - Pessoa narrativa
+   - Sentimento
+   - Uso de emojis e linguagem informal
+5. Faça upload de uma imagem e adicione uma legenda opcional
+6. Clique em "Post to Instagram" para publicar
+1. Instale o UV:
+   ```bash
+   pip install uv
+   ```
+2. Crie o ambiente virtual:
+   ```bash
+   uv venv
+   ```
+3. Ative o ambiente virtual (no Windows use `venv\Scripts\activate`):
+   ```bash
+   source venv/bin/activate
+   ```
+4. Sincronize as dependências e inicie a aplicação:
+   ```bash
+   uv sync
+   ```
+- `app.py`: Endpoints Flask para o processamento de mensagens.
+- Diretório `instagram/`: Módulos para criar posts, fazer upload de imagens, aplicar filtros, adicionar bordas e descrever imagens.
+- `crew_post_instagram.py`: Configuração do CrewAI e tarefas para geração de legendas.
+- `message.py` e `send_message.py`: Processamento e envio de mensagens.
+- `paths.py`: Definição dos caminhos usados no sistema.
+- `streamlit_app.py`: Interface gráfica para gerenciamento de posts
+- Outros arquivos e scripts auxiliares.
+Contribuições são bem-vindas! Sinta-se à vontade para abrir issues e pull requests para melhorias e correções.
+Este projeto está licenciado sob a Licença MIT. Veja o arquivo LICENSE para mais detalhes.
+---
+This project is a comprehensive tool for automating and managing social media posts, with a special focus on Instagram. It integrates the CrewAI library to generate creative captions, along with robust image processing features – including filters, border addition, image upload via Imgur, and Instagram posting. It also features intelligent image description using Google's Gemini API, message processing (text, audio, image, and document) and integration with the Evolution API.
+- Caption generation with CrewAI
+- Image processing: filters, corrections, and border additions
+- Image upload using Imgur
+- Instagram post publishing
+- Intelligent image description with Gemini API
+- Message processing and sending via Evolution API
+- Flask endpoints for webhooks and service integration
+1. Install dependencies:
+   ```bash
+   uv sync
+   ```
+2. Run the Streamlit interface:
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+3. Access the web interface at `http://localhost:8501`
+4. Use the sidebar to configure:
+   - Writing style
+   - Narrative person
+   - Sentiment
+   - Emoji and informal language usage
+5. Upload an image and add an optional caption
+6. Click "Post to Instagram" to publish
+1. Install UV:
+   ```bash
+   pip install uv
+   ```
+2. Create the virtual environment:
+   ```bash
+   uv venv
+   ```
+3. Activate the virtual environment (use `venv\Scripts\activate` on Windows):
+   ```bash
+   source venv/bin/activate
+   ```
+4. Synchronize dependencies and launch the application:
+   ```bash
+   uv sync
+   ```
+- `app.py`: Flask endpoints for message processing.
+- `instagram/` folder: Modules for creating posts, image uploading, filters, border additions and image description.
+- `crew_post_instagram.py`: CrewAI configuration and caption generation tasks.
+- `message.py` and `send_message.py`: Message processing and sending.
+- `paths.py`: File path configurations.
+- `streamlit_app.py`: Graphical interface for post management
+- Other auxiliary files and scripts.
+Contributions are welcome! Feel free to open issues and pull requests for improvements and fixes.
+This project is licensed under the MIT License. See the LICENSE file for more details.
+Happy coding! 😄
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/index.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+Instagram Agent is a powerful social media automation system that helps manage and automate Instagram content posting through an API interface. It supports various content types including single images, carousels, and videos/reels.
+- Image posting with automatic caption generation
+- Carousel post support with multiple images
+- Video and reels upload capability
+- AI-powered content description
+- Webhook integration for automated posting
+- Web interface for manual content managemen
+- [Installation Guide](installation/quickstart.md)
+- [API Documentation](api/README.md)
+- [Configuration Guide](guides/configuration.md)
+- [Troubleshooting](troubleshooting/common.md)
+```
+├── src/                    # Source code
+│   ├── instagram/         # Instagram integration
+│   ├── handlers/          # Request handlers
+│   ├── services/          # Core services
+│   └── utils/            # Utilities
+├── tests/                 # Test suite
+├── docs/                  # Documentation
+└── scripts/              # Helper scripts
+```
+1. Install the package:
+   ```bash
+   pip install -e .
+   ```
+2. Configure your environment:
+   ```bash
+   cp .env.example .env
+   ```
+3. Run the validation:
+   ```bash
+   python scripts/validate_setup.py
+   ```
+4. Start the server:
+   ```bash
+   python run.py
+   ```
+See our [contribution guidelines](guides/contributing.md) for information on how to contribute to this project.
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/installation/requirements.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/installation/quickstart.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+Get up and running with Agent Social Media quickly.
+Before you begin, ensure you have:
+- Python 3.12 or newer
+- FFmpeg installed for video processing
+- Git for version control
+- Instagram Business or Creator accoun
+- Required API keys and tokens
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/acessoia/agentcrewai.gi
+   cd agentcrewai
+   ```
+2. Run the setup script:
+   ```bash
+   chmod +x scripts/setup.sh
+   ./scripts/setup.sh
+   ```
+   This will:
+   - Create necessary directories
+   - Install dependencies
+   - Set up pre-commit hooks
+   - Create a .env template
+3. Configure your environment:
+   - Copy `.env.example` to `.env`
+   - Fill in your API keys and tokens
+   - Configure paths and settings
+4. Validate your setup:
+   ```bash
+   python scripts/validate_setup.py
+   ```
+Test your installation by:
+1. Starting the server:
+   ```bash
+   python src/app.py
+   ```
+2. Running the test endpoint:
+   ```bash
+   curl http://localhost:5001/debug/send-tes
+   ```
+1. Start the Streamlit interface:
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+2. Open your browser to `http://localhost:8501`
+3. Try uploading an image and posting it to Instagram
+- Read the [Configuration Guide](configuration.md) for detailed setup
+- Check the [User Guide](../guides/overview.md) for usage instructions
+- Review [Common Issues](../troubleshooting/common.md) if you encounter problems
+For development, install additional tools:
+```bash
+pip install -r requirements-dev.tx
+```
+This includes:
+- Testing tools (pytest)
+- Code formatting (black)
+- Type checking (mypy)
+- Documentation tools (mkdocs)
+Run tests to verify everything works:
+```bash
+python -m pytes
+```
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/troubleshooting/instagram.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+This guide focuses specifically on Instagram API issues and their solutions.
+**Problem**: Token validation failed
+**Solutions**:
+1. Check token expiration
+2. Verify correct permissions are granted:
+   - instagram_basic
+   - instagram_content_publish
+   - instagram_manage_insights
+3. Generate new token in Meta Developer Console
+**Problem**: Too many requests
+**Solutions**:
+1. Implement rate limiting (built into our service)
+2. Use exponential backoff for retries
+3. Batch operations when possible
+**Problem**: Media format not supported
+**Solutions**:
+1. Video Requirements:
+   ```
+   Format: MP4/MOV
+   Codec: H.264
+   Audio: AAC
+   Aspect Ratio: 1:1 to 1.91:1
+   Resolution: 600x600 minimum
+   Duration: 3-90 seconds
+   ```
+2. Image Requirements:
+   ```
+   Format: JPEG/PNG
+   Aspect Ratio: 1:1 to 1.91:1
+   Resolution: 320x320 minimum
+   Size: <8MB
+   ```
+**Problem**: Upload process failed
+**Solutions**:
+1. Check network connectivity
+2. Verify file isn't corrupted
+3. Try reducing file size
+4. Use our automatic optimization:
+   ```python
+   from instagram.media_optimizer import optimize_media
+   optimize_media(file_path)
+   ```
+**Problem**: Carousel validation failed
+**Solutions**:
+1. Verify all images meet requirements:
+   - Same aspect ratio
+   - 2-10 images only
+   - All images < 8MB
+2. Check carousel sequence
+3. Validate media before upload
+**Problem**: Publishing process failed
+**Solutions**:
+1. Check all image URLs are accessible
+2. Verify caption length (≤2200 characters)
+3. Check hashtag count (≤30)
+```bash
+curl -X GET "https://graph.facebook.com/v22.0/debug_token?input_token={token}&access_token={app-token}"
+```
+```bash
+curl -X GET "https://graph.facebook.com/v22.0/{container-id}?fields=status_code,status"
+```
+```bash
+curl -X GET "https://graph.facebook.com/v22.0/me/content_publishing_limit"
+```
+1. Always validate media before upload
+2. Use our built-in optimization tools
+3. Keep aspect ratios consisten
+4. Compress media appropriately
+1. Implement proper retry logic
+2. Use exponential backoff
+3. Log detailed error information
+4. Monitor rate limits
+1. Store tokens securely
+2. Implement token refresh
+3. Monitor token expiration
+4. Use appropriate scopes
+1. Regular token validation
+2. Media container status monitoring
+3. Rate limit tracking
+4. Error rate monitoring
+Important fields to log:
+- Request ID
+- Error codes
+- HTTP status
+- Response body
+- Media metadata
+1. Check error logs
+2. Verify media status
+3. Retry with optimization
+4. Clear temporary files
+1. Implement backoff
+2. Queue requests
+3. Batch operations
+4. Monitor limits
+1. Refresh token
+2. Verify permissions
+3. Check app status
+4. Update credentials
+- Pre-validate all media
+- Check formats and sizes
+- Verify aspect ratios
+- Test with sample conten
+- Compress media
+- Batch requests
+- Cache responses
+- Monitor usage
+- Set up alerts
+- Monitor rate limits
+- Track error rates
+- Log key metrics
+- [Instagram Graph API Documentation](https://developers.facebook.com/docs/instagram-api/)
+- [Media Requirements](https://developers.facebook.com/docs/instagram-api/reference/ig-media)
+- [Error Codes](https://developers.facebook.com/docs/instagram-api/reference/error-codes)
+1. Check debug endpoints
+2. Review log files
+3. Use validation tools
+4. Open GitHub issue
+Remember to always test in development first and maintain proper error handling throughout your implementation.
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/troubleshooting/common.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+This guide covers the most common issues you might encounter while using Agent Social Media and their solutions.
+**Problem**: Error about Python version requirement not me
+**Solution**:
+1. Install Python 3.12 or newer
+2. Create a new virtual environment:
+   ```bash
+   python3.12 -m venv venv
+   source venv/bin/activate  # or venv\Scripts\activate on Windows
+   ```
+**Problem**: Video processing fails with FFmpeg-related errors
+**Solution**:
+- On macOS: `brew install ffmpeg`
+- On Ubuntu: `sudo apt install ffmpeg`
+- On Windows: Download from [FFmpeg website](https://ffmpeg.org/download.html)
+**Problem**: "Environment variable X not found" errors
+**Solution**:
+1. Copy `.env.example` to `.env`
+2. Fill in all required variables
+3. Run validation script:
+   ```bash
+   python scripts/validate_setup.py
+   ```
+**Problem**: Authentication errors with Instagram/Imgur
+**Solution**:
+1. Verify tokens using:
+   ```bash
+   python scripts/validate_tokens.py
+   ```
+2. Regenerate tokens if expired
+3. Check permission scopes
+**Problem**: Video format not accepted by Instagram
+**Solution**:
+1. Ensure video meets requirements:
+   - Codec: H.264
+   - Audio: AAC
+   - Resolution: ≥600x600
+   - Duration: 3-90s (Reels)
+2. Use automatic optimization:
+   ```python
+   from instagram.video_processor import optimize_video
+   optimize_video(video_path)
+   ```
+**Problem**: Instagram API token expired
+**Solution**:
+1. Generate new token in Meta Developer Console
+2. Update `.env` file
+3. Restart the application
+**Problem**: Carousel images missing or not loading
+**Solution**:
+1. Check file permissions
+2. Verify image paths
+3. Clear the carousel state:
+   ```bash
+   curl -X POST http://localhost:5001/debug/carousel/clear
+   ```
+**Problem**: Carousel upload appears frozen
+**Solution**:
+1. Check logs in `logs/app_debug.log`
+2. Clear error queue:
+   ```bash
+   curl -X POST http://localhost:5001/debug/error-queue/clear
+   ```
+3. Restart the process
+**Problem**: Application using too much memory
+**Solution**:
+1. Clear temp directories:
+   ```bash
+   rm -rf temp/*
+   ```
+2. Reduce MAX_CAROUSEL_IMAGES in settings
+3. Enable automatic cleanup:
+   ```python
+   cleanup_interval_minutes = 30
+   ```
+**Problem**: Video processing takes too long
+**Solution**:
+1. Check FFmpeg installation
+2. Reduce video quality settings
+3. Use smaller video files
+4. Enable hardware acceleration
+**Problem**: Webhook endpoint not getting messages
+**Solution**:
+1. Verify webhook URL is correc
+2. Check network/firewall settings
+3. Test with debug endpoint:
+   ```bash
+   curl http://localhost:5001/debug/send-tes
+   ```
+**Problem**: Too many requests errors
+**Solution**:
+1. Implement exponential backoff
+2. Reduce request frequency
+3. Use bulk operations where possible
+**Problem**: mypy reporting type errors
+**Solution**:
+1. Install type stubs:
+   ```bash
+   pip install -r requirements-dev.tx
+   ```
+2. Add type annotations
+3. Use `# type: ignore` when needed
+**Problem**: Unit tests failing
+**Solution**:
+1. Update test dependencies
+2. Check test data fixtures
+3. Run specific test for details:
+   ```bash
+   pytest tests/unit/test_carousel_poster.py -v
+   ```
+If you're still having issues:
+1. Check the logs:
+   ```bash
+   tail -f logs/app_debug.log
+   ```
+2. Enable debug mode in `.env`:
+   ```
+   DEBUG=True
+   LOG_LEVEL=DEBUG
+   ```
+3. Use the debug endpoints:
+   - `/debug/carousel`
+   - `/debug/send-test`
+   - `/debug/error-queue`
+4. Open an issue on GitHub with:
+   - Error message
+   - Relevant logs
+   - Steps to reproduce
+   - Environment details
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/guides/setup.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/guides/media_validation.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+The `validate_media.py` script helps you verify that your media files meet Instagram's requirements before attempting to upload them.
+```bash
+./scripts/validate_media.py [--type {image,video,auto}] FILES...
+```
+Validate a single image:
+```bash
+./scripts/validate_media.py path/to/image.jpg
+```
+Validate multiple videos:
+```bash
+./scripts/validate_media.py video1.mp4 video2.mp4 --type video
+```
+Validate mixed media:
+```bash
+./scripts/validate_media.py *.jpg *.mp4
+```
+- Format: JPEG or PNG only
+- Size: Maximum 8MB
+- Dimensions: Minimum 320x320 pixels
+- Aspect Ratio: Between 0.8 and 1.91 (4:5 to 1.91:1)
+- Format: MP4 or MOV
+- Codec: H.264 video, AAC audio
+- Duration: 3-90 seconds
+- Resolution: Minimum 600x600 pixels
+- Aspect Ratio: Between 0.8 and 1.91
+- Size: Maximum 100MB
+The tool provides detailed feedback about any issues found:
+```
+Validating: example.jpg
+==================================================
+❌ File has the following issues:
+  • File too large: 12.5MB (max 8MB)
+  • Invalid aspect ratio: 2.5 (must be between 0.8 and 1.91)
+```
+1. **File too large**
+   - Use image compression
+   - Reduce dimensions if unnecessarily large
+   - Convert to JPEG if using PNG
+2. **Invalid aspect ratio**
+   - Crop image to supported ratio
+   - Common ratios: 1:1 (square), 4:5 (portrait), 1.91:1 (landscape)
+1. **Incorrect codec**
+   - Convert using FFmpeg:
+     ```bash
+     ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4
+     ```
+2. **Duration issues**
+   - Trim video if too long
+   - Loop or extend if too shor
+   - Use our video editor tool
+3. **Resolution too low**
+   - Upscale with quality preservation
+   - Re-record in higher quality
+   - Use better camera settings
+The validation tool is integrated into our main workflow:
+- Pre-upload validation
+- Batch processing
+- Automated optimization
+```python
+from scripts.validate_media import validate_image, validate_video
+def process_media(file_path: str):
+    if file_path.endswith(('.jpg', '.jpeg', '.png')):
+        is_valid, issues = validate_image(file_path)
+    elif file_path.endswith(('.mp4', '.mov')):
+        is_valid, issues = validate_video(file_path)
+    if not is_valid:
+        pass
+```
+1. **Always validate before upload**
+   - Saves time and API calls
+   - Prevents failed uploads
+   - Better user experience
+2. **Use appropriate tools**
+   - Image editing for aspect ratio
+   - Video compression for size
+   - Format conversion when needed
+3. **Monitor changes**
+   - Instagram requirements may change
+   - Keep tool updated
+   - Check official documentation
+If you encounter issues:
+1. Check the troubleshooting guide
+2. Review Instagram's current requirements
+3. Open an issue on GitHub
+4. Contact support team
+Remember to always test media files before attempting to upload them to Instagram to ensure the best possible success rate for your posts.
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/api/overview.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+This section provides detailed documentation for all available API endpoints and services.
+All API endpoints are relative to:
+```
+http://localhost:5001
+```
+Currently, the API uses basic configuration through environment variables. Ensure your `.env` file contains valid credentials for:
+- Instagram API
+- Imgur API
+- Evolution API
+`POST /messages-upsert`
+Main webhook endpoint for receiving messages and commands.
+`GET /debug/carousel`
+Returns current carousel state and configuration.
+`GET /debug/send-test`
+Test the message sending functionality.
+`GET /debug/test-carousel-service`
+Test carousel service components.
+`GET /debug/error-queue`
+View the status of the carousel error queue.
+`GET /debug/video-validation`
+Test video file validation.
+All API responses follow this general format:
+```json
+{
+    "success": true|false,
+    "message": "Description of the result",
+    "data": {
+    },
+    "error": {
+        "code": "ERROR_CODE",
+        "description": "Error description if success is false"
+    }
+}
+```
+Common error codes you might encounter:
+| Code | Description |
+|------|-------------|
+| 400  | Bad Request - Invalid parameters |
+| 401  | Unauthorized - Authentication failed |
+| 403  | Forbidden - Missing permissions |
+| 404  | Not Found - Resource doesn't exist |
+| 429  | Too Many Requests - Rate limit exceeded |
+| 500  | Internal Server Error |
+The API implements rate limiting to prevent abuse:
+- 100 requests per minute for most endpoints
+- 30 requests per minute for Instagram posting endpoints
+- 10 requests per minute for video processing
+```bash
+curl -X POST http://localhost:5001/messages-upser
+  -H "Content-Type: application/json"
+  -d '{
+    "type": "image",
+    "data": {
+      "base64": "..."
+    }
+  }'
+```
+```bash
+curl -X POST http://localhost:5001/messages-upser
+  -H "Content-Type: application/json"
+  -d '{
+    "text": "iniciar carrossel",
+    "group_id": "your_group_id"
+  }'
+```
+The webhook endpoint handles these event types:
+- `text`: Plain text messages and commands
+- `image`: Image uploads
+- `video`: Video uploads
+- `document`: Document attachments
+1. Always include proper error handling
+2. Implement exponential backoff for retries
+3. Validate media before uploading
+4. Keep track of rate limits
+5. Check the debug endpoints for troubleshooting
+When integrating with the API:
+1. Start with test endpoints
+2. Monitor the logs for issues
+3. Implement proper error handling
+4. Use the validation endpoints
+5. Follow the rate limiting guidelines
+See the [Integration Guide](../guides/integration.md) for detailed examples.
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ docs/api/README.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+║ ▶ venv/lib/python3.13/site-packages/idna-3.10.dist-info/LICENSE.md
+║ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+BSD 3-Clause License
+Copyright (c) 2013-2024, Kim Davies and contributors.
+All rights reserved.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
