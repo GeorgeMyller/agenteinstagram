@@ -349,7 +349,8 @@ class InstagramCarouselService(BaseInstagramService):
         for attempt in range(max_attempts):
             try:
                 params = {
-                    'fields': 'status_code,status'
+                    'fields': 'status_code,status,publishing_to_ig',
+                    'access_token': self.access_token  # Ensure access token is included
                 }
                 
                 data = self._make_request('GET', f"{container_id}", params=params)
@@ -358,20 +359,70 @@ class InstagramCarouselService(BaseInstagramService):
                     time.sleep(delay)
                     continue
 
-                status = data.get('status_code', '')
-                logger.info(f"Container status (attempt {attempt + 1}/{max_attempts}): {status}")
+                status_code = data.get('status_code', '')
+                status_details = data.get('status', {})
+                publishing_to_ig = data.get('publishing_to_ig', False)
+                
+                # Log detailed status information
+                logger.info(f"Container status check (attempt {attempt + 1}/{max_attempts}):")
+                logger.info(f"  - Status code: {status_code}")
+                logger.info(f"  - Status details: {status_details}")
+                logger.info(f"  - Publishing to IG: {publishing_to_ig}")
 
-                if status == 'FINISHED':
-                    return status
-                elif status in ['ERROR', 'EXPIRED']:
-                    logger.error(f"Container failed with status: {status}")
-                    return status
-
-                time.sleep(delay)
+                if status_code == 'FINISHED' and not publishing_to_ig:
+                    return status_code
+                    
+                elif status_code == 'FINISHED' and publishing_to_ig:
+                    logger.info("Container is ready but still being processed by Instagram")
+                    time.sleep(delay)
+                    continue
+                    
+                elif status_code == 'IN_PROGRESS':
+                    # Container still processing, continue waiting
+                    time.sleep(delay)
+                    continue
+                    
+                elif status_code == 'ERROR':
+                    # Extract detailed error information
+                    error_code = status_details.get('error_code')
+                    error_message = status_details.get('error_message')
+                    error_type = status_details.get('error_type')
+                    
+                    logger.error(f"Container failed with error:")
+                    logger.error(f"  - Error code: {error_code}")
+                    logger.error(f"  - Error type: {error_type}")
+                    logger.error(f"  - Message: {error_message}")
+                    
+                    # Check for specific error types that might be recoverable
+                    if error_code in [2207024, 2207026]:  # Media processing errors
+                        if attempt < max_attempts - 1:
+                            logger.info("Media processing error, will retry...")
+                            time.sleep(delay * 2)  # Double delay for processing errors
+                            continue
+                    
+                    return 'ERROR'
+                    
+                elif status_code == 'EXPIRED':
+                    logger.error("Container expired before publishing")
+                    return 'EXPIRED'
+                    
+                else:
+                    # Unknown status code
+                    logger.warning(f"Unknown status code: {status_code}")
+                    if attempt < max_attempts - 1:
+                        time.sleep(delay)
+                        continue
+                    return 'UNKNOWN'
 
             except RateLimitError as e:
                 logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
                 time.sleep(e.retry_seconds)
+            except InstagramAPIError as e:
+                if e.response.status_code == 400:
+                    logger.error(f"Bad Request: {e.response.text}")
+                    return 'BAD_REQUEST'
+                logger.error(f"Instagram API error while checking status: {e}")
+                time.sleep(delay)
             except Exception as e:
                 logger.error(f"Error checking container status: {str(e)}")
                 time.sleep(delay)

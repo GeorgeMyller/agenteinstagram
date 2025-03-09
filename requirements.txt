@@ -4,7 +4,6 @@ streamlit>=1.0,<2.0
 python-dotenv>=0.19,<2.0
 Pillow>=9.0,<11.0
 moviepy>=1.0,<2.0
-imgurpython>=1.1,<2.0
 crewai>=0.1,<1.0
 google-generativeai>=0.1,<1.0
 Werkzeug>=2.0,<4.0

@@ -10,6 +10,7 @@ import time
 import traceback
 import threading
 import re
+from datetime import datetime
 
 from src.utils.paths import Paths  # Add this import
 
@@ -138,6 +139,22 @@ def webhook():
                                         f"Número de imagens: {len(carousel_images)}\n"
                                         f"Você pode verificar o status usando \"status {job_id}\"")
                     
+                    # Verificar o status do trabalho após enfileiramento
+                    job_status = InstagramSend.check_post_status(job_id)
+                    if job_status:
+                        status_text = f"📊 Status do trabalho {job_id}:\n"
+                        status_text += f"• Status: {job_status.get('status', 'Desconhecido')}\n"
+                        status_text += f"• Tipo: {job_status.get('content_type', 'Desconhecido')}\n"
+                        status_text += f"• Criado em: {job_status.get('created_at', 'Desconhecido')}\n"
+                        
+                        if job_status.get('result') and job_status['result'].get('permalink'):
+                            status_text += f"• Link: {job_status['result']['permalink']}"
+                        
+                        sender.send_text(number=msg.remote_jid, msg=status_text)
+                    else:
+                        sender.send_text(number=msg.remote_jid, 
+                                        msg=f"❌ Trabalho {job_id} não encontrado")
+                    
                 except Exception as e:
                     print(f"Erro ao enfileirar carrossel: {e}")
                     sender.send_text(number=msg.remote_jid, 
@@ -223,13 +240,32 @@ def webhook():
 
         # Processamento de Imagem Única
         if msg.message_type == msg.TYPE_IMAGE:
-            image_path = ImageDecodeSaver.process(msg.image_base64)
-            caption = msg.image_caption if msg.image_caption else ""  # Usar a legenda da imagem, se houver
-
             try:
+                image_path = ImageDecodeSaver.process(msg.image_base64)
+                caption = msg.image_caption if msg.image_caption else ""  # Usar a legenda da imagem, se houver
+
+                # Enfileirar a postagem da foto
                 job_id = InstagramSend.queue_post(image_path, caption)
                 sender.send_text(number=msg.remote_jid, msg=f"✅ Postagem de imagem enfileirada com sucesso!\nID do trabalho: {job_id}")
+                
+                # Verificar o status do trabalho após enfileiramento
+                job_status = InstagramSend.check_post_status(job_id)
+                if job_status:
+                    status_text = f"📊 Status do trabalho {job_id}:\n"
+                    status_text += f"• Status: {job_status.get('status', 'Desconhecido')}\n"
+                    status_text += f"• Tipo: {job_status.get('content_type', 'Desconhecido')}\n"
+                    status_text += f"• Criado em: {job_status.get('created_at', 'Desconhecido')}\n"
+                    
+                    if job_status.get('result') and job_status['result'].get('permalink'):
+                        status_text += f"• Link: {job_status['result']['permalink']}"
+                    
+                    sender.send_text(number=msg.remote_jid, msg=status_text)
+                else:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"❌ Trabalho {job_id} não encontrado")
+                
                 return jsonify({"status": "enqueued", "job_id": job_id}), 202
+
             except ContentPolicyViolation as e:
                 sender.send_text(number=msg.remote_jid, msg=f"⚠️ Conteúdo viola diretrizes: {str(e)}")
                 return jsonify({"error": "Conteúdo viola diretrizes"}), 403
@@ -251,7 +287,7 @@ def webhook():
                 caption = msg.video_caption if msg.video_caption else ""
                 print(f"Caption received: {caption}")  # Debug statement
                 # 2. Enfileirar a postagem do Reels
-                job_id = InstagramSend.queue_reels(video_path, caption)  # Ainda precisa ser implementado
+                job_id = InstagramSend.queue_reels(video_path, caption)
                 sender.send_text(number=msg.remote_jid, msg=f"✅ Reels enfileirado com sucesso! ID do trabalho: {job_id}")
                 return jsonify({"status": "enqueued", "job_id": job_id}), 202
 
