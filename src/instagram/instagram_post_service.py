@@ -34,6 +34,11 @@ class InstagramPostService(BaseInstagramService):
         super().__init__(access_token, ig_user_id)
         self.state_file = 'api_state.json'
         self.pending_containers = {}
+        self.stats = {
+            'successful_posts': 0,
+            'failed_posts': 0,
+            'rate_limited_posts': 0
+        }
         self._load_state()
         
         # Attempt to process any pending containers from previous runs
@@ -46,16 +51,27 @@ class InstagramPostService(BaseInstagramService):
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
                     self.pending_containers = state.get('pending_containers', {})
+                    self.stats = state.get('stats', {
+                        'successful_posts': 0,
+                        'failed_posts': 0,
+                        'rate_limited_posts': 0
+                    })
                     logger.info(f"Loaded {len(self.pending_containers)} pending containers from state file")
         except Exception as e:
             logger.error(f"Error loading state: {e}")
             self.pending_containers = {}
+            self.stats = {
+                'successful_posts': 0,
+                'failed_posts': 0,
+                'rate_limited_posts': 0
+            }
 
     def _save_state(self):
         """Save current state to file"""
         try:
             state = {
                 'pending_containers': self.pending_containers,
+                'stats': self.stats,
                 'last_updated': datetime.now().isoformat()
             }
             with open(self.state_file, 'w') as f:
@@ -63,6 +79,16 @@ class InstagramPostService(BaseInstagramService):
             logger.info(f"Saved state with {len(self.pending_containers)} pending containers")
         except Exception as e:
             logger.error(f"Error saving state: {e}")
+
+    def _update_stats(self, success=False, rate_limited=False):
+        """Update posting statistics"""
+        if success:
+            self.stats['successful_posts'] += 1
+        elif rate_limited:
+            self.stats['rate_limited_posts'] += 1
+        else:
+            self.stats['failed_posts'] += 1
+        self._save_state()
 
     def _process_pending_containers(self):
         """Process any pending containers from previous runs"""
@@ -224,10 +250,12 @@ class InstagramPostService(BaseInstagramService):
                 if media_container_id in self.pending_containers:
                     self.pending_containers.pop(media_container_id)
                     self._save_state()
-                    
+                
+                self._update_stats(success=True)
                 return post_id
             
             logger.error("Could not publish media")
+            self._update_stats(success=False)
             return None
             
         except RateLimitError as e:
@@ -241,6 +269,7 @@ class InstagramPostService(BaseInstagramService):
                 'last_attempt': datetime.now().isoformat()
             }
             self._save_state()
+            self._update_stats(rate_limited=True)
             
             logger.warning(f"Rate limit reached. Container {media_container_id} saved for later publishing. Will retry after {e.retry_seconds} seconds.")
             # Re-raise to allow caller to handle
@@ -248,6 +277,7 @@ class InstagramPostService(BaseInstagramService):
             
         except InstagramAPIError as e:
             logger.error(f"Error publishing media: {e}")
+            self._update_stats(success=False)
             raise
 
     def get_post_permalink(self, post_id):

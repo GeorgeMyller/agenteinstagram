@@ -5,6 +5,7 @@ import os
 import psutil
 from datetime import datetime
 import logging
+import json
 
 # Configuração básica de logging
 logger = logging.getLogger(__name__)
@@ -51,29 +52,57 @@ def get_system_stats():
         hours, remainder = divmod(remainder, 3600)
         minutes, seconds = divmod(remainder, 60)
         uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m {int(seconds)}s"
+
+        # Load Instagram API stats
+        api_stats = {'successful_posts': 0, 'failed_posts': 0, 'rate_limited_posts': 0}
+        if os.path.exists('api_state.json'):
+            try:
+                with open('api_state.json', 'r') as f:
+                    state = json.load(f)
+                    api_stats = state.get('stats', api_stats)
+            except Exception as e:
+                logger.error(f"Error loading API stats: {e}")
+
         return {
             "cpu_percent": psutil.cpu_percent(interval=1),
             "memory_percent": process.memory_percent(),
-            "uptime": uptime_str
+            "uptime": uptime_str,
+            "successful_posts": api_stats.get('successful_posts', 0),
+            "failed_posts": api_stats.get('failed_posts', 0),
+            "rate_limited_posts": api_stats.get('rate_limited_posts', 0)
         }
     except Exception as e:
         logger.error(f"Erro ao obter estatísticas do sistema: {e}")
-        return {"cpu_percent": 0, "memory_percent": 0, "uptime": "unknown"}
+        return {
+            "cpu_percent": 0, 
+            "memory_percent": 0, 
+            "uptime": "unknown",
+            "successful_posts": 0,
+            "failed_posts": 0,
+            "rate_limited_posts": 0
+        }
 
 @app.route("/")
 def dashboard():
     """Rota principal que renderiza o dashboard."""
     system_stats = get_system_stats()
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return render_template("dashboard.html", current_time=current_time, uptime=system_stats["uptime"])
+    return render_template(
+        "dashboard.html", 
+        current_time=current_time, 
+        uptime=system_stats["uptime"],
+        system=system_stats
+    )
 
 @app.route("/api/health")
 def health_check():
     """Endpoint de health que retorna status, uptime, etc."""
     uptime_seconds = time.time() - SERVER_START_TIME.timestamp()
+    stats = get_system_stats()
     return jsonify({
         "status": "ok",
-        "uptime": uptime_seconds
+        "uptime": uptime_seconds,
+        "stats": stats
     })
 
 def start_monitoring_server():
