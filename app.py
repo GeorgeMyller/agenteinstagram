@@ -359,6 +359,106 @@ def start_periodic_cleanup(temp_dir, interval_seconds=3600):
     cleanup_thread = threading.Thread(target=cleanup_task, daemon=True)
     cleanup_thread.start()
 
+# Add these new debug endpoints
+@app.route("/debug/carousel/clear", methods=['POST'])
+def clear_carousel_cache():
+    """Clear any cached carousel state"""
+    try:
+        # Reset global carousel state variables
+        global is_carousel_mode, carousel_images, carousel_start_time, carousel_caption
+        
+        # Save previous state for logging
+        prev_state = {
+            "was_carousel_mode": is_carousel_mode,
+            "image_count": len(carousel_images)
+        }
+        
+        is_carousel_mode = False
+        carousel_images = []
+        carousel_caption = ""
+        carousel_start_time = 0
+        
+        # Also look for any temporary media files that might be used by carousel
+        # (This is optional but can help clear filesystem clutter)
+        
+        return jsonify({
+            "status": "success", 
+            "message": "Carousel state cleared",
+            "previous_state": prev_state
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+@app.route("/debug/carousel/status", methods=['GET'])
+def get_carousel_status():
+    """Get current carousel state for debugging"""
+    try:
+        status = {
+            "is_carousel_mode": is_carousel_mode,
+            "image_count": len(carousel_images),
+            "image_paths": carousel_images if len(carousel_images) < 10 else "Too many to display",
+            "caption": carousel_caption,
+            "time_in_mode": time.time() - carousel_start_time if carousel_start_time > 0 else 0,
+            "timeout_seconds": CAROUSEL_TIMEOUT,
+            "will_timeout_in": CAROUSEL_TIMEOUT - (time.time() - carousel_start_time) if carousel_start_time > 0 else "N/A"
+        }
+        
+        return jsonify(status)
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+@app.route("/debug/token/check", methods=['GET'])
+def check_instagram_token():
+    """Check if the Instagram API token has the correct permissions"""
+    try:
+        from src.instagram.instagram_carousel_service import InstagramCarouselService
+        
+        service = InstagramCarouselService()
+        is_valid, missing_permissions = service.check_token_permissions()
+        
+        token = os.getenv('INSTAGRAM_API_KEY', '')
+        mask_token = token[:10] + "..." + token[-4:] if len(token) > 14 else "Not set"
+        
+        token_info = {
+            "is_valid": is_valid,
+            "missing_permissions": missing_permissions if not is_valid else [],
+            "token": mask_token,
+            "account_id": os.getenv('INSTAGRAM_ACCOUNT_ID', 'Not set')
+        }
+        
+        # Add extra details if the token is valid
+        if is_valid:
+            try:
+                details = service.debug_token()
+                if details and 'data' in details:
+                    data = details['data']
+                    token_info["details"] = {
+                        "app_id": data.get('app_id'),
+                        "expires_at": datetime.fromtimestamp(data.get('expires_at')).strftime('%Y-%m-%d %H:%M:%S') if data.get('expires_at') else "Unknown",
+                        "scopes": data.get('scopes', [])
+                    }
+            except Exception as e:
+                token_info["error_getting_details"] = str(e)
+        
+        return jsonify(token_info)
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
 if __name__ == "__main__":
     # Ensure dependencies are installed
     ensure_dependencies()

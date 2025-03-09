@@ -2,6 +2,7 @@ import os
 import time
 import json
 import logging
+import random
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from dotenv import load_dotenv
@@ -149,27 +150,69 @@ class InstagramCarouselService(BaseInstagramService):
             logger.error(f"Error updating .env file: {e}")
 
     def _validate_media(self, media_url: str) -> bool:
-        """Validates media URL and type before uploading."""
-        try:
-            response = self.session.head(media_url, timeout=10)
-            if response.status_code != 200:
-                logger.error(f"Media URL not accessible: {media_url}")
-                return False
+        """Validates media URL and type before uploading with retry mechanism."""
+        max_retries = 5
+        base_delay = 2  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Validating media URL (attempt {attempt+1}/{max_retries}): {media_url}")
+                
+                # Create a new session for each attempt to avoid connection pooling issues
+                import requests
+                session = requests.Session()
+                
+                response = session.head(media_url, timeout=15)  # Increased timeout
+                if response.status_code != 200:
+                    logger.error(f"Media URL not accessible: {media_url}, status code: {response.status_code}")
+                    
+                    # If we get a 429, we should back off more aggressively
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get('retry-after', base_delay * (2 ** attempt)))
+                        logger.warning(f"Rate limit hit from image host. Waiting {retry_after}s before retry...")
+                        time.sleep(retry_after)
+                    elif attempt < max_retries - 1:
+                        # Exponential backoff with jitter for other errors
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        logger.warning(f"Will retry after {delay:.2f}s...")
+                        time.sleep(delay)
+                    continue
 
-            content_type = response.headers.get('content-type', '').lower()
-            if content_type not in self.SUPPORTED_MEDIA_TYPES:
-                logger.error(f"Unsupported media type: {content_type}")
-                return False
+                content_type = response.headers.get('content-type', '').lower()
+                if content_type not in self.SUPPORTED_MEDIA_TYPES:
+                    logger.error(f"Unsupported media type: {content_type}")
+                    return False
 
-            content_length = int(response.headers.get('content-length', 0))
-            if content_length > self.MAX_MEDIA_SIZE:
-                logger.error(f"Media file too large: {content_length} bytes")
-                return False
+                content_length = int(response.headers.get('content-length', 0))
+                if content_length > self.MAX_MEDIA_SIZE:
+                    logger.error(f"Media file too large: {content_length} bytes")
+                    return False
 
-            return True
-        except Exception as e:
-            logger.error(f"Error validating media: {str(e)}")
-            return False
+                logger.info(f"Media validation successful: {media_url}")
+                return True
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error validating media (attempt {attempt+1}/{max_retries}): {str(e)}")
+                
+                if "too many 429 error responses" in str(e) or "429" in str(e):
+                    # This is likely a rate limit issue
+                    delay = base_delay * (2 ** attempt) + random.uniform(1, 5)
+                    logger.warning(f"Rate limit hit from image host. Waiting {delay:.2f}s before retry...")
+                    time.sleep(delay)
+                elif attempt < max_retries - 1:
+                    # General network error, retry with exponential backoff
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Network error, will retry after {delay:.2f}s...")
+                    time.sleep(delay)
+            except Exception as e:
+                logger.error(f"Unexpected error validating media: {str(e)}")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"Will retry after {delay:.2f}s...")
+                    time.sleep(delay)
+        
+        logger.error(f"Failed to validate media after {max_retries} attempts: {media_url}")
+        return False
 
     def _create_child_container(self, media_url: str) -> Optional[str]:
         """Creates a child container for a carousel image."""
@@ -177,6 +220,7 @@ class InstagramCarouselService(BaseInstagramService):
             self._refresh_token()
 
         if not self._validate_media(media_url):
+            logger.error(f"Media validation failed for: {media_url}")
             return None
 
         params = {
@@ -199,24 +243,35 @@ class InstagramCarouselService(BaseInstagramService):
         """Creates a container for a carousel post."""
         if self.token_expires_at and time.time() > self.token_expires_at - 60:
             self._refresh_token()
+            
+        logger.info(f"Creating carousel container with {len(media_urls)} images")
 
-        # Validate all media first
+        # Validate all media first - but don't fail immediately if one fails
+        valid_media_urls = []
         for media_url in media_urls:
-            if not self._validate_media(media_url):
-                return None
+            if self._validate_media(media_url):
+                valid_media_urls.append(media_url)
+            else:
+                logger.warning(f"Skipping invalid media URL: {media_url}")
+        
+        if len(valid_media_urls) < 2:
+            logger.error(f"Not enough valid media URLs to create carousel. Found: {len(valid_media_urls)}, required: at least 2")
+            return None
+        
+        logger.info(f"Proceeding with {len(valid_media_urls)} valid media URLs")
 
         # Create children containers
         children = []
-        for media_url in media_urls:
+        for media_url in valid_media_urls:
             child_id = self._create_child_container(media_url)
             if not child_id:
                 logger.error(f"Failed to create child container for {media_url}")
-                return None
+                continue
             children.append(child_id)
             time.sleep(2)  # Respect rate limits between child creation
 
-        if not children:
-            logger.error("No child containers were created")
+        if len(children) < 2:
+            logger.error(f"Not enough child containers created. Found: {len(children)}, required: at least 2")
             return None
 
         params = {
@@ -338,3 +393,34 @@ class InstagramCarouselService(BaseInstagramService):
 
         # Publish carousel
         return self.publish_carousel(container_id)
+        
+    def check_token_permissions(self):
+        """
+        Check if the access token has the necessary permissions for posting.
+        Returns a tuple (is_valid, missing_permissions)
+        """
+        try:
+            response = self._make_request(
+                "GET",
+                "debug_token",
+                params={"input_token": self.access_token}
+            )
+            
+            if not response or 'data' not in response:
+                return False, ["Unable to verify token"]
+                
+            token_data = response['data']
+            
+            if not token_data.get('is_valid', False):
+                return False, ["Token is invalid or expired"]
+                
+            scopes = token_data.get('scopes', [])
+            required_permissions = ['instagram_basic', 'instagram_content_publish']
+            
+            missing = [p for p in required_permissions if p not in scopes]
+            
+            return len(missing) == 0, missing
+            
+        except Exception as e:
+            logger.error(f"Error checking token permissions: {e}")
+            return False, [str(e)]
