@@ -15,6 +15,7 @@ import random
 from datetime import datetime
 from dotenv import load_dotenv
 from imgurpython import ImgurClient
+from moviepy.editor import VideoFileClip
 from src.instagram.base_instagram_service import (
     BaseInstagramService, AuthenticationError, PermissionError, 
     RateLimitError, MediaError, TemporaryServerError, InstagramAPIError
@@ -255,3 +256,72 @@ class ReelsPublisher(BaseInstagramService):
             return f"{caption}\n\n{hashtag_text}"
         else:
             return hashtag_text
+
+class ReelsValidator:
+    """Validates videos for Reels requirements"""
+    
+    # Reels requirements based on Meta documentation
+    MIN_DURATION = 3  # seconds
+    MAX_DURATION = 90  # seconds
+    MIN_WIDTH = 500  # pixels
+    MIN_HEIGHT = 889  # pixels for 9:16 ratio
+    ALLOWED_FORMATS = ['mp4']
+    MAX_SIZE_MB = 100  # MB
+    
+    @classmethod
+    def validate(cls, video_path):
+        """
+        Validates a video for Reels requirements
+        Returns: (is_valid, message)
+        """
+        if not os.path.exists(video_path):
+            return False, "Video file not found"
+            
+        # Check file size
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        if file_size_mb > cls.MAX_SIZE_MB:
+            return False, f"Video size exceeds {cls.MAX_SIZE_MB}MB (actual: {file_size_mb:.2f}MB)"
+        
+        # Check file extension
+        _, ext = os.path.splitext(video_path)
+        if ext.lower().replace('.', '') not in cls.ALLOWED_FORMATS:
+            return False, f"Video format not supported. Use: {', '.join(cls.ALLOWED_FORMATS)}"
+            
+        try:
+            with VideoFileClip(video_path) as clip:
+                # Check duration
+                duration = clip.duration
+                if duration < cls.MIN_DURATION:
+                    return False, f"Video too short ({duration:.1f}s). Minimum duration is {cls.MIN_DURATION}s"
+                if duration > cls.MAX_DURATION:
+                    return False, f"Video too long ({duration:.1f}s). Maximum duration is {cls.MAX_DURATION}s"
+                
+                # Check dimensions
+                width, height = clip.size
+                if width < cls.MIN_WIDTH:
+                    return False, f"Video width too small ({width}px). Minimum width is {cls.MIN_WIDTH}px"
+                if height < cls.MIN_HEIGHT:
+                    return False, f"Video height too small ({height}px). Recommended minimum height is {cls.MIN_HEIGHT}px"
+                
+                # Check aspect ratio
+                aspect_ratio = width / height
+                if aspect_ratio > 1.91 or aspect_ratio < 0.5:
+                    return False, f"Video aspect ratio ({aspect_ratio:.2f}) outside of recommended range (0.5-1.91)"
+                
+                return True, "Video meets Reels requirements"
+                
+        except Exception as e:
+            return False, f"Error analyzing video: {str(e)}"
+
+# Update the publish method to include validation
+def publish(self, video_path, caption=""):
+    """Publish a video as an Instagram Reel"""
+    logging.info("Starting process to publish a Reel...")
+    
+    # Validate the video first
+    is_valid, validation_message = ReelsValidator.validate(video_path)
+    if not is_valid:
+        logging.error(f"Video validation failed: {validation_message}")
+        raise ValueError(f"Video doesn't meet Reels requirements: {validation_message}")
+    
+    # ... rest of existing publish method ...

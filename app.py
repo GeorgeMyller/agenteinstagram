@@ -25,6 +25,7 @@ from src.services.send import sender #Para enviar mensagens de volta
 from src.instagram.describe_video_tool import VideoDescriber  # Importar a classe VideoDescriber
 from src.instagram.describe_carousel_tool import CarouselDescriber  # Importar a classe CarouselDescriber
 from src.instagram.crew_post_instagram import InstagramPostCrew  # Importar a classe InstagramPostCrew
+from src.instagram.image_validator import InstagramImageValidator  # Add this import
 
 app = Flask(__name__)
 
@@ -32,7 +33,17 @@ app = Flask(__name__)
 os.makedirs(os.path.join(Paths.ROOT_DIR, "temp_videos"), exist_ok=True)
 os.makedirs(os.path.join(Paths.ROOT_DIR, "temp"), exist_ok=True)
 
-border_image = "moldura.png"
+# Create assets directory if it doesn't exist
+assets_dir = os.path.join(Paths.ROOT_DIR, "assets")
+os.makedirs(assets_dir, exist_ok=True)
+
+# Define border image with full path
+border_image_path = os.path.join(assets_dir, "moldura.png")
+
+# Check if border image exists, if not, set it to None to make it optional
+if not os.path.exists(border_image_path):
+    print(f"⚠️ Aviso: Imagem de borda não encontrada em {border_image_path}")
+    border_image_path = None
 
 # Variáveis de estado para o modo carrossel
 is_carousel_mode = False
@@ -41,7 +52,6 @@ carousel_start_time = 0
 carousel_caption = ""
 CAROUSEL_TIMEOUT = 300  # 5 minutos em segundos
 MAX_CAROUSEL_IMAGES = 10
-
 
 @app.route("/messages-upsert", methods=['POST'])
 def webhook():
@@ -122,11 +132,18 @@ def webhook():
             elif texto and texto.lower() == "postar":
                 if len(carousel_images) < 2:
                     sender.send_text(number=msg.remote_jid, 
-                                    msg="⚠️ São necessárias pelo menos 2 imagens para criar um carrossel. "
+                                    msg=f"⚠️ São necessárias pelo menos 2 imagens para criar um carrossel. "
                                         f"Você tem apenas {len(carousel_images)} imagem.")
                     return jsonify({"status": "not enough images"}), 200
                 
                 try:
+                    # Validar as imagens segundo os requisitos do Instagram
+                    is_valid, validation_msg = InstagramImageValidator.validate_for_carousel(carousel_images)
+                    if not is_valid:
+                        sender.send_text(number=msg.remote_jid, 
+                                        msg=f"⚠️ Erro de validação das imagens: {validation_msg}")
+                        return jsonify({"status": "validation_error", "message": validation_msg}), 400
+                    
                     # Se não houver legenda definida, usar uma padrão
                     caption_to_use = carousel_caption if carousel_caption else ""
                     
@@ -154,14 +171,22 @@ def webhook():
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"🔄 Processando carrossel com {len(carousel_images)} imagens...")
                     
-                    # Aplicar bordas às imagens do carrossel
+                    # Aplicar bordas às imagens do carrossel (apenas se a imagem de borda existir)
                     bordered_images = []
                     for image_path in carousel_images:
                         try:
-                            bordered_image_path = FilterImage.apply_border(image_path, border_image)
-                            bordered_images.append(bordered_image_path)
+                            # Primeiro verificar e redimensionar se necessário
+                            resized_image = InstagramImageValidator.resize_for_instagram(image_path)
+                            
+                            # Aplicar borda apenas se a imagem de borda existir
+                            if border_image_path and os.path.exists(border_image_path):
+                                bordered_image_path = FilterImage.apply_border(resized_image, border_image_path)
+                                bordered_images.append(bordered_image_path)
+                            else:
+                                # Se não existir, usar a imagem redimensionada diretamente
+                                bordered_images.append(resized_image)
                         except Exception as e:
-                            print(f"Erro ao aplicar borda à imagem {image_path}: {str(e)}")
+                            print(f"Erro ao processar imagem {image_path}: {str(e)}")
                             bordered_images.append(image_path)  # Usar a imagem original em caso de erro
                     
                     # Enfileirar o carrossel para publicação
@@ -569,6 +594,44 @@ def check_instagram_token():
             "traceback": traceback.format_exc()
         }), 500
 
+@app.route("/debug/api-limits", methods=['GET'])
+def check_api_limits():
+    """Check current API usage and rate limits"""
+    try:
+        from src.instagram.instagram_carousel_service import InstagramCarouselService
+        
+        service = InstagramCarouselService()
+        usage_info = service.get_app_usage_info()
+        
+        # Calculate time until reset if we have usage info
+        usage_data = {}
+        
+        if 'app_usage' in usage_info and usage_info['app_usage']:
+            app_usage = usage_info['app_usage']
+            for limit_type, usage in app_usage.items():
+                if isinstance(usage, dict) and 'call_count' in usage and 'total_cputime' in usage:
+                    usage_data[limit_type] = {
+                        'call_count': usage['call_count'],
+                        'total_cpu_time': usage['total_cputime'],
+                        'total_time': usage.get('total_time', 0),
+                        'estimated_time_to_regain_access': usage.get('estimated_time_to_regain_access', 0)
+                    }
+        
+        return jsonify({
+            "status": "success",
+            "usage_info": usage_info,
+            "usage_data": usage_data,
+            "note": "If estimated_time_to_regain_access > 0, wait this many seconds before retrying"
+        })
+        
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
 if __name__ == "__main__":
     # Ensure dependencies are installed
     ensure_dependencies()
@@ -576,8 +639,15 @@ if __name__ == "__main__":
     # Disable firewall
     disable_firewall()
     
+    # Ensure border image exists
+    try:
+        from setup_border import create_border_image
+        border_image_path = create_border_image()
+        print(f"Using border image: {border_image_path}")
+    except Exception as e:
+        print(f"Warning: Could not create border image: {str(e)}")
+    
     # Start periodic cleanup
-    #Modificado para usar src/utils/paths.py
     temp_dir = Paths.TEMP # Usando Paths.TEMP
     start_periodic_cleanup(temp_dir)
 

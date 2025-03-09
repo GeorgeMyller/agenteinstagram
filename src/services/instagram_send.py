@@ -280,16 +280,60 @@ class InstagramSend:
                         InstagramSend.last_rate_limit_time = 0
                         stats["rate_limited_posts"] = 0
 
-                # Instanciar o serviço e publicar a foto
+                # 1. Instanciar o serviço e criar o container de imagem
                 insta_post = InstagramPostService()
-                result = insta_post.post_image(final_image['url'], final_caption)
+                logger.info("Criando container para a imagem...")
+                container_id = insta_post.create_media_container(final_image['url'], final_caption)
                 
-                if not result:
-                    print(f"Failed to publish photo from {image_path}")
+                if not container_id:
+                    logger.error("Falha ao criar container para a imagem.")
                     return None
-
-                print(f"Photo published successfully! ID: {result.get('id')}")
+                
+                # 2. Aguardar processamento do container (verificação periódica do status)
+                logger.info(f"Container criado com ID: {container_id}. Aguardando processamento...")
+                status = insta_post.wait_for_container_status(container_id)
+                
+                if status != 'FINISHED':
+                    logger.error(f"Processamento da imagem falhou com status: {status}")
+                    return None
+                
+                # 3. Publicar a imagem usando o ID do container
+                logger.info("Container pronto para publicação. Publicando imagem...")
+                post_id = insta_post.publish_media(container_id)
+                
+                if not post_id:
+                    logger.error("Falha ao publicar a imagem.")
+                    return None
+                
+                # 4. Obter permalink e retornar resultado
+                permalink = insta_post.get_post_permalink(post_id)
+                
+                # 5. Montar e retornar o resultado
+                result = {
+                    'id': post_id,
+                    'container_id': container_id,
+                    'permalink': permalink,
+                    'media_type': 'IMAGE'
+                }
+                
+                logger.info(f"Imagem publicada com sucesso! ID: {post_id}")
+                
+                # 6. Cleanup - remover arquivos temporários
+                try:
+                    if image_path != original_image_path and os.path.exists(image_path):
+                        logger.info(f"Limpando arquivo temporário: {image_path}")
+                        os.remove(image_path)
+                    
+                    # Limpar imagens do Imgur que foram usadas durante o processo
+                    for img in uploaded_images:
+                        if img.get("deletehash"):
+                            logger.info(f"Removendo imagem temporária do Imgur...")
+                            uploader.delete_image(img["deletehash"])
+                except Exception as e:
+                    logger.warning(f"Erro ao limpar arquivos temporários: {str(e)}")
+                
                 return result
+
             except Exception as e:
                 print(f"Error posting to Instagram: {str(e)}")
                 import traceback
