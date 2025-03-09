@@ -24,6 +24,7 @@ from src.instagram.filter import FilterImage
 from src.services.send import sender #Para enviar mensagens de volta
 from src.instagram.describe_video_tool import VideoDescriber  # Importar a classe VideoDescriber
 from src.instagram.describe_carousel_tool import CarouselDescriber  # Importar a classe CarouselDescriber
+from src.instagram.crew_post_instagram import InstagramPostCrew  # Importar a classe InstagramPostCrew
 
 app = Flask(__name__)
 
@@ -153,13 +154,23 @@ def webhook():
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"🔄 Processando carrossel com {len(carousel_images)} imagens...")
                     
+                    # Aplicar bordas às imagens do carrossel
+                    bordered_images = []
+                    for image_path in carousel_images:
+                        try:
+                            bordered_image_path = FilterImage.apply_border(image_path, border_image)
+                            bordered_images.append(bordered_image_path)
+                        except Exception as e:
+                            print(f"Erro ao aplicar borda à imagem {image_path}: {str(e)}")
+                            bordered_images.append(image_path)  # Usar a imagem original em caso de erro
+                    
                     # Enfileirar o carrossel para publicação
-                    job_id = InstagramSend.queue_carousel(carousel_images, caption_to_use)
+                    job_id = InstagramSend.queue_carousel(bordered_images, caption_to_use)
                     
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"✅ Carrossel enfileirado com sucesso!\n"
                                         f"ID do trabalho: {job_id}\n"
-                                        f"Número de imagens: {len(carousel_images)}\n"
+                                        f"Número de imagens: {len(bordered_images)}\n"
                                         f"Você pode verificar o status usando \"status {job_id}\"")
                     
                     # Verificar o status do trabalho após enfileiramento
@@ -536,7 +547,7 @@ def check_instagram_token():
         }
         
         # Add extra details if the token is valid
-        if is_valid:
+        if (is_valid):
             try:
                 details = service.debug_token()
                 if details and 'data' in details:

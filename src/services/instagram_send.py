@@ -303,6 +303,243 @@ class InstagramSend:
             return None
 
     @staticmethod
+    def send_instagram_reel(video_path, caption, inputs=None):
+        """
+        Send a reel to Instagram with a caption.
+
+        Args:
+            video_path (str): Path to the video file
+            caption (str): Caption text
+            inputs (dict): Optional configuration for post generation
+        """
+        result = None
+        original_video_path = video_path
+        uploaded_videos = []
+        uploader = VideoUploader()  # Reuse the same uploader instance
+        
+        # Validar caption antes do processamento
+        if not caption or caption.lower() == "none":
+            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
+        
+        try:
+            if inputs is None:
+                inputs = {
+                    "estilo": "Divertido, Alegre, Sarcástico e descontraído",
+                    "pessoa": "Terceira pessoa do singular",
+                    "sentimento": "Positivo",
+                    "tamanho": "200 palavras",
+                    "genero": "Neutro",
+                    "emojs": "sim",
+                    "girias": "sim"
+                }
+            
+            # Verificar se o arquivo existe
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"Arquivo de vídeo não encontrado: {video_path}")
+                
+            # Process video with filter
+            print("Aplicando filtros ao vídeo...")
+            video_path = FilterVideo.process(video_path)
+            
+            # First upload to get video description
+            print("Obtendo descrição do vídeo...")
+            try:
+                temp_video = uploader.upload_from_path(video_path)
+                uploaded_videos.append(temp_video)
+                describe = VideoDescriber.describe(temp_video['url'])
+                
+                # Try to delete the temporary video immediately after getting description
+                if temp_video.get("deletehash"):
+                    print(f"Deletando vídeo temporário usado para descrição...")
+                    if uploader.delete_video(temp_video["deletehash"]):
+                        uploaded_videos.remove(temp_video)
+            except Exception as e:
+                print(f"Erro ao obter descrição do vídeo: {str(e)}")
+                describe = "Vídeo para publicação no Instagram."
+                
+            # Upload final video
+            print("Enviando vídeo para publicação...")
+            try:
+                final_video = uploader.upload_from_path(video_path)
+                uploaded_videos.append(final_video)
+            except Exception as e:
+                print(f"Erro ao fazer upload do vídeo final: {str(e)}")
+                raise
+            
+            # Generate caption
+            print("Gerando legenda...")
+            try:
+                crew = InstagramPostCrew()
+                # Usar um dicionário diretamente
+                inputs_dict = {
+                    "genero": inputs.get('genero', 'Neutro'),
+                    "caption": caption,
+                    "describe": describe,
+                    "estilo": inputs.get('estilo', 'Divertido, Alegre, Sarcástico e descontraído'),
+                    "pessoa": inputs.get('pessoa', 'Terceira pessoa do singular'),
+                    "sentimento": inputs.get('sentimento', 'Positivo'),
+                    "tamanho": inputs.get('tamanho', '200 palavras'),
+                    "emojs": inputs.get('emojs', 'sim'),
+                    "girias": inputs.get('girias', 'sim')
+                }
+                final_caption = crew.kickoff(inputs=inputs_dict)  # Passar o dicionário
+            except Exception as e:
+                print(f"Erro ao gerar legenda: {str(e)}")
+                final_caption = caption  # Usar a legenda original em caso de erro
+            
+            # Adicionar texto padrão ao final da legenda
+            final_caption = final_caption + "\n\n-------------------"
+            final_caption = final_caption + "\n\n Essa postagem foi toda realizada por um agente inteligente"
+            final_caption = final_caption + "\n O agente desempenhou as seguintes ações:"
+            final_caption = final_caption + "\n 1 - Idenficação e reconhecimento do ambiente do vídeo"
+            final_caption = final_caption + "\n 2 - Aplicação de Filtros de contraste e autocorreção do vídeo"
+            final_caption = final_caption + "\n 3 - Definição de uma persona específica com base nas preferências"
+            final_caption = final_caption + "\n 4 - Criação da legenda com base no vídeo e na persona"
+            final_caption = final_caption + "\n 5 - Postagem no feed do instagram"
+            final_caption = final_caption + "\n\n-------------------"
+            
+            # Post to Instagram with enhanced rate limit handling
+            print("Iniciando processo de publicação no Instagram...")
+            
+            # ... código para postar no Instagram ...
+            
+        except Exception as e:
+            print(f"Erro ao processar o vídeo: {str(e)}")
+            raise
+
+    @staticmethod
+    def send_instagram_carousel(image_paths, caption, inputs=None):
+        """
+        Send a carousel to Instagram with a caption.
+
+        Args:
+            image_paths (list): List of paths to the image files
+            caption (str): Caption text
+            inputs (dict): Optional configuration for post generation
+        """
+        result = None
+        original_image_paths = image_paths
+        uploaded_images = []
+        uploader = ImageUploader()  # Reuse the same uploader instance
+        
+        # Validar caption antes do processamento
+        if not caption or caption.lower() == "none":
+            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
+        
+        try:
+            if inputs is None:
+                inputs = {
+                    "estilo": "Divertido, Alegre, Sarcástico e descontraído",
+                    "pessoa": "Terceira pessoa do singular",
+                    "sentimento": "Positivo",
+                    "tamanho": "200 palavras",
+                    "genero": "Neutro",
+                    "emojs": "sim",
+                    "girias": "sim"
+                }
+            
+            # Verificar se os arquivos existem
+            for image_path in image_paths:
+                if not os.path.exists(image_path):
+                    raise FileNotFoundError(f"Arquivo de imagem não encontrado: {image_path}")
+                
+            border_image = os.path.join(Paths.SRC_DIR, "instagram", "moldura.png")
+            
+            # Process images with filter
+            print("Aplicando filtros às imagens...")
+            processed_image_paths = [FilterImage.process(image_path) for image_path in image_paths]
+            
+            # First upload to get image descriptions
+            print("Obtendo descrições das imagens...")
+            descriptions = []
+            for image_path in processed_image_paths:
+                try:
+                    temp_image = uploader.upload_from_path(image_path)
+                    uploaded_images.append(temp_image)
+                    describe = ImageDescriber.describe(temp_image['url'])
+                    descriptions.append(describe)
+                    
+                    # Try to delete the temporary image immediately after getting description
+                    if temp_image.get("deletehash"):
+                        print(f"Deletando imagem temporária usada para descrição...")
+                        if uploader.delete_image(temp_image["deletehash"]):
+                            uploaded_images.remove(temp_image)
+                except Exception as e:
+                    print(f"Erro ao obter descrição da imagem: {str(e)}")
+                    descriptions.append("Imagem para publicação no Instagram.")
+                    
+            # Add border and prepare final images
+            print("Aplicando bordas e filtros...")
+            bordered_image_paths = []
+            for image_path in processed_image_paths:
+                try:
+                    image = ImageWithBorder.create_bordered_image(
+                        border_path=border_image,
+                        image_path=image_path,
+                        output_path=image_path                
+                    )
+                    bordered_image_paths.append(image_path)
+                except Exception as e:
+                    print(f"Erro ao aplicar borda à imagem: {str(e)}")
+                    bordered_image_paths.append(image_path)  # Usar a imagem original em caso de erro
+            
+            # Upload final images
+            print("Enviando imagens para publicação...")
+            final_images = []
+            for image_path in bordered_image_paths:
+                try:
+                    final_image = uploader.upload_from_path(image_path)
+                    final_images.append(final_image)
+                    uploaded_images.append(final_image)
+                except Exception as e:
+                    print(f"Erro ao fazer upload da imagem final: {str(e)}")
+                    raise
+            
+            # Generate caption
+            print("Gerando legenda...")
+            try:
+                crew = InstagramPostCrew()
+                # Usar um dicionário diretamente
+                inputs_dict = {
+                    "genero": inputs.get('genero', 'Neutro'),
+                    "caption": caption,
+                    "describe": "\n".join(descriptions),
+                    "estilo": inputs.get('estilo', 'Divertido, Alegre, Sarcástico e descontraído'),
+                    "pessoa": inputs.get('pessoa', 'Terceira pessoa do singular'),
+                    "sentimento": inputs.get('sentimento', 'Positivo'),
+                    "tamanho": inputs.get('tamanho', '200 palavras'),
+                    "emojs": inputs.get('emojs', 'sim'),
+                    "girias": inputs.get('girias', 'sim')
+                }
+                final_caption = crew.kickoff(inputs=inputs_dict)  # Passar o dicionário
+            except Exception as e:
+                print(f"Erro ao gerar legenda: {str(e)}")
+                final_caption = caption  # Usar a legenda original em caso de erro
+            
+            # Adicionar texto padrão ao final da legenda
+            final_caption = final_caption + "\n\n-------------------"
+            final_caption = final_caption + "\n\n Essa postagem foi toda realizada por um agente inteligente"
+            final_caption = final_caption + "\n O agente desempenhou as seguintes ações:"
+            final_caption = final_caption + "\n 1 - Idenficação e reconhecimento do ambiente das imagens"
+            final_caption = final_caption + "\n 2 - Aplicação de Filtros de contraste e autocorreção das imagens"
+            final_caption = final_caption + "\n 3 - Aplicação de moldura específica"
+            final_caption = final_caption + "\n 4 - Definição de uma persona específica com base nas preferências"
+            final_caption = final_caption + "\n 5 - Criação da legenda com base nas imagens e na persona"
+            final_caption = final_caption + "\n 6 - Postagem no feed do instagram"
+            final_caption = final_caption + "\n\n-------------------"
+            
+            # Post to Instagram with enhanced rate limit handling
+            print("Iniciando processo de publicação no Instagram...")
+            
+            # ... código para postar no Instagram ...
+            
+        except Exception as e:
+            print(f"Erro ao processar as imagens: {str(e)}")
+            raise
+
+    @staticmethod
     def send_reels(video_path, caption, inputs=None):
         """
         Send a video to Instagram as a Reel
