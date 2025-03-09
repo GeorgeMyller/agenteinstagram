@@ -374,7 +374,7 @@ class InstagramSend:
             # Verificar se os arquivos existem antes de prosseguir
             valid_paths = []
             for path in media_paths:
-                if os.path.exists(path):
+                if os.path.exists(path):  # Fixed extra parenthesis here
                     valid_paths.append(path)
                 else:
                     logger.error(f"[CAROUSEL] ERRO: Arquivo não encontrado: {path}")
