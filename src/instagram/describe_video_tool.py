@@ -1,17 +1,16 @@
 import os
 import google.generativeai as genai
 from dotenv import load_dotenv
-import requests  # Added for fetching video data
-import base64    # Added for base64 encoding
+import base64
 
 class VideoDescriber:
     @staticmethod
-    def describe(video_url: str) -> str:
+    def describe(video_path: str) -> str:
         """
         Gera uma descrição detalhada para o vídeo fornecido.
 
         Args:
-            video_url (str): URL do vídeo a ser analisado.
+            video_path (str): Caminho local do vídeo a ser analisado.
 
         Returns:
             str: Descrição gerada para o vídeo.
@@ -20,17 +19,19 @@ class VideoDescriber:
 
         # Configurar o cliente Gemini
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')  # Updated model name
+        model = genai.GenerativeModel('gemini-1.5-pro')  # Usando o modelo que suporta vídeos
 
-        # Fazer a solicitação à API do Gemini
+        # Verificar se o arquivo existe
+        if not os.path.exists(video_path):
+            return f"Erro: O arquivo de vídeo não existe no caminho: {video_path}"
+
         try:
-            # Fetch and encode the video from the URL with custom headers
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            video_response = requests.get(video_url, headers=headers)
-            video_response.raise_for_status()
-            encoded_video = base64.b64encode(video_response.content).decode('utf-8')
+            # Ler o arquivo de vídeo diretamente do caminho local
+            with open(video_path, 'rb') as video_file:
+                video_bytes = video_file.read()
+                encoded_video = base64.b64encode(video_bytes).decode('utf-8')
         except Exception as e:
-            return f"Erro ao obter o vídeo: {e}"
+            return f"Erro ao ler o arquivo de vídeo: {e}"
 
         prompt_text = """
                 Me dê uma ideia do contexto do ambiente do vídeo e do que está ocorrendo no vídeo.
@@ -50,7 +51,7 @@ class VideoDescriber:
                     {
                         "inline_data": {
                             "mime_type": "video/mp4",
-                            "data": encoded_video  # Updated to use base64 encoded video content
+                            "data": encoded_video
                         }
                     }
                 ]
