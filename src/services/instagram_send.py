@@ -1,6 +1,7 @@
 import os
 import time
 import requests
+import logging
 from src.instagram.crew_post_instagram import InstagramPostCrew
 from src.instagram.describe_image_tool import ImageDescriber
 from src.instagram.instagram_post_service import InstagramPostService
@@ -8,10 +9,14 @@ from src.instagram.border import ImageWithBorder
 from src.instagram.filter import FilterImage
 from src.utils.paths import Paths
 from src.instagram.image_uploader import ImageUploader
+from PIL import Image
 
 # Import new queue system
 from src.services.post_queue import post_queue, RateLimitExceeded
 from src.instagram.instagram_post_publisher import PostPublisher
+
+# Set up logging
+logger = logging.getLogger('InstagramSend')
 
 class InstagramSend:
     # Keep track of rate limits
@@ -95,6 +100,12 @@ class InstagramSend:
             str: ID do trabalho
         """
         # Adicionar o trabalho à fila de processamento
+        if inputs is None:
+            inputs = {}
+            
+        # Add content_type explicitly to mark this as a carousel
+        inputs["content_type"] = "carousel"
+        
         job_id = post_queue.add_job(image_paths, caption, inputs)
         return job_id
 
@@ -354,7 +365,7 @@ class InstagramSend:
             dict: Resultado do envio
         """
         try:
-            print(f"[CAROUSEL] Iniciando processamento do carrossel com {len(media_paths)} imagens")
+            logger.info(f"[CAROUSEL] Iniciando processamento do carrossel com {len(media_paths)} imagens")
             
             # Verificar se há pelo menos 2 imagens válidas
             if len(media_paths) < 2:
@@ -366,33 +377,64 @@ class InstagramSend:
                 if os.path.exists(path):
                     valid_paths.append(path)
                 else:
-                    print(f"[CAROUSEL] ERRO: Arquivo não encontrado: {path}")
+                    logger.error(f"[CAROUSEL] ERRO: Arquivo não encontrado: {path}")
             
             if len(valid_paths) < 2:
                 raise Exception(f"Número insuficiente de imagens válidas para criar um carrossel. Válidas: {len(valid_paths)}")
             
-            print(f"[CAROUSEL] {len(valid_paths)} imagens válidas encontradas, iniciando upload")
+            logger.info(f"[CAROUSEL] {len(valid_paths)} imagens válidas encontradas, iniciando upload")
+            
+            # Verify all images have the same aspect ratio
+            try:
+                aspect_ratios = []
+                for path in valid_paths:
+                    with Image.open(path) as img:
+                        width, height = img.size
+                        aspect_ratio = round(width / height, 3)
+                        aspect_ratios.append((path, aspect_ratio))
+                
+                # Check if all aspect ratios are approximately the same
+                first_ratio = aspect_ratios[0][1]
+                for path, ratio in aspect_ratios:
+                    if abs(ratio - first_ratio) > 0.01:  # Allow for very small differences
+                        logger.warning(f"[CAROUSEL] Imagem com proporção diferente: {path} (ratio: {ratio}, esperado: {first_ratio})")
+                        logger.warning("Instagram requires all carousel images to have the same aspect ratio!")
+            except Exception as e:
+                logger.warning(f"[CAROUSEL] Erro ao verificar proporções das imagens: {str(e)}")
             
             # Instanciar o serviço de carrossel do Instagram
             from src.instagram.instagram_carousel_service import InstagramCarouselService
             from src.instagram.carousel_poster import upload_carousel_images
             
+            # Clear any existing carousel cache first
+            try:
+                # Try to call the clear API endpoint
+                requests.post("http://localhost:5001/debug/carousel/clear", timeout=2)
+            except:
+                pass  # Ignore if the endpoint isn't available
+            
             # Certificar-se de que temos as dependências necessárias
             service = InstagramCarouselService()
+            
+            # Verificar explicitamente as permissões do token
+            is_valid, missing_permissions = service.check_token_permissions()
+            if not is_valid:
+                logger.error(f"[CAROUSEL] Token de API do Instagram não tem todas as permissões necessárias: {missing_permissions}")
+                raise Exception(f"O token do Instagram não possui as permissões necessárias: {', '.join(missing_permissions)}")
             
             # Verificar credenciais
             if not service.instagram_account_id or not service.access_token:
                 raise Exception("Credenciais do Instagram não configuradas corretamente")
             
-            print(f"[CAROUSEL] Credenciais verificadas, iniciando upload das imagens")
+            logger.info(f"[CAROUSEL] Credenciais verificadas, iniciando upload das imagens")
             
             # Fazer upload das imagens e obter URLs
             def progress_update(current, total):
-                print(f"[CAROUSEL] Upload de imagens: {current}/{total}")
+                logger.info(f"[CAROUSEL] Upload de imagens: {current}/{total}")
                 
             success, uploaded_images, image_urls = upload_carousel_images(valid_paths, progress_callback=progress_update)
             
-            print(f"[CAROUSEL] Resultado do upload: success={success}, {len(image_urls)} URLs obtidas")
+            logger.info(f"[CAROUSEL] Resultado do upload: success={success}, {len(image_urls)} URLs obtidas")
             
             if not success:
                 raise Exception("Falha no upload de uma ou mais imagens do carrossel")
@@ -400,19 +442,45 @@ class InstagramSend:
             if len(image_urls) < 2:
                 raise Exception(f"Número insuficiente de URLs para criar um carrossel: {len(image_urls)}")
             
-            print(f"[CAROUSEL] URLs das imagens: {image_urls}")
+            logger.info(f"[CAROUSEL] URLs das imagens: {image_urls}")
             
-            # Postar o carrossel no Instagram
-            print(f"[CAROUSEL] Iniciando publicação do carrossel no Instagram")
-            post_id = service.post_carousel(image_urls, caption)
+            # Postar o carrossel no Instagram, com retentativas 
+            max_attempts = 3
+            retry_delay = 15  # seconds
             
-            if not post_id:
-                raise Exception("Falha ao publicar o carrossel no Instagram")
+            for attempt in range(max_attempts):
+                logger.info(f"[CAROUSEL] Tentativa {attempt+1}/{max_attempts} de publicação do carrossel no Instagram")
+                
+                try:
+                    post_id = service.post_carousel(image_urls, caption)
+                    
+                    if post_id:
+                        logger.info(f"[CAROUSEL] Carrossel publicado com sucesso! ID: {post_id}")
+                        return {"status": "success", "post_id": post_id}
+                    else:
+                        logger.error(f"[CAROUSEL] post_carousel retornou None na tentativa {attempt+1}")
+                        
+                        if attempt < max_attempts - 1:
+                            logger.info(f"[CAROUSEL] Aguardando {retry_delay}s antes da próxima tentativa...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Double delay for next attempt
+                        else:
+                            raise Exception("Falha ao publicar o carrossel após múltiplas tentativas")
+                except Exception as e:
+                    logger.error(f"[CAROUSEL] Erro na tentativa {attempt+1}: {str(e)}")
+                    
+                    if attempt < max_attempts - 1:
+                        logger.info(f"[CAROUSEL] Aguardando {retry_delay}s antes da próxima tentativa...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Double delay for next attempt
+                    else:
+                        raise
             
-            print(f"[CAROUSEL] Carrossel publicado com sucesso! ID: {post_id}")
-            return {"status": "success", "post_id": post_id}
+            # If we reach here, all attempts failed
+            raise Exception("Falha ao publicar o carrossel no Instagram após todas as tentativas")
+            
         except Exception as e:
-            print(f"[CAROUSEL] ERRO: {str(e)}")
+            logger.error(f"[CAROUSEL] ERRO: {str(e)}")
             import traceback
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
             raise Exception(f"Erro ao enviar carrossel: {e}")
