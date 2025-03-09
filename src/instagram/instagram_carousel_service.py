@@ -21,11 +21,51 @@ class CarouselCreationError(Exception):
         self.fb_trace_id = fb_trace_id
         super().__init__(message)
 
+class RateLimitState:
+    """Track rate limit state"""
+    def __init__(self):
+        self.last_error_time = 0
+        self.error_count = 0
+        self.backoff_until = 0
+        self.min_delay = 60  # Start with 1 minute
+        self.max_delay = 3600  # Max 1 hour delay
+
+    def should_backoff(self) -> bool:
+        """Check if we should still be backing off"""
+        return time.time() < self.backoff_until
+
+    def get_backoff_time(self) -> float:
+        """Get how many seconds to wait"""
+        if self.should_backoff():
+            return self.backoff_until - time.time()
+        return 0
+
+    def record_error(self):
+        """Record a rate limit error and calculate backoff"""
+        current_time = time.time()
+        
+        # Reset error count if it's been more than an hour
+        if current_time - self.last_error_time > 3600:
+            self.error_count = 0
+            
+        self.error_count += 1
+        self.last_error_time = current_time
+        
+        # Calculate exponential backoff with jitter
+        delay = min(self.min_delay * (2 ** (self.error_count - 1)), self.max_delay)
+        jitter = random.uniform(0, delay * 0.1)  # 10% jitter
+        self.backoff_until = current_time + delay + jitter
+        
+        return delay + jitter
+
 class InstagramCarouselService(BaseInstagramService):
     """Classe para gerenciar o upload e publicação de carrosséis no Instagram."""
 
     SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png"]
     MAX_MEDIA_SIZE = 8 * 1024 * 1024  # 8MB in bytes
+
+    # Class-level rate limit state
+    _rate_limit_state = RateLimitState()
 
     def __init__(self, access_token=None, ig_user_id=None):
         load_dotenv()
@@ -348,6 +388,11 @@ class InstagramCarouselService(BaseInstagramService):
             'creation_id': container_id
         }
 
+        if self._rate_limit_state.should_backoff():
+            wait_time = self._rate_limit_state.get_backoff_time()
+            logger.warning(f"Still in backoff period. Waiting {wait_time:.1f} seconds...")
+            time.sleep(wait_time)
+            
         try:
             # Add detailed logging to help diagnose issues
             logger.info(f"Attempting to publish carousel with container ID: {container_id}")
@@ -361,12 +406,22 @@ class InstagramCarouselService(BaseInstagramService):
             if result and 'id' in result:
                 post_id = result['id']
                 logger.info(f"Carousel published successfully! ID: {post_id}")
+                
+                # Reset rate limit state on success
+                self._rate_limit_state = RateLimitState()
+                
                 return post_id
 
             logger.error(f"Failed to publish carousel. Response: {result}")
             return None
             
-        except InstagramAPIError as e:
+        except PermissionError as e:
+            if "request limit reached" in str(e).lower():
+                self._handle_rate_limit()
+                raise
+            raise
+            
+        except Exception as e:
             logger.error(f"Error publishing carousel: {e}")
             
             # Add additional error details
@@ -386,23 +441,51 @@ class InstagramCarouselService(BaseInstagramService):
         if len(media_urls) < 2 or len(media_urls) > 10:
             raise ValueError(f"Invalid number of media URLs. Found: {len(media_urls)}, required: 2-10")
 
-        # Create carousel container
-        container_id = self.create_carousel_container(media_urls, caption)
-        if not container_id:
-            return None
-
-        # Wait for container to be ready
-        status = self.wait_for_container_status(container_id)
-        if status != 'FINISHED':
-            logger.error(f"Container não ficou pronto. Status final: {status}")
-            return None
-
-        # Additional delay before publishing to ensure container is fully processed
-        logger.info("Adding extra delay before publishing to ensure container is fully processed...")
-        time.sleep(10)  # 10 seconds extra delay
-
-        # Publish carousel
-        return self.publish_carousel(container_id)
+        if self._rate_limit_state.should_backoff():
+            wait_time = self._rate_limit_state.get_backoff_time()
+            logger.warning(f"Still in backoff period. Waiting {wait_time:.1f} seconds...")
+            time.sleep(wait_time)
+            
+        max_attempts = 3
+        base_delay = 30  # Increased from 15 to 30 seconds
+        
+        for attempt in range(max_attempts):
+            try:
+                # Create carousel container
+                container_id = self.create_carousel_container(media_urls, caption)
+                if not container_id:
+                    logger.error("Failed to create carousel container")
+                    return None
+                
+                # Wait for container to be ready
+                status = self.wait_for_container_status(container_id)
+                if status != 'FINISHED':
+                    logger.error(f"Container not ready. Final status: {status}")
+                    return None
+                
+                # Add longer delay before publishing
+                logger.info("Adding extra delay before publishing...")
+                time.sleep(20)  # Increased from 10 to 20 seconds
+                
+                # Publish carousel
+                return self.publish_carousel(container_id)
+                
+            except PermissionError as e:
+                if "request limit reached" in str(e).lower():
+                    self._handle_rate_limit()
+                    continue
+                raise
+                
+            except Exception as e:
+                logger.error(f"Error posting carousel (attempt {attempt + 1}): {str(e)}")
+                if attempt < max_attempts - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.info(f"Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    raise
+                    
+        return None
         
     def check_token_permissions(self):
         """
@@ -434,3 +517,9 @@ class InstagramCarouselService(BaseInstagramService):
         except Exception as e:
             logger.error(f"Error checking token permissions: {e}")
             return False, [str(e)]
+
+    def _handle_rate_limit(self):
+        """Handle rate limiting with exponential backoff"""
+        delay = self._rate_limit_state.record_error()
+        logger.warning(f"Rate limit hit. Backing off for {delay:.1f} seconds...")
+        time.sleep(delay)
