@@ -97,7 +97,7 @@ def webhook():
 
             try:
                 job_id = InstagramSend.queue_post(image_path, caption)
-                sender.send_text(number=msg.remote_jid, msg=f"Postagem de imagem enfileirada com sucesso! ID do trabalho: {job_id}")
+                sender.send_text(number=msg.remote_jid, msg=f"Postagem de imagem enfileirada com sucesso!")
                 return jsonify({"status": "enqueued", "job_id": job_id}), 202
             except ContentPolicyViolation as e:
                 sender.send_text(number=msg.remote_jid, msg=f"Conteúdo viola diretrizes: {str(e)}")
