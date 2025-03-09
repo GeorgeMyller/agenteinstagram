@@ -9,6 +9,7 @@ import os
 import time
 import traceback
 import threading
+import re
 
 from src.utils.paths import Paths  # Add this import
 
@@ -33,13 +34,14 @@ border_image = "moldura.png"
 is_carousel_mode = False
 carousel_images = []
 carousel_start_time = 0
+carousel_caption = ""
 CAROUSEL_TIMEOUT = 300  # 5 minutos em segundos
 MAX_CAROUSEL_IMAGES = 10
 
 
 @app.route("/messages-upsert", methods=['POST'])
 def webhook():
-    global is_carousel_mode, carousel_images, carousel_start_time  # Acesso às variáveis globais
+    global is_carousel_mode, carousel_images, carousel_start_time, carousel_caption
 
     try:
         data = request.get_json()
@@ -54,41 +56,170 @@ def webhook():
                 return jsonify({"status": "processed, but ignored"}), 200 #Retorna 200 para o webhook não reenviar.
         
         # Lógica do Modo Carrossel
-        if texto and texto.lower() == "carrossel":
+        # Iniciar modo carrossel com comando "carrossel" ou "carousel"
+        carousel_command = re.match(r'^carrosse?l\s*(.*)', texto.lower() if texto else "") if texto else None
+        if carousel_command:
             is_carousel_mode = True
             carousel_images = []
+            carousel_caption = carousel_command.group(1).strip() if carousel_command.group(1) else ""
             carousel_start_time = time.time()
+            
+            instructions = (
+                "🎠 *Modo carrossel ativado!*\n\n"
+                "- Envie as imagens que deseja incluir no carrossel (2-10 imagens)\n"
+                "- Para definir uma legenda, envie \"legenda: sua legenda aqui\"\n"
+                "- Quando terminar, envie \"postar\" para publicar o carrossel\n"
+                "- Para cancelar, envie \"cancelar\"\n\n"
+                "O modo carrossel será desativado automaticamente após 5 minutos de inatividade."
+            )
+            
+            if carousel_caption:
+                sender.send_text(number=msg.remote_jid, 
+                                msg=f"{instructions}\n\nLegenda inicial definida: {carousel_caption}")
+            else:
+                sender.send_text(number=msg.remote_jid, msg=instructions)
+            
             return jsonify({"status": "Modo carrossel ativado"}), 200
 
         if is_carousel_mode:
+            # Recebimento de imagens para o carrossel
             if msg.message_type == msg.TYPE_IMAGE:
+                if len(carousel_images) >= MAX_CAROUSEL_IMAGES:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"⚠️ Limite máximo de {MAX_CAROUSEL_IMAGES} imagens atingido! Envie \"postar\" para publicar.")
+                    return jsonify({"status": "max images reached"}), 200
+                    
                 image_path = ImageDecodeSaver.process(msg.image_base64)
                 carousel_images.append(image_path)
-                return jsonify({"status": f"Imagem adicionada ao carrossel. {len(carousel_images)}/{MAX_CAROUSEL_IMAGES}"}), 200
+                
+                # Verificar se já temos pelo menos 2 imagens para habilitar o comando "postar"
+                if len(carousel_images) >= 2:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"✅ Imagem {len(carousel_images)} adicionada ao carrossel.\n"
+                                        f"Você pode enviar mais imagens ou enviar \"postar\" para publicar.")
+                else:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"✅ Imagem {len(carousel_images)} adicionada ao carrossel.\n"
+                                        f"Envie pelo menos mais uma imagem para completar o carrossel.")
+                
+                # Resetar o timer de timeout a cada imagem recebida
+                carousel_start_time = time.time()
+                return jsonify({"status": f"Imagem adicionada ao carrossel"}), 200
 
+            # Comando para definir legenda
+            elif texto and texto.lower().startswith("legenda:"):
+                carousel_caption = texto[8:].strip()  # Remove "legenda:" e espaços em branco
+                sender.send_text(number=msg.remote_jid, 
+                                msg=f"✅ Legenda definida: \"{carousel_caption}\"")
+                carousel_start_time = time.time()  # Resetar timer
+                return jsonify({"status": "Legenda definida"}), 200
+
+            # Comando para publicar o carrossel
             elif texto and texto.lower() == "postar":
-                # Processar o carrossel quando receber a mensagem "postar"
+                if len(carousel_images) < 2:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg="⚠️ São necessárias pelo menos 2 imagens para criar um carrossel. "
+                                        f"Você tem apenas {len(carousel_images)} imagem.")
+                    return jsonify({"status": "not enough images"}), 200
+                
                 try:
-                    job_id = InstagramSend.queue_carousel(carousel_images, caption="Carrossel de imagens")
-                    sender.send_text(number=msg.remote_jid, msg=f"Carrossel enfileirado com sucesso! ID do trabalho: {job_id}")
+                    # Se não houver legenda definida, usar uma padrão
+                    caption_to_use = carousel_caption if carousel_caption else "Carrossel de imagens publicado via webhook"
+                    
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"🔄 Processando carrossel com {len(carousel_images)} imagens...")
+                    
+                    # Enfileirar o carrossel para publicação
+                    job_id = InstagramSend.queue_carousel(carousel_images, caption_to_use)
+                    
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"✅ Carrossel enfileirado com sucesso!\n"
+                                        f"ID do trabalho: {job_id}\n"
+                                        f"Número de imagens: {len(carousel_images)}\n"
+                                        f"Você pode verificar o status usando \"status {job_id}\"")
+                    
                 except Exception as e:
                     print(f"Erro ao enfileirar carrossel: {e}")
-                    sender.send_text(number=msg.remote_jid, msg=f"Erro ao enfileirar carrossel: {e}")
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"❌ Erro ao enfileirar carrossel: {str(e)}")
                     return jsonify({"status": "error", "message": "Erro ao enfileirar carrossel"}), 500
                 finally:
                     is_carousel_mode = False  # Resetar o modo carrossel
                     carousel_images = []
+                    carousel_caption = ""
                 return jsonify({"status": "Carrossel processado e enfileirado"}), 200
 
+            # Comando para cancelar o carrossel
+            elif texto and texto.lower() == "cancelar":
+                is_carousel_mode = False
+                carousel_images = []
+                carousel_caption = ""
+                sender.send_text(number=msg.remote_jid, 
+                                msg="🚫 Modo carrossel cancelado. Todas as imagens foram descartadas.")
+                return jsonify({"status": "Carrossel cancelado"}), 200
+                
+            # Verificar timeout
             elif time.time() - carousel_start_time > CAROUSEL_TIMEOUT:
                 # Timeout, sair do modo carrossel
                 is_carousel_mode = False
                 carousel_images = []
-                sender.send_text(number=msg.remote_jid, msg="Timeout do carrossel. Envie 'carrossel' novamente para iniciar.")
+                carousel_caption = ""
+                sender.send_text(number=msg.remote_jid, 
+                                msg="⏱️ Timeout do carrossel. Envie 'carrossel' novamente para iniciar.")
                 return jsonify({"status": "Timeout do carrossel"}), 200
 
+            # Verificar status de um job
+            elif texto and texto.lower().startswith("status "):
+                job_id = texto.split(" ", 1)[1].strip()
+                try:
+                    job_status = InstagramSend.check_post_status(job_id)
+                    if job_status:
+                        status_text = f"📊 Status do trabalho {job_id}:\n"
+                        status_text += f"• Status: {job_status.get('status', 'Desconhecido')}\n"
+                        status_text += f"• Tipo: {job_status.get('content_type', 'Desconhecido')}\n"
+                        status_text += f"• Criado em: {job_status.get('created_at', 'Desconhecido')}\n"
+                        
+                        if job_status.get('result') and job_status['result'].get('permalink'):
+                            status_text += f"• Link: {job_status['result']['permalink']}"
+                        
+                        sender.send_text(number=msg.remote_jid, msg=status_text)
+                    else:
+                        sender.send_text(number=msg.remote_jid, 
+                                        msg=f"❌ Trabalho {job_id} não encontrado")
+                except Exception as e:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"❌ Erro ao verificar status: {str(e)}")
+                
+                carousel_start_time = time.time()  # Resetar timer
+                return jsonify({"status": "Status verificado"}), 200
+
             #Ignorar outras mensagens, se estiver em modo carrossel
+            carousel_start_time = time.time()  # Resetar timer para qualquer interação
             return jsonify({"status": "processed (carousel mode)"}), 200
+
+        # Verificar comando de status mesmo fora do modo carrossel
+        if texto and texto.lower().startswith("status "):
+            job_id = texto.split(" ", 1)[1].strip()
+            try:
+                job_status = InstagramSend.check_post_status(job_id)
+                if job_status:
+                    status_text = f"📊 Status do trabalho {job_id}:\n"
+                    status_text += f"• Status: {job_status.get('status', 'Desconhecido')}\n"
+                    status_text += f"• Tipo: {job_status.get('content_type', 'Desconhecido')}\n"
+                    status_text += f"• Criado em: {job_status.get('created_at', 'Desconhecido')}\n"
+                    
+                    if job_status.get('result') and job_status['result'].get('permalink'):
+                        status_text += f"• Link: {job_status['result']['permalink']}"
+                    
+                    sender.send_text(number=msg.remote_jid, msg=status_text)
+                else:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"❌ Trabalho {job_id} não encontrado")
+            except Exception as e:
+                sender.send_text(number=msg.remote_jid, 
+                                msg=f"❌ Erro ao verificar status: {str(e)}")
+            
+            return jsonify({"status": "Status verificado"}), 200
 
         # Processamento de Imagem Única
         if msg.message_type == msg.TYPE_IMAGE:
@@ -97,19 +228,19 @@ def webhook():
 
             try:
                 job_id = InstagramSend.queue_post(image_path, caption)
-                sender.send_text(number=msg.remote_jid, msg=f"Postagem de imagem enfileirada com sucesso!")
+                sender.send_text(number=msg.remote_jid, msg=f"✅ Postagem de imagem enfileirada com sucesso!\nID do trabalho: {job_id}")
                 return jsonify({"status": "enqueued", "job_id": job_id}), 202
             except ContentPolicyViolation as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Conteúdo viola diretrizes: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"⚠️ Conteúdo viola diretrizes: {str(e)}")
                 return jsonify({"error": "Conteúdo viola diretrizes"}), 403
             except RateLimitExceeded as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Limite de requisições excedido: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"⏳ Limite de requisições excedido: {str(e)}")
                 return jsonify({"error": "Limite de requisições excedido"}), 429
             except FileNotFoundError as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Arquivo não encontrado: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"❌ Arquivo não encontrado: {str(e)}")
                 return jsonify({"error": "Arquivo não encontrado"}), 404
             except Exception as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Erro no processamento do post: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"❌ Erro no processamento do post: {str(e)}")
                 return jsonify({"error": "Erro no processamento do post"}), 500
 
         # Processamento de Vídeo (Reels)
@@ -121,20 +252,20 @@ def webhook():
                 print(f"Caption received: {caption}")  # Debug statement
                 # 2. Enfileirar a postagem do Reels
                 job_id = InstagramSend.queue_reels(video_path, caption)  # Ainda precisa ser implementado
-                sender.send_text(number=msg.remote_jid, msg=f"Reels enfileirado com sucesso! ID do trabalho: {job_id}")
+                sender.send_text(number=msg.remote_jid, msg=f"✅ Reels enfileirado com sucesso! ID do trabalho: {job_id}")
                 return jsonify({"status": "enqueued", "job_id": job_id}), 202
 
             except ContentPolicyViolation as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Conteúdo viola diretrizes: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"⚠️ Conteúdo viola diretrizes: {str(e)}")
                 return jsonify({"error": "Conteúdo viola diretrizes"}), 403
             except RateLimitExceeded as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Limite de requisições excedido: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"⏳ Limite de requisições excedido: {str(e)}")
                 return jsonify({"error": "Limite de requisições excedido"}), 429
             except FileNotFoundError as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Arquivo não encontrado: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"❌ Arquivo não encontrado: {str(e)}")
                 return jsonify({"error": "Arquivo não encontrado"}), 404
             except Exception as e:
-                sender.send_text(number=msg.remote_jid, msg=f"Erro ao enfileirar Reels: {str(e)}")
+                sender.send_text(number=msg.remote_jid, msg=f"❌ Erro ao enfileirar Reels: {str(e)}")
                 traceback.print_exc()
                 return jsonify({"error": "Erro ao enfileirar Reels"}), 500
             
@@ -145,6 +276,7 @@ def webhook():
 
     return jsonify({"status": "processed"}), 200
 
+# ... resto do código permanece o mesmo
 @app.route("/status", methods=['GET'])
 def status():
     """Endpoint to check system status"""
