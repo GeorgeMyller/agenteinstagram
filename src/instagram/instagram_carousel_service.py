@@ -152,7 +152,7 @@ class InstagramCarouselService(BaseInstagramService):
     def _validate_media(self, media_url: str) -> bool:
         """Validates media URL and type before uploading with retry mechanism."""
         max_retries = 5
-        base_delay = 2  # seconds
+        base_delay = 5  # seconds - increased from 2 to 5
         
         for attempt in range(max_retries):
             try:
@@ -162,18 +162,28 @@ class InstagramCarouselService(BaseInstagramService):
                 import requests
                 session = requests.Session()
                 
-                response = session.head(media_url, timeout=15)  # Increased timeout
+                # Add user agent to mimic browser request
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                    'Accept': 'image/jpeg, image/png, */*'
+                }
+                
+                response = session.head(media_url, timeout=20, headers=headers)  # Increased timeout
+                
                 if response.status_code != 200:
                     logger.error(f"Media URL not accessible: {media_url}, status code: {response.status_code}")
                     
                     # If we get a 429, we should back off more aggressively
                     if response.status_code == 429:
+                        # Use retry-after header if present, otherwise use exponential backoff
                         retry_after = int(response.headers.get('retry-after', base_delay * (2 ** attempt)))
+                        # Ensure we wait at least 10 seconds for Imgur rate limits
+                        retry_after = max(retry_after, 10 + random.randint(1, 10))
                         logger.warning(f"Rate limit hit from image host. Waiting {retry_after}s before retry...")
                         time.sleep(retry_after)
                     elif attempt < max_retries - 1:
                         # Exponential backoff with jitter for other errors
-                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 3)
                         logger.warning(f"Will retry after {delay:.2f}s...")
                         time.sleep(delay)
                     continue
@@ -196,18 +206,18 @@ class InstagramCarouselService(BaseInstagramService):
                 
                 if "too many 429 error responses" in str(e) or "429" in str(e):
                     # This is likely a rate limit issue
-                    delay = base_delay * (2 ** attempt) + random.uniform(1, 5)
+                    delay = base_delay * (3 ** attempt) + random.uniform(5, 15)  # More aggressive backoff
                     logger.warning(f"Rate limit hit from image host. Waiting {delay:.2f}s before retry...")
                     time.sleep(delay)
                 elif attempt < max_retries - 1:
                     # General network error, retry with exponential backoff
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 5)
                     logger.warning(f"Network error, will retry after {delay:.2f}s...")
                     time.sleep(delay)
             except Exception as e:
                 logger.error(f"Unexpected error validating media: {str(e)}")
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 5)
                     logger.warning(f"Will retry after {delay:.2f}s...")
                     time.sleep(delay)
         

@@ -14,6 +14,8 @@ from PIL import Image
 # Import new queue system
 from src.services.post_queue import post_queue, RateLimitExceeded
 from src.instagram.instagram_post_publisher import PostPublisher
+# Import the new carousel normalizer
+from src.instagram.carousel_normalizer import CarouselNormalizer
 
 # Set up logging
 logger = logging.getLogger('InstagramSend')
@@ -382,25 +384,24 @@ class InstagramSend:
             if len(valid_paths) < 2:
                 raise Exception(f"Número insuficiente de imagens válidas para criar um carrossel. Válidas: {len(valid_paths)}")
             
-            logger.info(f"[CAROUSEL] {len(valid_paths)} imagens válidas encontradas, iniciando upload")
+            logger.info(f"[CAROUSEL] {len(valid_paths)} imagens válidas encontradas, iniciando verificação de proporções")
             
-            # Verify all images have the same aspect ratio
+            # Normalize images to have the same aspect ratio (new step)
             try:
-                aspect_ratios = []
-                for path in valid_paths:
-                    with Image.open(path) as img:
-                        width, height = img.size
-                        aspect_ratio = round(width / height, 3)
-                        aspect_ratios.append((path, aspect_ratio))
+                logger.info("[CAROUSEL] Normalizando imagens para mesma proporção...")
+                normalized_paths = CarouselNormalizer.normalize_carousel_images(valid_paths)
                 
-                # Check if all aspect ratios are approximately the same
-                first_ratio = aspect_ratios[0][1]
-                for path, ratio in aspect_ratios:
-                    if abs(ratio - first_ratio) > 0.01:  # Allow for very small differences
-                        logger.warning(f"[CAROUSEL] Imagem com proporção diferente: {path} (ratio: {ratio}, esperado: {first_ratio})")
-                        logger.warning("Instagram requires all carousel images to have the same aspect ratio!")
+                if len(normalized_paths) < 2:
+                    logger.error("[CAROUSEL] Falha ao normalizar imagens do carrossel")
+                    raise Exception("Falha ao normalizar imagens do carrossel")
+                    
+                logger.info(f"[CAROUSEL] {len(normalized_paths)} imagens normalizadas com sucesso")
+                
+                # Replace valid_paths with normalized_paths
+                valid_paths = normalized_paths
             except Exception as e:
-                logger.warning(f"[CAROUSEL] Erro ao verificar proporções das imagens: {str(e)}")
+                logger.warning(f"[CAROUSEL] Erro ao normalizar imagens: {str(e)}. Tentando prosseguir com as originais.")
+                # Continue with original images if normalization fails
             
             # Instanciar o serviço de carrossel do Instagram
             from src.instagram.instagram_carousel_service import InstagramCarouselService
@@ -483,4 +484,14 @@ class InstagramSend:
             logger.error(f"[CAROUSEL] ERRO: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
+            
+            # Clean up any temporary normalized images
+            try:
+                for path in valid_paths:
+                    if "NamedTemporaryFile" in path and os.path.exists(path):
+                        os.unlink(path)
+                        logger.info(f"[CAROUSEL] Arquivo temporário removido: {path}")
+            except Exception as cleanup_error:
+                logger.error(f"[CAROUSEL] Erro ao limpar arquivos temporários: {str(cleanup_error)}")
+                
             raise Exception(f"Erro ao enviar carrossel: {e}")
