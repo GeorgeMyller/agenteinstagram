@@ -2,60 +2,69 @@
 
 ## Overview
 
-Instagram Agent is a powerful social media automation system that helps manage and automate Instagram content posting through an API interface. It supports various content types including single images, carousels, and videos/reels.
+Instagram Agent é um sistema avançado de automação para redes sociais que ajuda a gerenciar e automatizar a publicação de conteúdo no Instagram através de uma interface API robusta. Suporta diversos tipos de conteúdo, incluindo imagens individuais, carrosséis, e vídeos/reels.
 
 ## Features
 
-- Image posting with automatic caption generation
-- Carousel post support with multiple images
-- Video and reels upload capability
-- AI-powered content description
-- Webhook integration for automated posting
-- Web interface for manual content managemen
+- **Publicação de imagens** com geração automática de legendas
+- **Suporte a carrosséis** com múltiplas imagens (2-10 imagens)
+- **Upload de vídeos e reels** com otimização automática
+- **Geração de legendas com IA** usando CrewAI
+- **Descrição inteligente de conteúdo** usando API Gemini
+- **Integração com webhooks** para publicação automatizada
+- **Interface web** para gerenciamento manual de conteúdo
+- **Sistema de filas** para processar grandes volumes de publicações
+- **Monitoramento em tempo real** do status das publicações
 
 ## Quick Links
 
-- [Installation Guide](installation/quickstart.md)
-- [API Documentation](api/README.md)
-- [Configuration Guide](guides/configuration.md)
-- [Troubleshooting](troubleshooting/common.md)
+- [Guia de Instalação](installation/quickstart.md)
+- [Documentação da API](api/README.md)
+- [Guia de Configuração](guides/configuration.md)
+- [Solução de Problemas](troubleshooting/common.md)
 
-## Project Structure
+## Tipos de Conteúdo Suportados
 
-```
-├── src/                    # Source code
-│   ├── instagram/         # Instagram integration
-│   ├── handlers/          # Request handlers
-│   ├── services/          # Core services
-│   └── utils/            # Utilities
-├── tests/                 # Test suite
-├── docs/                  # Documentation
-└── scripts/              # Helper scripts
-```
+### Imagens Individuais
+- Formatos: JPG, PNG
+- Aplicação automática de filtros e bordas
+- Geração de legendas com IA
 
-## Getting Started
+### Carrosséis
+- 2 a 10 imagens por carrossel
+- Mesmos formatos e processamento de imagens individuais
+- Ideal para contar histórias ou mostrar produtos
 
-1. Install the package:
-   ```bash
-   pip install -e .
-   ```
+### Vídeos e Reels
+- Formatos: MP4, MOV
+- Otimização automática para requisitos do Instagram
+- Opção de compartilhar no feed
 
-2. Configure your environment:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your credentials
-   ```
+## Modos de Uso
 
-3. Run the validation:
-   ```bash
-   python scripts/validate_setup.py
-   ```
+### Interface Web (Streamlit)
+Acesse todas as funcionalidades através de uma interface amigável:
+- Upload e pré-visualização de mídia
+- Personalização de legendas
+- Controle de publicação
 
-4. Start the server:
-   ```bash
-   python run.py
-   ```
+### API REST
+Integre com outros sistemas usando a API REST completa:
+- Endpoints para todos os tipos de mídia
+- Sistema de webhooks para automação
+- Monitoramento de status
 
-## Contributing
+### Webhooks
+Receba e processe mensagens para publicação automática:
+- Comandos via texto para iniciar carrosséis
+- Upload de imagens e vídeos
+- Controle de status via mensagens
 
-See our [contribution guidelines](guides/contributing.md) for information on how to contribute to this project.
+## Recursos Técnicos
+
+- Processamento robusto de imagens e vídeos
+- Sistema de filas para gerenciar publicações
+- Tratamento avançado de erros e limites de taxa
+- Monitoramento de status em tempo real
+
+Para começar, veja o [Guia de Instalação](installation/quickstart.md) ou a [Documentação da API](api/README.md).
