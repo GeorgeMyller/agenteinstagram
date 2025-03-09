@@ -22,6 +22,8 @@ from monitor import start_monitoring_server
 
 from src.instagram.filter import FilterImage
 from src.services.send import sender #Para enviar mensagens de volta
+from src.instagram.describe_video_tool import VideoDescriber  # Importar a classe VideoDescriber
+from src.instagram.describe_carousel_tool import CarouselDescriber  # Importar a classe CarouselDescriber
 
 app = Flask(__name__)
 
@@ -125,7 +127,28 @@ def webhook():
                 
                 try:
                     # Se não houver legenda definida, usar uma padrão
-                    caption_to_use = carousel_caption if carousel_caption else "Carrossel de imagens publicado via webhook"
+                    caption_to_use = carousel_caption if carousel_caption else ""
+                    
+                    # Gerar descrição automática para as imagens do carrossel
+                    if not caption_to_use:
+                        try:
+                            image_descriptions = CarouselDescriber.describe(carousel_images)
+                            crew = InstagramPostCrew()
+                            inputs_dict = {
+                                "genero": "Neutro",
+                                "caption": image_descriptions,
+                                "describe": image_descriptions,
+                                "estilo": "Divertido, Alegre, Sarcástico e descontraído",
+                                "pessoa": "Terceira pessoa do singular",
+                                "sentimento": "Positivo",
+                                "tamanho": "200 palavras",
+                                "emojs": "sim",
+                                "girias": "sim"
+                            }
+                            caption_to_use = crew.kickoff(inputs=inputs_dict)
+                        except Exception as e:
+                            print(f"Erro ao gerar legenda automática: {str(e)}")
+                            caption_to_use = "Carrossel de imagens publicado via webhook"  # Usar uma legenda padrão em caso de erro
                     
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"🔄 Processando carrossel com {len(carousel_images)} imagens...")
@@ -286,9 +309,49 @@ def webhook():
                 video_path = VideoDecodeSaver.process(msg.video_base64)
                 caption = msg.video_caption if msg.video_caption else ""
                 print(f"Caption received: {caption}")  # Debug statement
+                
+                # Gerar legenda automática se não houver uma fornecida
+                if not caption:
+                    try:
+                        # Descrever o vídeo
+                        video_description = VideoDescriber.describe(video_path)
+                        crew = InstagramPostCrew()
+                        inputs_dict = {
+                            "genero": "Neutro",
+                            "caption": video_description,
+                            "describe": video_description,
+                            "estilo": "Divertido, Alegre, Sarcástico e descontraído",
+                            "pessoa": "Terceira pessoa do singular",
+                            "sentimento": "Positivo",
+                            "tamanho": "200 palavras",
+                            "emojs": "sim",
+                            "girias": "sim"
+                        }
+                        caption = crew.kickoff(inputs=inputs_dict)
+                    except Exception as e:
+                        print(f"Erro ao gerar legenda automática: {str(e)}")
+                        caption = ""  # Usar uma legenda vazia em caso de erro
+
                 # 2. Enfileirar a postagem do Reels
                 job_id = InstagramSend.queue_reels(video_path, caption)
                 sender.send_text(number=msg.remote_jid, msg=f"✅ Reels enfileirado com sucesso! ID do trabalho: {job_id}")
+                
+                # 3. Verificar o status do trabalho após enfileiramento
+                job_status = InstagramSend.check_post_status(job_id)
+                if job_status:
+                    status_text = f"📊 Status do trabalho {job_id}:\n"
+                    status_text += f"• Status: {job_status.get('status', 'Desconhecido')}\n"
+                    status_text += f"• Tipo: {job_status.get('content_type', 'Desconhecido')}\n"
+                    status_text += f"• Criado em: {job_status.get('created_at', 'Desconhecido')}\n"
+                    
+                    if job_status.get('result') and job_status['result'].get('permalink'):
+                        status_text += f"• Link: {job_status['result']['permalink']}"
+                    
+                    sender.send_text(number=msg.remote_jid, msg=status_text)
+                else:
+                    sender.send_text(number=msg.remote_jid, 
+                                    msg=f"❌ Trabalho {job_id} não encontrado")
+                
                 return jsonify({"status": "enqueued", "job_id": job_id}), 202
 
             except ContentPolicyViolation as e:

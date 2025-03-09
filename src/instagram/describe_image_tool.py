@@ -20,7 +20,7 @@ class ImageDescriber:
 
         # Configurar o cliente Gemini
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        model = genai.GenerativeModel('gemini-1.5-pro')  # Updated model name
+        model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')  # Updated model name
 
         # Fazer a solicitação à API do Gemini
         try:
