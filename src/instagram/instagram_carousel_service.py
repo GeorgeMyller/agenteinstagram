@@ -41,9 +41,18 @@ class InstagramCarouselService(BaseInstagramService):
         self.token_expires_at = None
         self._validate_token()
 
-    def _validate_token(self):
-        """Validates the access token and retrieves its expiration time."""
+    def _validate_token(self, force_check=False):
+        """Validates the access token and retrieves its expiration time.
+        
+        Args:
+            force_check: If True, always check the token validity with the API.
+                        If False (default), might use cached validation results.
+        """
         try:
+            # Add more detailed logging
+            logger.info(f"Validating Instagram token (force_check={force_check})")
+            logger.info(f"Using Instagram Account ID: {self.instagram_account_id}")
+            
             response = self._make_request(
                 "GET",
                 "debug_token",
@@ -51,12 +60,38 @@ class InstagramCarouselService(BaseInstagramService):
             )
             if response and 'data' in response and response['data'].get('is_valid'):
                 logger.info("Token de acesso validado com sucesso.")
-                if 'instagram_basic' not in response['data'].get('scopes', []) or \
-                   'instagram_content_publish' not in response['data'].get('scopes', []):
-                    logger.warning("Token may not have necessary permissions for posting")
+                
+                # Check and log scopes
+                scopes = response['data'].get('scopes', [])
+                logger.info(f"Token scopes: {scopes}")
+                
+                if 'instagram_basic' not in scopes:
+                    logger.warning("Token is missing 'instagram_basic' permission")
+                
+                if 'instagram_content_publish' not in scopes:
+                    logger.warning("Token is missing 'instagram_content_publish' permission - REQUIRED for posting!")
+                
+                # Check for other important permissions
+                missing_perms = []
+                required_perms = ['instagram_basic', 'instagram_content_publish']
+                for perm in required_perms:
+                    if perm not in scopes:
+                        missing_perms.append(perm)
+                
+                if missing_perms:
+                    logger.error(f"Token is missing required permissions: {missing_perms}")
+                    raise PermissionError(
+                        f"Token is missing required permissions: {missing_perms}. "
+                        f"Please request these permissions in your app and get a new token."
+                    )
+                
                 self.token_expires_at = response['data'].get('expires_at')
                 if self.token_expires_at:
                     logger.info(f"Token will expire at: {datetime.fromtimestamp(self.token_expires_at)}")
+                    
+                    # Check if token needs refresh soon
+                    if time.time() > self.token_expires_at - (86400 * 3):  # 3 days before expiration
+                        logger.warning("Token will expire soon. Consider refreshing it.")
             else:
                 logger.error("Access token is invalid or expired.")
                 raise AuthenticationError("Access token is invalid or expired.")
@@ -249,17 +284,36 @@ class InstagramCarouselService(BaseInstagramService):
         }
 
         try:
+            # Add detailed logging to help diagnose issues
+            logger.info(f"Attempting to publish carousel with container ID: {container_id}")
+            
+            # Print detailed info about the request
+            logger.info(f"Publishing to endpoint: {self.ig_user_id}/media_publish")
+            logger.info(f"Publishing with params: {params}")
+            
             result = self._make_request('POST', f"{self.ig_user_id}/media_publish", data=params)
+            
             if result and 'id' in result:
                 post_id = result['id']
                 logger.info(f"Carousel published successfully! ID: {post_id}")
                 return post_id
 
-            logger.error("Failed to publish carousel")
+            logger.error(f"Failed to publish carousel. Response: {result}")
             return None
             
         except InstagramAPIError as e:
             logger.error(f"Error publishing carousel: {e}")
+            
+            # Add additional error details
+            if hasattr(e, 'error_type'):
+                logger.error(f"Error type: {getattr(e, 'error_type')}")
+            if hasattr(e, 'error_message'):
+                logger.error(f"Error message: {getattr(e, 'error_message')}")
+            if hasattr(e, 'error_code'):
+                logger.error(f"Error code: {getattr(e, 'error_code')}")
+            if hasattr(e, 'fb_trace_id'):
+                logger.error(f"FB trace ID: {getattr(e, 'fb_trace_id')}")
+                
             raise
 
     def post_carousel(self, media_urls: List[str], caption: str) -> Optional[str]:
@@ -277,6 +331,10 @@ class InstagramCarouselService(BaseInstagramService):
         if status != 'FINISHED':
             logger.error(f"Container não ficou pronto. Status final: {status}")
             return None
+
+        # Additional delay before publishing to ensure container is fully processed
+        logger.info("Adding extra delay before publishing to ensure container is fully processed...")
+        time.sleep(10)  # 10 seconds extra delay
 
         # Publish carousel
         return self.publish_carousel(container_id)

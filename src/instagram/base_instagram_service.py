@@ -41,6 +41,12 @@ class InstagramAPIError(Exception):
         self.error_subcode = error_subcode
         self.fb_trace_id = fb_trace_id
         super().__init__(message)
+        
+    def __str__(self):
+        base_message = super().__str__()
+        if hasattr(self, 'error_code') and self.error_code:
+            return f"{base_message} (Code: {self.error_code}, Subcode: {self.error_subcode}, FB Trace ID: {self.fb_trace_id})"
+        return base_message
 
 class BaseInstagramService:
     """Base class for Instagram API services with common functionality"""
@@ -51,6 +57,7 @@ class BaseInstagramService:
         """Initialize with access token and Instagram user ID"""
         self.access_token = access_token
         self.ig_user_id = ig_user_id
+        self.instagram_account_id = ig_user_id  # Used interchangeably in some child classes
         self.base_url = f'https://graph.facebook.com/{self.API_VERSION}'
         
         # Configure session with retries
@@ -84,8 +91,44 @@ class BaseInstagramService:
             time.sleep(self.min_request_interval - elapsed)
         
         try:
+            logger.info(f"Making {method} request to {endpoint}")
+            if data:
+                logger.info(f"With data: {data}")
+            
             response = self.session.request(method, url, params=params, data=data, headers=headers)
             self.last_request_time = time.time()
+            
+            # Log response status for debugging
+            logger.info(f"Response status: {response.status_code}")
+            
+            # Special handling for 403 responses - common with carousel publishing
+            if response.status_code == 403:
+                error_detail = "Unknown error"
+                try:
+                    error_json = response.json()
+                    if 'error' in error_json:
+                        error_detail = error_json['error'].get('message', 'No message provided')
+                        error_code = error_json['error'].get('code')
+                        error_subcode = error_json['error'].get('error_subcode')
+                        fb_trace_id = error_json['error'].get('fbtrace_id')
+                        
+                        # Log detailed error info
+                        logger.error(f"403 Forbidden: {error_detail} (Code: {error_code}, Subcode: {error_subcode})")
+                        
+                        # Try to provide more helpful error messages for common carousel issues
+                        if error_code == 200:
+                            error_detail = "Permission error: The app doesn't have permission to publish content. Ensure your token has instagram_content_publish permission."
+                        elif error_code == 10:
+                            error_detail = "API permission error: You may need to submit your app for review to get the required permissions."
+                        elif error_code == 2207024:
+                            error_detail = "Carousel validation failed: Ensure all images have the same aspect ratio and meet size requirements."
+                        
+                        raise PermissionError(error_detail, error_code, error_subcode, fb_trace_id)
+                except ValueError:
+                    pass
+                
+                # If we couldn't parse a specific error, raise a generic one
+                raise PermissionError(f"403 Forbidden: {error_detail}")
             
             # Handle rate limit headers
             if 'x-business-use-case-usage' in response.headers:
@@ -101,21 +144,31 @@ class BaseInstagramService:
                 error_subcode = error.get('error_subcode')
                 fb_trace_id = error.get('fbtrace_id')
                 
+                # Detailed error logging
+                logger.error(f"API Error: {error_message} (Code: {error_code}, Subcode: {error_subcode}, FB Trace: {fb_trace_id})")
+                
                 if error_code in [190, 104]:
                     raise AuthenticationError(error_message, error_code, error_subcode, fb_trace_id)
                 elif error_code in [200, 10, 803]:
+                    # Special handling for permission errors
+                    if error_code == 200:
+                        # This is specifically for content publishing permissions
+                        error_message = f"Permission error: {error_message}. Make sure your token has instagram_content_publish permission."
                     raise PermissionError(error_message, error_code, error_subcode, fb_trace_id)
                 elif error_code in [4, 17, 32, 613]:
                     retry_after = self._get_retry_after(error)
                     raise RateLimitError(error_message, retry_after)
                 elif error_code in [1, 2, 4, 17, 341]:
                     raise TemporaryServerError(error_message, error_code, error_subcode, fb_trace_id)
+                elif error_code == 2207024:  # Special code for carousel validation errors
+                    raise MediaError(f"Carousel validation failed: {error_message}", error_code, error_subcode, fb_trace_id)
                 else:
                     raise InstagramAPIError(error_message, error_code, error_subcode, fb_trace_id)
             
             return result
             
         except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {str(e)}")
             raise InstagramAPIError(f"Request failed: {str(e)}")
     
     def _process_rate_limit_headers(self, headers):
@@ -153,3 +206,46 @@ class BaseInstagramService:
                 pass
         
         return retry_seconds
+    
+    def check_token_permissions(self):
+        """
+        Check if the access token has the necessary permissions for posting.
+        Returns a tuple (is_valid, missing_permissions)
+        """
+        try:
+            response = self._make_request(
+                "GET",
+                "debug_token",
+                params={"input_token": self.access_token}
+            )
+            
+            if not response or 'data' not in response:
+                return False, ["Unable to verify token"]
+                
+            token_data = response['data']
+            
+            if not token_data.get('is_valid', False):
+                return False, ["Token is invalid or expired"]
+                
+            scopes = token_data.get('scopes', [])
+            required_permissions = ['instagram_basic', 'instagram_content_publish']
+            
+            missing = [p for p in required_permissions if p not in scopes]
+            
+            return len(missing) == 0, missing
+            
+        except Exception as e:
+            logger.error(f"Error checking token permissions: {e}")
+            return False, [str(e)]
+    
+    def debug_token(self):
+        """Get detailed information about the current token for debugging"""
+        try:
+            return self._make_request(
+                "GET",
+                "debug_token",
+                params={"input_token": self.access_token}
+            )
+        except Exception as e:
+            logger.error(f"Error debugging token: {e}")
+            return {"error": str(e)}

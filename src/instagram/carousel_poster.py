@@ -48,7 +48,7 @@ class ThrottlingError(CarouselError):
     """Raised when API rate limits are hit (codes 4, 17, 32, 613, etc)."""
     def __init__(self, message, error_code=None, error_subcode=None, fb_trace_id=None, retry_after=None):
         super().__init__(message, error_code, error_subcode, fb_trace_id, True)
-        self.retry_after = retry_after or 300  # Default to 5 minutes if not specified
+        self.retry_after = retry_after  # Default to 5 minutes if not specified
 
 class ImageValidationError(CarouselError):
     """Raised when an image fails validation."""
@@ -73,28 +73,26 @@ def validate_carousel_images(image_paths: List[str], validator_func: Callable[[s
 
     Args:
         image_paths: Uma lista de caminhos de arquivos de imagem.
-        validator_func: Uma função que recebe um caminho de imagem e retorna True se a imagem for válida.
+        validator_func: Uma função que valida um único arquivo de imagem.
 
     Returns:
-        Uma tupla contendo duas listas: imagens válidas e imagens inválidas.
+        Uma tupla contendo duas listas: (imagens válidas, imagens inválidas).
     """
     valid_images = []
     invalid_images = []
     
+    # Log inputs to help with debugging
+    logger.info(f"Validating {len(image_paths)} images for carousel")
+    
     for image_path in image_paths:
         try:
+            # Check if file exists
             if not os.path.exists(image_path):
                 logger.error(f"Image file not found: {image_path}")
                 invalid_images.append(image_path)
                 continue
-                
-            # Check file size (8MB limit)
-            if os.path.getsize(image_path) > 8 * 1024 * 1024:
-                logger.error(f"Image too large (>8MB): {image_path}")
-                invalid_images.append(image_path)
-                continue
-                
-            # Check file type
+            
+            # Check if file is an image
             mime_type, _ = mimetypes.guess_type(image_path)
             if mime_type not in ['image/jpeg', 'image/png']:
                 logger.error(f"Invalid image type: {mime_type} for {image_path}")
@@ -126,6 +124,8 @@ def upload_carousel_images(image_paths: List[str], progress_callback: Callable[[
         'lista de resultados' é uma lista de dicionários, cada um contendo informações sobre uma imagem enviada (id, url, deletehash).
         'lista de URLs' é uma lista de URLs das imagens enviadas.
     """
+    logger.info(f"Starting upload of {len(image_paths)} carousel images")
+    
     uploader = ImageUploader()  # Instancia o ImageUploader
     uploaded_images = []
     uploaded_urls = []
@@ -138,13 +138,15 @@ def upload_carousel_images(image_paths: List[str], progress_callback: Callable[[
         if progress_callback:
             progress_callback(index + 1, total_images)  # Chama o callback de progresso
         try:
+            # Log before upload attempt to track any issues
+            logger.info(f"Attempting to upload image {index+1}/{total_images}: {image_path}")
             result = uploader.upload_from_path(image_path)
             uploaded_images.append(result)
             uploaded_urls.append(result['url'])
             logger.info(f"Uploaded image {index+1}/{total_images}: {result['url']}")
         except Exception as e:
             failed_images.append(image_path)
-            logger.error(f"Erro ao fazer upload da imagem {image_path}: {str(e)}")
+            logger.error(f"Error uploading image {image_path}: {str(e)}")
             success = False  # Se *qualquer* upload falhar, define success como False
             # Não interrompe o loop, tenta enviar as outras imagens
 
@@ -166,7 +168,7 @@ def cleanup_uploaded_images(uploaded_images: List[Dict[str, str]]):
                 success_count += 1
             except Exception as e:
                 fail_count += 1
-                logger.error(f"Erro ao excluir imagem {image_info.get('id', 'desconhecido')}: {e}")
+                logger.error(f"Error deleting image {image_info.get('id', 'unknown')}: {e}")
     
     logger.info(f"Image cleanup: {success_count} deleted, {fail_count} failed")
 
@@ -197,7 +199,19 @@ def post_carousel_to_instagram(image_paths: List[str], caption: str, image_urls:
         logger.error(error_msg)
         raise CarouselCreationError(error_msg)
     
+    # Extra logging to help with debugging
+    logger.info(f"Creating carousel with {len(image_urls)} images")
+    logger.info(f"Image URLs: {image_urls}")
+    
     service = InstagramCarouselService()
+    
+    # Explicitly check token
+    try:
+        service._validate_token(force_check=True)
+        logger.info("Instagram token validated successfully")
+    except Exception as e:
+        logger.error(f"Token validation failed: {str(e)}")
+        raise AuthenticationError(f"Token validation failed: {str(e)}")
     
     # Truncate caption if needed
     if len(caption) > 2200:
