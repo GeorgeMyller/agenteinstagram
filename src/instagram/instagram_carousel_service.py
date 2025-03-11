@@ -345,12 +345,16 @@ class InstagramCarouselService(BaseInstagramService):
         """Verifica o status do container até estar pronto ou falhar."""
         if self.token_expires_at and time.time() > self.token_expires_at - 60:
             self._refresh_token()
-
+            
+        # Adiciona um atraso inicial para dar tempo ao Instagram processar o container
+        logger.info("Aguardando processamento inicial do container...")
+        time.sleep(15)  # Atraso inicial de 15 segundos
+        
         for attempt in range(max_attempts):
             try:
+                # Requisição simplificada - menos campos diminui chance de rejeição
                 params = {
-                    'fields': 'status_code,status,publishing_to_ig',
-                    'access_token': self.access_token  # Ensure access token is included
+                    'fields': 'status_code'
                 }
                 
                 data = self._make_request('GET', f"{container_id}", params=params)
@@ -358,24 +362,12 @@ class InstagramCarouselService(BaseInstagramService):
                     logger.warning(f"Failed to get container status (attempt {attempt + 1}/{max_attempts})")
                     time.sleep(delay)
                     continue
-
-                status_code = data.get('status_code', '')
-                status_details = data.get('status', {})
-                publishing_to_ig = data.get('publishing_to_ig', False)
                 
-                # Log detailed status information
-                logger.info(f"Container status check (attempt {attempt + 1}/{max_attempts}):")
-                logger.info(f"  - Status code: {status_code}")
-                logger.info(f"  - Status details: {status_details}")
-                logger.info(f"  - Publishing to IG: {publishing_to_ig}")
-
-                if status_code == 'FINISHED' and not publishing_to_ig:
+                status_code = data.get('status_code', '')
+                logger.info(f"Container status check (attempt {attempt + 1}/{max_attempts}): {status_code}")
+                
+                if status_code == 'FINISHED':
                     return status_code
-                    
-                elif status_code == 'FINISHED' and publishing_to_ig:
-                    logger.info("Container is ready but still being processed by Instagram")
-                    time.sleep(delay)
-                    continue
                     
                 elif status_code == 'IN_PROGRESS':
                     # Container still processing, continue waiting
@@ -383,22 +375,14 @@ class InstagramCarouselService(BaseInstagramService):
                     continue
                     
                 elif status_code == 'ERROR':
-                    # Extract detailed error information
-                    error_code = status_details.get('error_code')
-                    error_message = status_details.get('error_message')
-                    error_type = status_details.get('error_type')
+                    logger.error(f"Container failed with error status")
                     
-                    logger.error(f"Container failed with error:")
-                    logger.error(f"  - Error code: {error_code}")
-                    logger.error(f"  - Error type: {error_type}")
-                    logger.error(f"  - Message: {error_message}")
-                    
-                    # Check for specific error types that might be recoverable
-                    if error_code in [2207024, 2207026]:  # Media processing errors
-                        if attempt < max_attempts - 1:
-                            logger.info("Media processing error, will retry...")
-                            time.sleep(delay * 2)  # Double delay for processing errors
-                            continue
+                    # Tenta obter detalhes do erro em uma chamada separada
+                    try:
+                        error_details = self._make_request('GET', f"{container_id}", params={'fields': 'status'})
+                        logger.error(f"Error details: {error_details}")
+                    except Exception as detail_err:
+                        logger.error(f"Could not get error details: {str(detail_err)}")
                     
                     return 'ERROR'
                     
@@ -413,20 +397,43 @@ class InstagramCarouselService(BaseInstagramService):
                         time.sleep(delay)
                         continue
                     return 'UNKNOWN'
-
+                    
             except RateLimitError as e:
                 logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
                 time.sleep(e.retry_seconds)
+                
             except InstagramAPIError as e:
-                if e.response.status_code == 400:
-                    logger.error(f"Bad Request: {e.response.text}")
-                    return 'BAD_REQUEST'
-                logger.error(f"Instagram API error while checking status: {e}")
-                time.sleep(delay)
+                logger.error(f"API Error when checking container status: {str(e)}")
+                
+                # Se for um erro 400 Bad Request, tente com um conjunto diferente de campos
+                if 'Bad Request' in str(e):
+                    logger.warning("Trying alternative approach due to 400 error...")
+                    try:
+                        # Tente uma abordagem ainda mais simples
+                        time.sleep(5)
+                        alternative_data = self._make_request('GET', f"{container_id}", params={})
+                        logger.info(f"Alternative check response: {alternative_data}")
+                        
+                        # Se conseguiu acessar o container de alguma forma, considere pronto após alguns checks
+                        if alternative_data and (attempt > 3):
+                            logger.info("Container appears to be accessible, considering it ready")
+                            return 'FINISHED'
+                    except Exception as alt_err:
+                        logger.error(f"Alternative check also failed: {str(alt_err)}")
+                
+                if attempt < max_attempts - 1:
+                    # Aumento no tempo de espera para erros 400
+                    backoff_time = delay * 2
+                    logger.info(f"Will retry after {backoff_time}s...")
+                    time.sleep(backoff_time)
+                    continue
+                
+                return 'BAD_REQUEST'
+                
             except Exception as e:
                 logger.error(f"Error checking container status: {str(e)}")
                 time.sleep(delay)
-
+                
         logger.error(f"Container status check timed out after {max_attempts} attempts.")
         return 'TIMEOUT'
 
@@ -498,33 +505,88 @@ class InstagramCarouselService(BaseInstagramService):
             time.sleep(wait_time)
             
         max_attempts = 3
-        base_delay = 30  # Increased from 15 to 30 seconds
+        base_delay = 30  # Aumentado para 30 segundos
         
         for attempt in range(max_attempts):
             try:
                 # Create carousel container
+                logger.info(f"Tentativa {attempt+1}/{max_attempts} de criar carrossel")
                 container_id = self.create_carousel_container(media_urls, caption)
                 if not container_id:
                     logger.error("Failed to create carousel container")
+                    if attempt < max_attempts - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                        time.sleep(delay)
+                        continue
                     return None
+                
+                # Atraso maior após criação bem-sucedida do container
+                logger.info(f"Container criado com sucesso: {container_id}. Aguardando processamento...")
+                time.sleep(20)  # Atraso após criação do container
                 
                 # Wait for container to be ready
                 status = self.wait_for_container_status(container_id)
+                
+                # Se o status não for FINISHED mas também não for um erro crítico, 
+                # tente publicar mesmo assim após algumas tentativas
                 if status != 'FINISHED':
-                    logger.error(f"Container not ready. Final status: {status}")
-                    return None
+                    if attempt >= 1 and status == 'BAD_REQUEST':
+                        # Após a primeira tentativa, se tivermos BAD_REQUEST no status,
+                        # tente publicar mesmo assim (pode ser um problema de verificação)
+                        logger.warning(f"Status não é FINISHED ({status}), mas tentando publicar mesmo assim após múltiplas tentativas")
+                        time.sleep(30)  # Espera adicional antes de tentar publicar
+                    else:
+                        logger.error(f"Container not ready. Final status: {status}")
+                        if attempt < max_attempts - 1:
+                            delay = base_delay * (2 ** attempt)
+                            logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                            time.sleep(delay)
+                            continue
+                        return None
                 
                 # Add longer delay before publishing
                 logger.info("Adding extra delay before publishing...")
-                time.sleep(20)  # Increased from 10 to 20 seconds
+                time.sleep(30)  # Aumentado para 30 segundos
                 
                 # Publish carousel
-                return self.publish_carousel(container_id)
+                result = None
+                try:
+                    # Tenta publicar
+                    result = self.publish_carousel(container_id)
+                except InstagramAPIError as e:
+                    logger.error(f"Erro ao publicar carrossel: {str(e)}")
+                    
+                    # Se o erro for de rate limit, espere e tente novamente
+                    if "too many requests" in str(e).lower() or "rate limit" in str(e).lower():
+                        if attempt < max_attempts - 1:
+                            delay = base_delay * (3 ** attempt)  # Backoff mais agressivo
+                            logger.warning(f"Rate limit detectado. Aguardando {delay}s...")
+                            time.sleep(delay)
+                            continue
+                    
+                    # Para outros erros, se não for a última tentativa, tente novamente
+                    if attempt < max_attempts - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                        time.sleep(delay)
+                        continue
+                    raise
+                
+                if result:
+                    return result
+                
+                # Se chegou aqui, a publicação falhou mas não lançou exceção
+                if attempt < max_attempts - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.info(f"Falha na publicação. Aguardando {delay}s antes da próxima tentativa...")
+                    time.sleep(delay)
                 
             except PermissionError as e:
                 if "request limit reached" in str(e).lower():
                     self._handle_rate_limit()
-                    continue
+                    if attempt < max_attempts - 1:
+                        continue
                 raise
                 
             except Exception as e:

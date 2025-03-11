@@ -173,6 +173,7 @@ class InstagramPostService(BaseInstagramService):
         }
 
         try:
+            logger.info(f"Creating media container with params: {params}")  # Log params
             result = self._make_request('POST', f"{self.ig_user_id}/media", data=params)
             if result and 'id' in result:
                 container_id = result['id']
@@ -240,6 +241,7 @@ class InstagramPostService(BaseInstagramService):
         }
 
         try:
+            logger.info(f"Publishing media with params: {params}")  # Log params
             result = self._make_request('POST', f"{self.ig_user_id}/media_publish", data=params)
             
             if result and 'id' in result:
