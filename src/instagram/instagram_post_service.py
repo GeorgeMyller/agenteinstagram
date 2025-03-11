@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import random
+import traceback
 from datetime import datetime
 from dotenv import load_dotenv
 from imgurpython import ImgurClient
@@ -154,8 +155,40 @@ class InstagramPostService(BaseInstagramService):
                     processed_containers.append(container_id)
                     
             except Exception as e:
-                logger.error(f"Error processing pending container {container_id}: {e}")
-                processed_containers.append(container_id)
+                # Registra detalhes completos do erro para diagnóstico
+                error_details = traceback.format_exc()
+                logger.error(f"Error processing pending container {container_id}: {e}\n{error_details}")
+                
+                # Verifica se, apesar do erro, a publicação foi bem-sucedida
+                try:
+                    # Tenta verificar se o container ainda existe no Instagram
+                    status = self.check_container_status(container_id)
+                    
+                    # Se o status for None ou um código de erro, considera que falhou
+                    if status is None or status in ['ERROR', 'EXPIRED', 'TIMEOUT']:
+                        logger.error(f"Container {container_id} falhou e será removido da lista de pendentes.")
+                        processed_containers.append(container_id)
+                    else:
+                        # Se o status for FINISHED, talvez tenha sido publicado com sucesso mas tivemos um erro depois
+                        # ou se o status for IN_PROGRESS, podemos deixar para uma próxima tentativa
+                        logger.info(f"Apesar do erro, o container {container_id} ainda tem status {status}. Será mantido na lista de pendentes.")
+                        
+                        # Incrementa o contador de tentativas para não tentar indefinidamente
+                        retry_count = container_data.get('retry_count', 0) + 1
+                        self.pending_containers[container_id].update({
+                            'retry_count': retry_count,
+                            'last_error': str(e),
+                            'last_attempt': datetime.now().isoformat()
+                        })
+                        
+                        # Se já tentamos muitas vezes, remove de qualquer forma
+                        if retry_count >= 5:
+                            logger.error(f"Too many retry attempts for container {container_id}, giving up")
+                            processed_containers.append(container_id)
+                except Exception as check_err:
+                    # Se não conseguimos nem verificar o status, é melhor remover
+                    logger.error(f"Falha ao verificar status do container {container_id} após erro: {check_err}")
+                    processed_containers.append(container_id)
         
         # Remove processed containers from pending list
         for container_id in processed_containers:
@@ -256,7 +289,7 @@ class InstagramPostService(BaseInstagramService):
                 self._update_stats(success=True)
                 return post_id
             
-            logger.error("Could not publish media")
+            logger.error(f"Could not publish media. Response: {result}")
             self._update_stats(success=False)
             return None
             
