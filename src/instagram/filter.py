@@ -62,7 +62,7 @@ class FilterImage:
             border_image = Image.open(border_path)
 
             # Redimensionar a borda para corresponder ao tamanho da imagem original
-            border_image = border_image.resize(original_image.size, Image.ANTIALIAS)
+            border_image = border_image.resize(original_image.size, Image.LANCZOS)
 
             # Aplicar a borda à imagem original
             bordered_image = ImageOps.fit(original_image, border_image.size)

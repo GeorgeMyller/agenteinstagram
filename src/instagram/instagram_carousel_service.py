@@ -70,8 +70,8 @@ class InstagramCarouselService(BaseInstagramService):
     def __init__(self, access_token=None, ig_user_id=None):
         load_dotenv()
         access_token = access_token or os.getenv('INSTAGRAM_API_KEY')
-        ig_user_id = ig_user_id or os.getenv("INSTAGRAM_ACCOUNT_ID")
-        
+        ig_user_id = ig_user_id or os.getenv('INSTAGRAM_ACCOUNT_ID')
+        self.instagram_account_id = ig_user_id  # Add this line
         if not access_token or not ig_user_id:
             raise ValueError(
                 "Credenciais incompletas. Defina INSTAGRAM_API_KEY e "

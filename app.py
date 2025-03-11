@@ -11,6 +11,7 @@ import traceback
 import threading
 import re
 from datetime import datetime
+import asyncio  # Adicionar import do asyncio para suportar await
 
 from src.utils.paths import Paths  # Add this import
 
@@ -25,7 +26,7 @@ from src.services.send import sender #Para enviar mensagens de volta
 from src.instagram.describe_video_tool import VideoDescriber  # Importar a classe VideoDescriber
 from src.instagram.describe_carousel_tool import CarouselDescriber  # Importar a classe CarouselDescriber
 from src.instagram.crew_post_instagram import InstagramPostCrew  # Importar a classe InstagramPostCrew
-from src.instagram.image_validator import InstagramImageValidator  # Add this import
+from src.instagram.carousel_mode_handler import CarouselModeHandler  # Importar a classe CarouselModeHandler atualizada
 
 app = Flask(__name__)
 
@@ -45,18 +46,11 @@ if not os.path.exists(border_image_path):
     print(f"⚠️ Aviso: Imagem de borda não encontrada em {border_image_path}")
     border_image_path = None
 
-# Variáveis de estado para o modo carrossel
-is_carousel_mode = False
-carousel_images = []
-carousel_start_time = 0
-carousel_caption = ""
-CAROUSEL_TIMEOUT = 300  # 5 minutos em segundos
-MAX_CAROUSEL_IMAGES = 10
+# Instanciar o CarouselModeHandler para gerenciar o modo carrossel
+carousel_handler = CarouselModeHandler()
 
 @app.route("/messages-upsert", methods=['POST'])
 def webhook():
-    global is_carousel_mode, carousel_images, carousel_start_time, carousel_caption
-
     try:
         data = request.get_json()
 
@@ -73,146 +67,56 @@ def webhook():
         # Iniciar modo carrossel com comando "carrossel" ou "carousel"
         carousel_command = re.match(r'^carrosse?l\s*(.*)', texto.lower() if texto else "") if texto else None
         if carousel_command:
-            is_carousel_mode = True
-            carousel_images = []
-            carousel_caption = carousel_command.group(1).strip() if carousel_command.group(1) else ""
-            carousel_start_time = time.time()
-            
-            instructions = (
-                "🎠 *Modo carrossel ativado!*\n\n"
-                "- Envie as imagens que deseja incluir no carrossel (2-10 imagens)\n"
-                "- Para definir uma legenda, envie \"legenda: sua legenda aqui\"\n"
-                "- Quando terminar, envie \"postar\" para publicar o carrossel\n"
-                "- Para cancelar, envie \"cancelar\"\n\n"
-                "O modo carrossel será desativado automaticamente após 5 minutos de inatividade."
-            )
-            
-            if carousel_caption:
-                sender.send_text(number=msg.remote_jid, 
-                                msg=f"{instructions}\n\nLegenda inicial definida: {carousel_caption}")
-            else:
-                sender.send_text(number=msg.remote_jid, msg=instructions)
-            
+            initial_caption = carousel_command.group(1).strip() if carousel_command.group(1) else ""
+            instructions = carousel_handler.activate(initial_caption, border_image_path)
+            sender.send_text(number=msg.remote_jid, msg=instructions)
             return jsonify({"status": "Modo carrossel ativado"}), 200
 
-        if is_carousel_mode:
+        if carousel_handler.is_active:
             # Recebimento de imagens para o carrossel
             if msg.message_type == msg.TYPE_IMAGE:
-                if len(carousel_images) >= MAX_CAROUSEL_IMAGES:
-                    sender.send_text(number=msg.remote_jid, 
-                                    msg=f"⚠️ Limite máximo de {MAX_CAROUSEL_IMAGES} imagens atingido! Envie \"postar\" para publicar.")
-                    return jsonify({"status": "max images reached"}), 200
-                    
-                image_path = ImageDecodeSaver.process(msg.image_base64)
-                carousel_images.append(image_path)
-                
-                # Verificar se já temos pelo menos 2 imagens para habilitar o comando "postar"
-                if len(carousel_images) >= 2:
-                    sender.send_text(number=msg.remote_jid, 
-                                    msg=f"✅ Imagem {len(carousel_images)} adicionada ao carrossel.\n"
-                                        f"Você pode enviar mais imagens ou enviar \"postar\" para publicar.")
-                else:
-                    sender.send_text(number=msg.remote_jid, 
-                                    msg=f"✅ Imagem {len(carousel_images)} adicionada ao carrossel.\n"
-                                        f"Envie pelo menos mais uma imagem para completar o carrossel.")
-                
-                # Resetar o timer de timeout a cada imagem recebida
-                carousel_start_time = time.time()
-                return jsonify({"status": f"Imagem adicionada ao carrossel"}), 200
+                success, message = carousel_handler.add_image(msg.image_base64)
+                sender.send_text(number=msg.remote_jid, msg=message)
+                return jsonify({"status": "Imagem adicionada ao carrossel" if success else "Limite de imagens atingido"}), 200
 
             # Comando para definir legenda
             elif texto and texto.lower().startswith("legenda:"):
-                carousel_caption = texto[8:].strip()  # Remove "legenda:" e espaços em branco
-                sender.send_text(number=msg.remote_jid, 
-                                msg=f"✅ Legenda definida: \"{carousel_caption}\"")
-                carousel_start_time = time.time()  # Resetar timer
+                caption = texto[8:].strip()  # Remove "legenda:" e espaços em branco
+                message = carousel_handler.set_caption(caption)
+                sender.send_text(number=msg.remote_jid, msg=message)
                 return jsonify({"status": "Legenda definida"}), 200
 
             # Comando para publicar o carrossel
             elif texto and texto.lower() == "postar":
-                if len(carousel_images) < 2:
-                    sender.send_text(number=msg.remote_jid, 
-                                    msg=f"⚠️ São necessárias pelo menos 2 imagens para criar um carrossel. "
-                                        f"Você tem apenas {len(carousel_images)} imagem.")
+                if not carousel_handler.can_post():
+                    message = f"⚠️ São necessárias pelo menos 2 imagens para criar um carrossel. Você tem apenas {len(carousel_handler.images)} imagem."
+                    sender.send_text(number=msg.remote_jid, msg=message)
                     return jsonify({"status": "not enough images"}), 200
                 
                 try:
-                    # Validar as imagens segundo os requisitos do Instagram
-                    is_valid, validation_msg = InstagramImageValidator.validate_for_carousel(carousel_images)
-                    if not is_valid:
-                        sender.send_text(number=msg.remote_jid, 
-                                        msg=f"⚠️ Erro de validação das imagens: {validation_msg}")
-                        return jsonify({"status": "validation_error", "message": validation_msg}), 400
-                    
-                    # Se não houver legenda definida, usar uma padrão
-                    caption_to_use = carousel_caption if carousel_caption else ""
-                    
-                    # Gerar descrição automática para as imagens do carrossel
-                    if not caption_to_use:
-                        try:
-                            image_descriptions = CarouselDescriber.describe(carousel_images)
-                            crew = InstagramPostCrew()
-                            inputs_dict = {
-                                "genero": "Neutro",
-                                "caption": image_descriptions,
-                                "describe": image_descriptions,
-                                "estilo": "Divertido, Alegre, Sarcástico e descontraído",
-                                "pessoa": "Terceira pessoa do singular",
-                                "sentimento": "Positivo",
-                                "tamanho": "200 palavras",
-                                "emojs": "sim",
-                                "girias": "sim"
-                            }
-                            caption_to_use = crew.kickoff(inputs=inputs_dict)
-                        except Exception as e:
-                            print(f"Erro ao gerar legenda automática: {str(e)}")
-                            caption_to_use = "Carrossel de imagens publicado via webhook"  # Usar uma legenda padrão em caso de erro
-                    
                     sender.send_text(number=msg.remote_jid, 
-                                    msg=f"🔄 Processando carrossel com {len(carousel_images)} imagens...")
+                                    msg=f"🔄 Processando carrossel com {len(carousel_handler.images)} imagens...")
                     
-                    # Aplicar bordas às imagens do carrossel (apenas se a imagem de borda existir)
-                    bordered_images = []
-                    for image_path in carousel_images:
-                        try:
-                            # Primeiro verificar e redimensionar se necessário
-                            resized_image = InstagramImageValidator.resize_for_instagram(image_path)
+                    # Usar o event loop para chamar o método assíncrono post()
+                    success, message, job_id = asyncio.run(carousel_handler.post())
+                    sender.send_text(number=msg.remote_jid, msg=message)
+                    
+                    if success and job_id:
+                        # Verificar o status do trabalho após enfileiramento
+                        job_status = InstagramSend.check_post_status(job_id)
+                        if job_status:
+                            status_text = f"📊 Status do trabalho {job_id}:\n"
+                            status_text += f"• Status: {job_status.get('status', 'Desconhecido')}\n"
+                            status_text += f"• Tipo: {job_status.get('content_type', 'Desconhecido')}\n"
+                            status_text += f"• Criado em: {job_status.get('created_at', 'Desconhecido')}\n"
                             
-                            # Aplicar borda apenas se a imagem de borda existir
-                            if border_image_path and os.path.exists(border_image_path):
-                                bordered_image_path = FilterImage.apply_border(resized_image, border_image_path)
-                                bordered_images.append(bordered_image_path)
-                            else:
-                                # Se não existir, usar a imagem redimensionada diretamente
-                                bordered_images.append(resized_image)
-                        except Exception as e:
-                            print(f"Erro ao processar imagem {image_path}: {str(e)}")
-                            bordered_images.append(image_path)  # Usar a imagem original em caso de erro
-                    
-                    # Enfileirar o carrossel para publicação
-                    job_id = InstagramSend.queue_carousel(bordered_images, caption_to_use)
-                    
-                    sender.send_text(number=msg.remote_jid, 
-                                    msg=f"✅ Carrossel enfileirado com sucesso!\n"
-                                        f"ID do trabalho: {job_id}\n"
-                                        f"Número de imagens: {len(bordered_images)}\n"
-                                        f"Você pode verificar o status usando \"status {job_id}\"")
-                    
-                    # Verificar o status do trabalho após enfileiramento
-                    job_status = InstagramSend.check_post_status(job_id)
-                    if job_status:
-                        status_text = f"📊 Status do trabalho {job_id}:\n"
-                        status_text += f"• Status: {job_status.get('status', 'Desconhecido')}\n"
-                        status_text += f"• Tipo: {job_status.get('content_type', 'Desconhecido')}\n"
-                        status_text += f"• Criado em: {job_status.get('created_at', 'Desconhecido')}\n"
-                        
-                        if job_status.get('result') and job_status['result'].get('permalink'):
-                            status_text += f"• Link: {job_status['result']['permalink']}"
-                        
-                        sender.send_text(number=msg.remote_jid, msg=status_text)
-                    else:
-                        sender.send_text(number=msg.remote_jid, 
-                                        msg=f"❌ Trabalho {job_id} não encontrado")
+                            if job_status.get('result') and job_status['result'].get('permalink'):
+                                status_text += f"• Link: {job_status['result']['permalink']}"
+                            
+                            sender.send_text(number=msg.remote_jid, msg=status_text)
+                        else:
+                            sender.send_text(number=msg.remote_jid, 
+                                            msg=f"❌ Trabalho {job_id} não encontrado")
                     
                 except Exception as e:
                     print(f"Erro ao enfileirar carrossel: {e}")
@@ -220,26 +124,20 @@ def webhook():
                                     msg=f"❌ Erro ao enfileirar carrossel: {str(e)}")
                     return jsonify({"status": "error", "message": "Erro ao enfileirar carrossel"}), 500
                 finally:
-                    is_carousel_mode = False  # Resetar o modo carrossel
-                    carousel_images = []
-                    carousel_caption = ""
+                    carousel_handler.deactivate()  # Resetar o modo carrossel
                 return jsonify({"status": "Carrossel processado e enfileirado"}), 200
 
             # Comando para cancelar o carrossel
             elif texto and texto.lower() == "cancelar":
-                is_carousel_mode = False
-                carousel_images = []
-                carousel_caption = ""
+                carousel_handler.deactivate()
                 sender.send_text(number=msg.remote_jid, 
                                 msg="🚫 Modo carrossel cancelado. Todas as imagens foram descartadas.")
                 return jsonify({"status": "Carrossel cancelado"}), 200
                 
             # Verificar timeout
-            elif time.time() - carousel_start_time > CAROUSEL_TIMEOUT:
+            elif carousel_handler.is_timed_out():
                 # Timeout, sair do modo carrossel
-                is_carousel_mode = False
-                carousel_images = []
-                carousel_caption = ""
+                carousel_handler.deactivate()
                 sender.send_text(number=msg.remote_jid, 
                                 msg="⏱️ Timeout do carrossel. Envie 'carrossel' novamente para iniciar.")
                 return jsonify({"status": "Timeout do carrossel"}), 200
@@ -266,11 +164,9 @@ def webhook():
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"❌ Erro ao verificar status: {str(e)}")
                 
-                carousel_start_time = time.time()  # Resetar timer
                 return jsonify({"status": "Status verificado"}), 200
 
             #Ignorar outras mensagens, se estiver em modo carrossel
-            carousel_start_time = time.time()  # Resetar timer para qualquer interação
             return jsonify({"status": "processed (carousel mode)"}), 200
 
         # Verificar comando de status mesmo fora do modo carrossel
@@ -494,32 +390,25 @@ def start_periodic_cleanup(temp_dir, interval_seconds=3600):
     cleanup_thread = threading.Thread(target=cleanup_task, daemon=True)
     cleanup_thread.start()
 
-# Add these new debug endpoints
+# Atualizar endpoint para usar o CarouselModeHandler
 @app.route("/debug/carousel/clear", methods=['POST'])
 def clear_carousel_cache():
     """Clear any cached carousel state"""
     try:
-        # Reset global carousel state variables
-        global is_carousel_mode, carousel_images, carousel_start_time, carousel_caption
+        # Verificar se o modo carrossel estava ativo
+        was_active = carousel_handler.is_active
+        image_count = len(carousel_handler.images)
         
-        # Save previous state for logging
-        prev_state = {
-            "was_carousel_mode": is_carousel_mode,
-            "image_count": len(carousel_images)
-        }
-        
-        is_carousel_mode = False
-        carousel_images = []
-        carousel_caption = ""
-        carousel_start_time = 0
-        
-        # Also look for any temporary media files that might be used by carousel
-        # (This is optional but can help clear filesystem clutter)
+        # Desativar o modo carrossel
+        carousel_handler.deactivate()
         
         return jsonify({
             "status": "success", 
             "message": "Carousel state cleared",
-            "previous_state": prev_state
+            "previous_state": {
+                "was_carousel_mode": was_active,
+                "image_count": image_count
+            }
         })
     except Exception as e:
         import traceback
@@ -534,13 +423,13 @@ def get_carousel_status():
     """Get current carousel state for debugging"""
     try:
         status = {
-            "is_carousel_mode": is_carousel_mode,
-            "image_count": len(carousel_images),
-            "image_paths": carousel_images if len(carousel_images) < 10 else "Too many to display",
-            "caption": carousel_caption,
-            "time_in_mode": time.time() - carousel_start_time if carousel_start_time > 0 else 0,
-            "timeout_seconds": CAROUSEL_TIMEOUT,
-            "will_timeout_in": CAROUSEL_TIMEOUT - (time.time() - carousel_start_time) if carousel_start_time > 0 else "N/A"
+            "is_carousel_mode": carousel_handler.is_active,
+            "image_count": len(carousel_handler.images),
+            "image_paths": carousel_handler.images if len(carousel_handler.images) < 10 else "Too many to display",
+            "caption": carousel_handler.caption,
+            "time_in_mode": time.time() - carousel_handler.start_time if carousel_handler.start_time > 0 else 0,
+            "timeout_seconds": carousel_handler.TIMEOUT,
+            "will_timeout_in": carousel_handler.TIMEOUT - (time.time() - carousel_handler.start_time) if carousel_handler.start_time > 0 else "N/A"
         }
         
         return jsonify(status)

@@ -1,11 +1,14 @@
-from flask import Flask, jsonify, render_template
-import threading
-import time
-import os
-import psutil
-from datetime import datetime
-import logging
-import json
+# Este arquivo implementa um servidor de monitoramento para acompanhar o status da aplicação
+
+# Importando bibliotecas necessárias
+from flask import Flask, jsonify, render_template  # Para criar o servidor web e manipular requisições
+import threading  # Para executar tarefas em paralelo
+import time  # Para manipulação de tempo
+import os  # Para operações com sistema de arquivos
+import psutil  # Para obter estatísticas do sistema
+from datetime import datetime  # Para manipulação de datas e horários
+import logging  # Para registrar logs
+import json  # Para trabalhar com dados em formato JSON
 
 # Configuração básica de logging
 logger = logging.getLogger(__name__)

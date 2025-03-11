@@ -10,3 +10,4 @@ class Paths:
     BOOK_AGENTS = os.path.join(ROOT_DIR,'book_agents')
     ROOT_IMAGES = os.path.join(ROOT_DIR,'images')
     TEMP = os.path.join(ROOT_DIR,'temp')
+    ASSETS_DIR = os.path.join(ROOT_DIR,'assets')  # Added ASSETS_DIR attribute
