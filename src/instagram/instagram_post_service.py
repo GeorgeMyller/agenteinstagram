@@ -17,7 +17,24 @@ logger = logging.getLogger('InstagramPostService')
 class InstagramPostService(BaseInstagramService):
     """Service for posting images to Instagram."""
 
+    # Cache para evitar operações de I/O frequentes
+    _instance = None
+    _state_cache = None
+    _last_state_save = 0
+    _state_save_interval = 60  # Salvar estado a cada 60 segundos no máximo
+
+    def __new__(cls, access_token=None, ig_user_id=None):
+        # Padrão Singleton para evitar múltiplas instanciações e carregamentos de estado
+        if cls._instance is None:
+            cls._instance = super(InstagramPostService, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self, access_token=None, ig_user_id=None):
+        # Evita reinicialização se já inicializado
+        if getattr(self, '_initialized', False):
+            return
+            
         load_dotenv()
         access_token = access_token or (
             os.getenv('INSTAGRAM_API_KEY') or
@@ -42,11 +59,24 @@ class InstagramPostService(BaseInstagramService):
         }
         self._load_state()
         
-        # Attempt to process any pending containers from previous runs
-        self._process_pending_containers()
+        # Processamento de containers pendentes sob demanda em vez de automático
+        # (será chamado explicitamente quando necessário)
+        # self._process_pending_containers()
+        
+        self._initialized = True
 
     def _load_state(self):
         """Load persisted state from file"""
+        # Use o cache se disponível
+        if self.__class__._state_cache is not None:
+            self.pending_containers = self.__class__._state_cache.get('pending_containers', {})
+            self.stats = self.__class__._state_cache.get('stats', {
+                'successful_posts': 0,
+                'failed_posts': 0,
+                'rate_limited_posts': 0
+            })
+            return
+            
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
@@ -57,6 +87,11 @@ class InstagramPostService(BaseInstagramService):
                         'failed_posts': 0,
                         'rate_limited_posts': 0
                     })
+                    # Armazenar no cache
+                    self.__class__._state_cache = {
+                        'pending_containers': self.pending_containers,
+                        'stats': self.stats
+                    }
                     logger.info(f"Loaded {len(self.pending_containers)} pending containers from state file")
         except Exception as e:
             logger.error(f"Error loading state: {e}")
@@ -66,17 +101,43 @@ class InstagramPostService(BaseInstagramService):
                 'failed_posts': 0,
                 'rate_limited_posts': 0
             }
+            # Inicializar o cache com valores vazios
+            self.__class__._state_cache = {
+                'pending_containers': self.pending_containers,
+                'stats': self.stats
+            }
 
     def _save_state(self):
         """Save current state to file"""
+        current_time = time.time()
+        
+        # Só salva o estado se passou tempo suficiente desde o último salvamento
+        if current_time - self.__class__._last_state_save < self.__class__._state_save_interval:
+            # Atualiza o cache sem salvar no disco
+            self.__class__._state_cache = {
+                'pending_containers': self.pending_containers,
+                'stats': self.stats
+            }
+            return
+            
         try:
             state = {
                 'pending_containers': self.pending_containers,
                 'stats': self.stats,
                 'last_updated': datetime.now().isoformat()
             }
+            
+            # Atualiza o cache
+            self.__class__._state_cache = {
+                'pending_containers': self.pending_containers,
+                'stats': self.stats
+            }
+            
             with open(self.state_file, 'w') as f:
                 json.dump(state, f, indent=2)
+            
+            # Atualiza o timestamp do último salvamento
+            self.__class__._last_state_save = current_time
             logger.info(f"Saved state with {len(self.pending_containers)} pending containers")
         except Exception as e:
             logger.error(f"Error saving state: {e}")
@@ -89,17 +150,33 @@ class InstagramPostService(BaseInstagramService):
             self.stats['rate_limited_posts'] += 1
         else:
             self.stats['failed_posts'] += 1
-        self._save_state()
+        # Só atualiza o cache, não salva no disco a cada atualização
+        self.__class__._state_cache = {
+            'pending_containers': self.pending_containers,
+            'stats': self.stats
+        }
 
-    def _process_pending_containers(self):
-        """Process any pending containers from previous runs"""
+    def _process_pending_containers(self, limit=5):
+        """Process any pending containers from previous runs with limit para evitar bloqueios longos"""
         if not self.pending_containers:
             return
             
         logger.info(f"Found {len(self.pending_containers)} pending containers to process")
         processed_containers = []
+        processed_count = 0
         
-        for container_id, container_data in list(self.pending_containers.items()):
+        # Ordenar por próxima tentativa para processar primeiro os que já estão prontos
+        sorted_containers = sorted(
+            self.pending_containers.items(), 
+            key=lambda x: float(x[1].get('next_attempt_time', 0))
+        )
+        
+        for container_id, container_data in sorted_containers:
+            # Limitar o número de containers processados de uma vez
+            if processed_count >= limit:
+                logger.info(f"Reached limit of {limit} containers to process at once")
+                break
+                
             try:
                 # Check if we're still within the backoff period
                 if container_data.get('next_attempt_time'):
@@ -120,6 +197,7 @@ class InstagramPostService(BaseInstagramService):
                 # Attempt to publish
                 logger.info(f"Attempting to publish pending container: {container_id}")
                 post_id = self.publish_media(container_id)
+                processed_count += 1
                 
                 if post_id:
                     logger.info(f"Successfully published pending container! ID: {post_id}")
@@ -191,11 +269,14 @@ class InstagramPostService(BaseInstagramService):
                     processed_containers.append(container_id)
         
         # Remove processed containers from pending list
-        for container_id in processed_containers:
-            self.pending_containers.pop(container_id, None)
+        if processed_containers:
+            for container_id in processed_containers:
+                self.pending_containers.pop(container_id, None)
+                
+            # Save updated state
+            self._save_state()
             
-        # Save updated state
-        self._save_state()
+        return len(processed_containers)
 
     def create_media_container(self, image_url, caption):
         """Creates a media container for the post."""
@@ -237,7 +318,7 @@ class InstagramPostService(BaseInstagramService):
             logger.error(f"Failed to check container status: {e}")
             raise
 
-    def wait_for_container_status(self, container_id, max_attempts=30, delay=10):
+    def wait_for_container_status(self, container_id, max_attempts=10, delay=10):
         """Aguarda o container estar pronto, com backoff exponencial."""
         for attempt in range(max_attempts):
             try:
@@ -249,20 +330,18 @@ class InstagramPostService(BaseInstagramService):
                     logger.error(f"Container falhou com status: {status}")
                     return status
                 
-                # Usar backoff exponencial como no ReelsPublisher
-                backoff_time = delay * (1.5 ** attempt) + random.uniform(0, 3)
-                max_backoff = 45  # Limitar o tempo máximo de espera
-                backoff_time = min(backoff_time, max_backoff)
+                # Usar backoff exponencial com tempo máximo reduzido para não bloquear por muito tempo
+                backoff_time = min(delay * (1.5 ** attempt) + random.uniform(0, 3), 30)
                 
                 logger.info(f"Tentativa {attempt + 1}/{max_attempts}. Aguardando {backoff_time:.1f}s...")
                 time.sleep(backoff_time)
                 
             except RateLimitError as e:
                 logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
-                time.sleep(e.retry_seconds)
+                time.sleep(min(e.retry_seconds, 30))  # Limitar o tempo máximo de espera para não bloquear a thread
             except Exception as e:
                 logger.error(f"Error checking container status: {str(e)}")
-                time.sleep(delay)
+                time.sleep(min(delay, 10))  # Tempo máximo limitado
         
         logger.error(f"Container status check timed out after {max_attempts} attempts.")
         return 'TIMEOUT'
@@ -340,6 +419,12 @@ class InstagramPostService(BaseInstagramService):
         logger.info("Starting Instagram image publication...")
 
         try:
+            # Processar periodicamente containers pendentes (background tasks)
+            try:
+                self._process_pending_containers(limit=1)
+            except Exception as e:
+                logger.warning(f"Error processing pending containers: {e}")
+
             # 1. Criar container
             container_id = self.create_media_container(image_url, caption)
             if not container_id:
@@ -348,7 +433,7 @@ class InstagramPostService(BaseInstagramService):
 
             # 2. Aguardar processamento do container com backoff exponencial
             logger.info("Aguardando processamento do container...")
-            status = self.wait_for_container_status(container_id)
+            status = self.wait_for_container_status(container_id, max_attempts=8)
             
             if status != 'FINISHED':
                 logger.error(f"Processamento da imagem falhou com status: {status}")
@@ -384,6 +469,10 @@ class InstagramPostService(BaseInstagramService):
             }
             
             logger.info(f"Foto publicada com sucesso! ID: {post_id}")
+            
+            # Forçar salvamento do estado após sucessos
+            self._save_state()
+            
             return result
             
         except Exception as e:
@@ -396,6 +485,12 @@ class InstagramPostService(BaseInstagramService):
         """Returns a list of pending posts"""
         current_time = time.time()
         result = []
+        
+        # Processar uma quantidade pequena de containers pendentes em background
+        try:
+            self._process_pending_containers(limit=1)
+        except Exception as e:
+            logger.warning(f"Error processing pending containers during get_pending_posts: {e}")
         
         for container_id, data in self.pending_containers.items():
             next_attempt_time = data.get('next_attempt_time', 0)
