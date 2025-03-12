@@ -169,22 +169,23 @@ class InstagramFacade:
             
             # Verificar se temos URLs suficientes
             if len(media_urls) < 2:
-                return {'status': 'error', 'message': f'Número insuficiente de imagens válidas para carrossel. Encontradas: {len(media_urls)}, necessárias: pelo menos 2'}
+                return {
+                    'status': 'error', 
+                    'message': f'Número insuficiente de imagens válidas para carrossel. Encontradas: {len(media_urls)}, necessárias: pelo menos 2'
+                }
             
             # Usar o serviço de carrossel para criar e publicar
-            post_id = self.carousel_service.post_carousel(media_urls, caption)
+            result = self.carousel_service.post_carousel(media_urls, caption)
             
-            if post_id:
-                return {
-                    'status': 'success',
-                    'post_id': post_id
-                }
-            else:
-                return {'status': 'error', 'message': 'Falha ao publicar carrossel'}
+            # Return the result directly since it now has the correct format
+            return result
                 
         except Exception as e:
             logger.error(f"Erro ao postar carrossel: {str(e)}")
-            return {'status': 'error', 'message': str(e)}
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
 
     def post_reels(self, video_path: str, caption: str, share_to_feed: bool = True, hashtags: List[str] = None) -> Dict[str, Any]:
         """Posta um reels no Instagram"""

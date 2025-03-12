@@ -500,112 +500,155 @@ class InstagramCarouselService(BaseInstagramService):
                 
             raise
 
-    def post_carousel(self, media_urls: List[str], caption: str) -> Optional[str]:
+    def post_carousel(self, media_urls: List[str], caption: str) -> Dict[str, Any]:
         """Handles the full flow of creating and publishing a carousel post."""
-        if len(media_urls) < 2 or len(media_urls) > 10:
-            raise ValueError(f"Invalid number of media URLs. Found: {len(media_urls)}, required: 2-10")
+        try:
+            if len(media_urls) < 2 or len(media_urls) > 10:
+                return {
+                    'status': 'error',
+                    'message': f'Invalid number of media URLs. Found: {len(media_urls)}, required: 2-10'
+                }
 
-        if self._rate_limit_state.should_backoff():
-            wait_time = self._rate_limit_state.get_backoff_time()
-            logger.warning(f"Still in backoff period. Waiting {wait_time:.1f} seconds...")
-            time.sleep(wait_time)
+            if self._rate_limit_state.should_backoff():
+                wait_time = self._rate_limit_state.get_backoff_time()
+                logger.warning(f"Still in backoff period. Waiting {wait_time:.1f} seconds...")
+                time.sleep(wait_time)
+                
+            max_attempts = 3
+            base_delay = 30  # Aumentado para 30 segundos
             
-        max_attempts = 3
-        base_delay = 30  # Aumentado para 30 segundos
-        
-        for attempt in range(max_attempts):
-            try:
-                # Create carousel container
-                logger.info(f"Tentativa {attempt+1}/{max_attempts} de criar carrossel")
-                container_id = self.create_carousel_container(media_urls, caption)
-                if not container_id:
-                    logger.error("Failed to create carousel container")
-                    if attempt < max_attempts - 1:
-                        delay = base_delay * (2 ** attempt)
-                        logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
-                        time.sleep(delay)
-                        continue
-                    return None
-                
-                # Atraso maior após criação bem-sucedida do container
-                logger.info(f"Container criado com sucesso: {container_id}. Aguardando processamento...")
-                time.sleep(20)  # Atraso após criação do container
-                
-                # Wait for container to be ready
-                status = self.wait_for_container_status(container_id)
-                
-                # Se o status não for FINISHED mas também não for um erro crítico, 
-                # tente publicar mesmo assim após algumas tentativas
-                if status != 'FINISHED':
-                    if attempt >= 1 and status == 'BAD_REQUEST':
-                        # Após a primeira tentativa, se tivermos BAD_REQUEST no status,
-                        # tente publicar mesmo assim (pode ser um problema de verificação)
-                        logger.warning(f"Status não é FINISHED ({status}), mas tentando publicar mesmo assim após múltiplas tentativas")
-                        time.sleep(30)  # Espera adicional antes de tentar publicar
-                    else:
-                        logger.error(f"Container not ready. Final status: {status}")
+            for attempt in range(max_attempts):
+                try:
+                    # Create carousel container
+                    logger.info(f"Tentativa {attempt+1}/{max_attempts} de criar carrossel")
+                    container_id = self.create_carousel_container(media_urls, caption)
+                    if not container_id:
                         if attempt < max_attempts - 1:
                             delay = base_delay * (2 ** attempt)
                             logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
                             time.sleep(delay)
                             continue
-                        return None
-                
-                # Add longer delay before publishing
-                logger.info("Adding extra delay before publishing...")
-                time.sleep(30)  # Aumentado para 30 segundos
-                
-                # Publish carousel
-                result = None
-                try:
-                    # Tenta publicar
-                    result = self.publish_carousel(container_id)
-                except InstagramAPIError as e:
-                    logger.error(f"Erro ao publicar carrossel: {str(e)}")
+                        return {
+                            'status': 'error',
+                            'message': 'Failed to create carousel container'
+                        }
                     
-                    # Se o erro for de rate limit, espere e tente novamente
-                    if "too many requests" in str(e).lower() or "rate limit" in str(e).lower():
+                    # Atraso maior após criação bem-sucedida do container
+                    logger.info(f"Container criado com sucesso: {container_id}. Aguardando processamento...")
+                    time.sleep(20)  # Atraso após criação do container
+                    
+                    # Wait for container to be ready
+                    status = self.wait_for_container_status(container_id)
+                    
+                    # Se o status não for FINISHED mas também não for um erro crítico, 
+                    # tente publicar mesmo assim após algumas tentativas
+                    if status != 'FINISHED':
+                        if attempt >= 1 and status == 'BAD_REQUEST':
+                            # Após a primeira tentativa, se tivermos BAD_REQUEST no status,
+                            # tente publicar mesmo assim (pode ser um problema de verificação)
+                            logger.warning(f"Status não é FINISHED ({status}), mas tentando publicar mesmo assim após múltiplas tentativas")
+                            time.sleep(30)  # Espera adicional antes de tentar publicar
+                        else:
+                            if attempt < max_attempts - 1:
+                                delay = base_delay * (2 ** attempt)
+                                logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                                time.sleep(delay)
+                                continue
+                            return {
+                                'status': 'error',
+                                'message': f'Container not ready. Final status: {status}'
+                            }
+                    
+                    # Add longer delay before publishing
+                    logger.info("Adding extra delay before publishing...")
+                    time.sleep(30)  # Aumentado para 30 segundos
+                    
+                    # Publish carousel
+                    result = None
+                    try:
+                        # Tenta publicar
+                        result = self.publish_carousel(container_id)
+                    except InstagramAPIError as e:
+                        logger.error(f"Erro ao publicar carrossel: {str(e)}")
+                        
+                        # Se o erro for de rate limit, espere e tente novamente
+                        if "too many requests" in str(e).lower() or "rate limit" in str(e).lower():
+                            if attempt < max_attempts - 1:
+                                delay = base_delay * (3 ** attempt)  # Backoff mais agressivo
+                                logger.warning(f"Rate limit detectado. Aguardando {delay}s...")
+                                time.sleep(delay)
+                                continue
+                            return {
+                                'status': 'error',
+                                'message': 'Rate limit exceeded'
+                            }
+                        
+                        # Para outros erros, se não for a última tentativa, tente novamente
                         if attempt < max_attempts - 1:
-                            delay = base_delay * (3 ** attempt)  # Backoff mais agressivo
-                            logger.warning(f"Rate limit detectado. Aguardando {delay}s...")
+                            delay = base_delay * (2 ** attempt)
+                            logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
                             time.sleep(delay)
                             continue
+                        return {
+                            'status': 'error',
+                            'message': str(e)
+                        }
                     
-                    # Para outros erros, se não for a última tentativa, tente novamente
+                    if result:
+                        return {
+                            'status': 'success',
+                            'id': result
+                        }
+                    
+                    # Se chegou aqui, a publicação falhou mas não lançou exceção
                     if attempt < max_attempts - 1:
                         delay = base_delay * (2 ** attempt)
-                        logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                        logger.info(f"Falha na publicação. Aguardando {delay}s antes da próxima tentativa...")
                         time.sleep(delay)
                         continue
-                    raise
-                
-                if result:
-                    return result
-                
-                # Se chegou aqui, a publicação falhou mas não lançou exceção
-                if attempt < max_attempts - 1:
-                    delay = base_delay * (2 ** attempt)
-                    logger.info(f"Falha na publicação. Aguardando {delay}s antes da próxima tentativa...")
-                    time.sleep(delay)
-                
-            except PermissionError as e:
-                if "request limit reached" in str(e).lower():
-                    self._handle_rate_limit()
-                    if attempt < max_attempts - 1:
-                        continue
-                raise
-                
-            except Exception as e:
-                logger.error(f"Error posting carousel (attempt {attempt + 1}): {str(e)}")
-                if attempt < max_attempts - 1:
-                    delay = base_delay * (2 ** attempt)
-                    logger.info(f"Retrying in {delay} seconds...")
-                    time.sleep(delay)
-                else:
-                    raise
+                    return {
+                        'status': 'error',
+                        'message': 'Failed to publish carousel'
+                    }
                     
-        return None
-        
+                except PermissionError as e:
+                    if "request limit reached" in str(e).lower():
+                        self._handle_rate_limit()
+                        if attempt < max_attempts - 1:
+                            continue
+                        return {
+                            'status': 'error',
+                            'message': 'Rate limit reached'
+                        }
+                    return {
+                        'status': 'error',
+                        'message': str(e)
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"Error posting carousel (attempt {attempt + 1}): {str(e)}")
+                    if attempt < max_attempts - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.info(f"Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        continue
+                    return {
+                        'status': 'error',
+                        'message': str(e)
+                    }
+                    
+            return {
+                'status': 'error',
+                'message': 'All attempts to post carousel failed'
+            }
+
+        except Exception as e:
+            logger.error(f"Unexpected error in post_carousel: {str(e)}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+
     def check_token_permissions(self):
         """
         Check if the access token has the necessary permissions for posting.

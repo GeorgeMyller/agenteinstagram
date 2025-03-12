@@ -50,12 +50,12 @@ with tab1:
                         temp_file.write(uploaded_file.getvalue())
                         temp_path = temp_file.name
 
-                    success, msg = instagram.post_single_photo(temp_path, caption)
+                    result = instagram.post_single_photo(temp_path, caption)
                     
-                    if success:
-                        st.success("Foto publicada com sucesso!")
+                    if result['status'] == 'success':
+                        st.success(f"Foto publicada com sucesso! ID: {result['id']}")
                     else:
-                        st.error(f"Erro ao publicar foto: {msg}")
+                        st.error(f"Erro ao publicar foto: {result['message']}")
                 finally:
                     # Limpar arquivo temporário
                     if 'temp_path' in locals():
@@ -99,15 +99,12 @@ with tab3:
             if st.button("Publicar Carrossel"):
                 with st.spinner("Publicando carrossel..."):
                     try:
-                        success, msg, post_id = instagram.post_carousel(
-                            carousel_paths,
-                            caption=caption
-                        )
+                        result = instagram.post_carousel(carousel_paths, caption)
                         
-                        if success:
-                            st.success(f"Carrossel publicado com sucesso! (ID: {post_id})")
+                        if result['status'] == 'success':
+                            st.success(f"Carrossel publicado com sucesso! (ID: {result['id']})")
                         else:
-                            st.error(f"Erro ao publicar carrossel: {msg}")
+                            st.error(f"Erro ao publicar carrossel: {result['message']}")
                     finally:
                         # Limpar arquivos temporários
                         for path in carousel_paths:
@@ -127,12 +124,9 @@ with tab4:
     st.header("Status da Fila")
     
     if st.button("Atualizar Status"):
-        status = instagram.get_account_status()
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Taxa de Uso", f"{status.get('usage_rate', 0)}%")
-            st.metric("Limite de Requisições", status.get('calls_remaining', 'N/A'))
-        with col2:
-            st.metric("Tempo até Reset", f"{status.get('minutes_until_reset', 0)} min")
-            st.metric("Status", status.get('account_status', 'OK'))
+        with st.spinner("Obtendo status..."):
+            status = instagram.get_account_status()
+            if status:
+                st.json(status)
+            else:
+                st.error("Erro ao obter status da API")
