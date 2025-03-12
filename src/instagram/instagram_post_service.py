@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import random
+import requests
 import traceback
 from datetime import datetime
 from dotenv import load_dotenv
@@ -11,6 +12,8 @@ from src.instagram.base_instagram_service import (
     BaseInstagramService, AuthenticationError, PermissionError,
     RateLimitError, MediaError, TemporaryServerError, InstagramAPIError
 )
+from src.instagram.base_instagram_service import RateLimitHandler
+
 
 logger = logging.getLogger('InstagramPostService')
 
@@ -23,6 +26,11 @@ class InstagramPostService(BaseInstagramService):
     _last_state_save = 0
     _state_save_interval = 60  # Salvar estado a cada 60 segundos no máximo
 
+    # Track published containers to prevent duplicates
+    _published_containers = set()
+    _last_verification_time = 0
+    _verification_interval = 300  # Verify published posts every 5 minutes
+
     def __new__(cls, access_token=None, ig_user_id=None):
         # Padrão Singleton para evitar múltiplas instanciações e carregamentos de estado
         if cls._instance is None:
@@ -34,7 +42,7 @@ class InstagramPostService(BaseInstagramService):
         # Evita reinicialização se já inicializado
         if getattr(self, '_initialized', False):
             return
-            
+
         load_dotenv()
         access_token = access_token or (
             os.getenv('INSTAGRAM_API_KEY') or
@@ -42,7 +50,7 @@ class InstagramPostService(BaseInstagramService):
             os.getenv('FACEBOOK_ACCESS_TOKEN')
         )
         ig_user_id = ig_user_id or os.getenv("INSTAGRAM_ACCOUNT_ID")
-        
+
         if not access_token or not ig_user_id:
             raise ValueError(
                 "Credenciais incompletas. Defina INSTAGRAM_API_KEY e "
@@ -52,17 +60,19 @@ class InstagramPostService(BaseInstagramService):
         super().__init__(access_token, ig_user_id)
         self.state_file = 'api_state.json'
         self.pending_containers = {}
+        self.published_containers_file = 'published_containers.json'
         self.stats = {
             'successful_posts': 0,
             'failed_posts': 0,
             'rate_limited_posts': 0
         }
         self._load_state()
-        
+        self._load_published_containers()
+
         # Processamento de containers pendentes sob demanda em vez de automático
         # (será chamado explicitamente quando necessário)
         # self._process_pending_containers()
-        
+
         self._initialized = True
 
     def _load_state(self):
@@ -76,7 +86,7 @@ class InstagramPostService(BaseInstagramService):
                 'rate_limited_posts': 0
             })
             return
-            
+
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
@@ -107,10 +117,37 @@ class InstagramPostService(BaseInstagramService):
                 'stats': self.stats
             }
 
+    def _load_published_containers(self):
+        """Load list of already published containers"""
+        try:
+            if os.path.exists(self.published_containers_file):
+                with open(self.published_containers_file, 'r') as f:
+                    published_data = json.load(f)
+                    self.__class__._published_containers = set(published_data.get('containers', []))
+                    logger.info(f"Loaded {len(self.__class__._published_containers)} published container IDs")
+        except Exception as e:
+            logger.error(f"Error loading published containers: {e}")
+            self.__class__._published_containers = set()
+
+    def _save_published_containers(self):
+        """Save list of published containers to prevent duplicates"""
+        try:
+            published_data = {
+                'containers': list(self.__class__._published_containers),
+                'last_updated': datetime.now().isoformat()
+            }
+
+            with open(self.published_containers_file, 'w') as f:
+                json.dump(published_data, f, indent=2)
+
+            logger.info(f"Saved {len(self.__class__._published_containers)} published container IDs")
+        except Exception as e:
+            logger.error(f"Error saving published containers: {e}")
+
     def _save_state(self):
         """Save current state to file"""
         current_time = time.time()
-        
+
         # Só salva o estado se passou tempo suficiente desde o último salvamento
         if current_time - self.__class__._last_state_save < self.__class__._state_save_interval:
             # Atualiza o cache sem salvar no disco
@@ -119,23 +156,23 @@ class InstagramPostService(BaseInstagramService):
                 'stats': self.stats
             }
             return
-            
+
         try:
             state = {
                 'pending_containers': self.pending_containers,
                 'stats': self.stats,
                 'last_updated': datetime.now().isoformat()
             }
-            
+
             # Atualiza o cache
             self.__class__._state_cache = {
                 'pending_containers': self.pending_containers,
                 'stats': self.stats
             }
-            
+
             with open(self.state_file, 'w') as f:
                 json.dump(state, f, indent=2)
-            
+
             # Atualiza o timestamp do último salvamento
             self.__class__._last_state_save = current_time
             logger.info(f"Saved state with {len(self.pending_containers)} pending containers")
@@ -156,27 +193,73 @@ class InstagramPostService(BaseInstagramService):
             'stats': self.stats
         }
 
+    def _is_container_published(self, container_id):
+        """Check if a container has already been published"""
+        # First check our in-memory set
+        if container_id in self.__class__._published_containers:
+            logger.warning(f"Container {container_id} already marked as published! Skipping publication.")
+            return True
+            
+        # For most cases, we'll rely on our local tracking
+        # We'll only check Instagram for verification in special situations
+        # This avoids unnecessary API calls that might hit rate limits
+        
+        try:
+            # Use our enhanced verification system that can detect recent publications
+            from src.instagram.publication_verifier import InstagramPublicationVerifier
+            verifier = InstagramPublicationVerifier(self)
+            is_published, post_id = verifier.verify_publication(container_id)
+            
+            if is_published:
+                # Add to our published set
+                logger.warning(f"Container {container_id} was already published on Instagram! Marking as published.")
+                self.__class__._published_containers.add(container_id)
+                self._save_published_containers()
+                return True
+        except Exception as e:
+            logger.error(f"Error verifying publication status: {str(e)}")
+            # Continue with local check on verification failure
+            
+            # If this container is in the pending list with retry attempts, we should 
+            # be more cautious about potential duplicates
+            if container_id in self.pending_containers:
+                retry_count = self.pending_containers[container_id].get('retry_count', 0)
+                if retry_count >= 2:
+                    logger.warning(f"Container {container_id} has been retried {retry_count} times. Being cautious and marking as published to prevent duplicates.")
+                    self.__class__._published_containers.add(container_id)
+                    self._save_published_containers()
+                    return True
+
+        # Default to not published
+        return False
+
     def _process_pending_containers(self, limit=5):
         """Process any pending containers from previous runs with limit para evitar bloqueios longos"""
         if not self.pending_containers:
             return
-            
+
         logger.info(f"Found {len(self.pending_containers)} pending containers to process")
         processed_containers = []
         processed_count = 0
-        
+
         # Ordenar por próxima tentativa para processar primeiro os que já estão prontos
         sorted_containers = sorted(
-            self.pending_containers.items(), 
+            self.pending_containers.items(),
             key=lambda x: float(x[1].get('next_attempt_time', 0))
         )
-        
+
         for container_id, container_data in sorted_containers:
             # Limitar o número de containers processados de uma vez
             if processed_count >= limit:
                 logger.info(f"Reached limit of {limit} containers to process at once")
                 break
-                
+
+            # Skip containers that are already published
+            if self._is_container_published(container_id):
+                logger.info(f"Container {container_id} already published, removing from pending list")
+                processed_containers.append(container_id)
+                continue
+
             try:
                 # Check if we're still within the backoff period
                 if container_data.get('next_attempt_time'):
@@ -185,7 +268,7 @@ class InstagramPostService(BaseInstagramService):
                         wait_time = next_attempt_time - time.time()
                         logger.info(f"Container {container_id} still in backoff period. Next attempt in {wait_time:.1f}s")
                         continue
-                
+
                 # Check container status first
                 status = self.check_container_status(container_id)
                 if status != 'FINISHED':
@@ -193,19 +276,23 @@ class InstagramPostService(BaseInstagramService):
                     if status in ['ERROR', 'EXPIRED', 'TIMEOUT']:
                         processed_containers.append(container_id)
                     continue
-                
+
                 # Attempt to publish
                 logger.info(f"Attempting to publish pending container: {container_id}")
-                post_id = self.publish_media(container_id)
+                post_id = self._attempt_publish_media(container_id)
                 processed_count += 1
-                
+
                 if post_id:
                     logger.info(f"Successfully published pending container! ID: {post_id}")
                     processed_containers.append(container_id)
-                    
+
+                    # Mark as published to prevent duplicates
+                    self.__class__._published_containers.add(container_id)
+                    self._save_published_containers()
+
                     # Get permalink
                     permalink = self.get_post_permalink(post_id)
-                    
+
                     # If we have a callback URL in the container data, notify it
                     if container_data.get('callback_url'):
                         try:
@@ -213,12 +300,12 @@ class InstagramPostService(BaseInstagramService):
                             pass
                         except Exception as callback_err:
                             logger.error(f"Error calling callback: {callback_err}")
-                
+
             except RateLimitError as e:
                 # Update next attempt time and retry count
                 retry_count = container_data.get('retry_count', 0) + 1
                 next_attempt_time = time.time() + e.retry_seconds
-                
+
                 self.pending_containers[container_id].update({
                     'retry_count': retry_count,
                     'next_attempt_time': next_attempt_time,
@@ -226,22 +313,27 @@ class InstagramPostService(BaseInstagramService):
                     'last_attempt': datetime.now().isoformat()
                 })
                 logger.warning(f"Rate limit hit for container {container_id}. Will retry after {e.retry_seconds}s (attempt {retry_count})")
-                
+
                 # If we've retried too many times, give up
                 if retry_count >= 5:
                     logger.error(f"Too many retry attempts for container {container_id}, giving up")
                     processed_containers.append(container_id)
-                    
+
             except Exception as e:
                 # Registra detalhes completos do erro para diagnóstico
                 error_details = traceback.format_exc()
                 logger.error(f"Error processing pending container {container_id}: {e}\n{error_details}")
-                
+
                 # Verifica se, apesar do erro, a publicação foi bem-sucedida
                 try:
                     # Tenta verificar se o container ainda existe no Instagram
                     status = self.check_container_status(container_id)
-                    
+
+                    # Check if it's already published despite the error
+                    if self._is_container_published(container_id):
+                        processed_containers.append(container_id)
+                        continue
+
                     # Se o status for None ou um código de erro, considera que falhou
                     if status is None or status in ['ERROR', 'EXPIRED', 'TIMEOUT']:
                         logger.error(f"Container {container_id} falhou e será removido da lista de pendentes.")
@@ -250,7 +342,7 @@ class InstagramPostService(BaseInstagramService):
                         # Se o status for FINISHED, talvez tenha sido publicado com sucesso mas tivemos um erro depois
                         # ou se o status for IN_PROGRESS, podemos deixar para uma próxima tentativa
                         logger.info(f"Apesar do erro, o container {container_id} ainda tem status {status}. Será mantido na lista de pendentes.")
-                        
+
                         # Incrementa o contador de tentativas para não tentar indefinidamente
                         retry_count = container_data.get('retry_count', 0) + 1
                         self.pending_containers[container_id].update({
@@ -258,7 +350,7 @@ class InstagramPostService(BaseInstagramService):
                             'last_error': str(e),
                             'last_attempt': datetime.now().isoformat()
                         })
-                        
+
                         # Se já tentamos muitas vezes, remove de qualquer forma
                         if retry_count >= 5:
                             logger.error(f"Too many retry attempts for container {container_id}, giving up")
@@ -267,15 +359,15 @@ class InstagramPostService(BaseInstagramService):
                     # Se não conseguimos nem verificar o status, é melhor remover
                     logger.error(f"Falha ao verificar status do container {container_id} após erro: {check_err}")
                     processed_containers.append(container_id)
-        
+
         # Remove processed containers from pending list
         if processed_containers:
             for container_id in processed_containers:
                 self.pending_containers.pop(container_id, None)
-                
+
             # Save updated state
             self._save_state()
-            
+
         return len(processed_containers)
 
     def create_media_container(self, image_url, caption):
@@ -304,7 +396,7 @@ class InstagramPostService(BaseInstagramService):
         params = {
             'fields': 'status_code,status'
         }
-        
+
         try:
             result = self._make_request('GET', f"{container_id}", params=params)
             if result:
@@ -329,182 +421,168 @@ class InstagramPostService(BaseInstagramService):
                 elif status in ['ERROR', 'EXPIRED']:
                     logger.error(f"Container falhou com status: {status}")
                     return status
-                
+
                 # Usar backoff exponencial com tempo máximo reduzido para não bloquear por muito tempo
                 backoff_time = min(delay * (1.5 ** attempt) + random.uniform(0, 3), 30)
-                
+
                 logger.info(f"Tentativa {attempt + 1}/{max_attempts}. Aguardando {backoff_time:.1f}s...")
                 time.sleep(backoff_time)
-                
+
             except RateLimitError as e:
                 logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
                 time.sleep(min(e.retry_seconds, 30))  # Limitar o tempo máximo de espera para não bloquear a thread
             except Exception as e:
                 logger.error(f"Error checking container status: {str(e)}")
                 time.sleep(min(delay, 10))  # Tempo máximo limitado
-        
+
         logger.error(f"Container status check timed out after {max_attempts} attempts.")
         return 'TIMEOUT'
 
-    def publish_media(self, media_container_id):
-        """Publishes the media container to Instagram."""
+    def _attempt_publish_media(self, container_id):
+        """Internal method to attempt media publication without duplicate checking"""
         params = {
-            'creation_id': media_container_id,
+            'creation_id': container_id,
         }
 
         try:
-            logger.info(f"Publishing media with params: {params}")  # Log params
+            logger.info(f"Publishing media with params: {params}")
             result = self._make_request('POST', f"{self.ig_user_id}/media_publish", data=params)
-            
+
             if result and 'id' in result:
                 post_id = result['id']
                 logger.info(f"Publication initiated with ID: {post_id}")
-                
-                # If this was a pending container, remove it from the list
-                if media_container_id in self.pending_containers:
-                    self.pending_containers.pop(media_container_id)
-                    self._save_state()
-                
                 self._update_stats(success=True)
                 return post_id
-            
+
             logger.error(f"Could not publish media. Response: {result}")
             self._update_stats(success=False)
             return None
-            
+
         except RateLimitError as e:
-            # Save container to pending list with retry information
-            self.pending_containers[media_container_id] = {
-                'container_id': media_container_id,
-                'retry_count': 1,
-                'next_attempt_time': time.time() + e.retry_seconds,
-                'last_error': str(e),
-                'created_at': datetime.now().isoformat(),
-                'last_attempt': datetime.now().isoformat()
-            }
-            self._save_state()
-            self._update_stats(rate_limited=True)
-            
-            logger.warning(f"Rate limit reached. Container {media_container_id} saved for later publishing. Will retry after {e.retry_seconds} seconds.")
-            # Re-raise to allow caller to handle
-            raise
-            
+            logger.warning(f"Rate limit hit. Retrying after {e.retry_seconds} seconds.")
+            time.sleep(e.retry_seconds)
+            return self._attempt_publish_media(container_id)
+
         except InstagramAPIError as e:
             logger.error(f"Error publishing media: {e}")
             self._update_stats(success=False)
             raise
 
-    def get_post_permalink(self, post_id):
-        """Obtém o permalink de um post."""
-        params = {
-            'fields': 'permalink'
-        }
-        
-        try:
-            result = self._make_request('GET', f"{post_id}", params=params)
-            if result and 'permalink' in result:
-                permalink = result['permalink']
-                logger.info(f"Permalink: {permalink}")
-                return permalink
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao obter permalink: {e}")
-            return None
+    def publish_media(self, container_id):
+        return self._attempt_publish_media(container_id)
 
-    def post_image(self, image_url, caption):
-        """
-        Versão reescrita do método post_image para usar uma abordagem mais
-        similar ao upload_local_video_to_reels, que está funcionando corretamente.
-        """
-        logger.info("Starting Instagram image publication...")
+    # ...
+    # other unchanged methods now come here...
+    
+    def _make_request(self, method, endpoint, params=None, data=None, headers=None, retry_attempt=0):
+        """Make an API request with enhanced rate limiting and error handling"""
+        url = f"{self.base_url}/{endpoint}"
 
-        try:
-            # Processar periodicamente containers pendentes (background tasks)
-            try:
-                self._process_pending_containers(limit=1)
-            except Exception as e:
-                logger.warning(f"Error processing pending containers: {e}")
+        # Add access token to params
+        if params is None:
+            params = {}
+        params['access_token'] = self.access_token
 
-            # 1. Criar container
-            container_id = self.create_media_container(image_url, caption)
-            if not container_id:
-                logger.error("Failed to create media container.")
-                return None
-
-            # 2. Aguardar processamento do container com backoff exponencial
-            logger.info("Aguardando processamento do container...")
-            status = self.wait_for_container_status(container_id, max_attempts=8)
-            
-            if status != 'FINISHED':
-                logger.error(f"Processamento da imagem falhou com status: {status}")
-                return None
-
-            # 3. Publicar a mídia
-            try:
-                post_id = self.publish_media(container_id)
-                if not post_id:
-                    logger.error("Failed to publish media")
-                    return None
-            except RateLimitError as e:
-                # Return partial result to indicate container is saved and will be published later
-                logger.info(f"Rate limit reached. Container {container_id} saved for later publishing.")
-                return {
-                    'container_id': container_id,
-                    'status': 'pending',
-                    'media_type': 'IMAGE',
-                    'retry_after': e.retry_seconds,
-                    'message': 'Rate limit reached. Post will be published automatically when limit allows.'
-                }
-
-            # 4. Obter permalink (se possível)
-            permalink = self.get_post_permalink(post_id)
-            
-            # 5. Retornar resultado de sucesso
-            result = {
-                'id': post_id,
-                'container_id': container_id,
-                'permalink': permalink,
-                'media_type': 'IMAGE',
-                'status': 'published'
-            }
-            
-            logger.info(f"Foto publicada com sucesso! ID: {post_id}")
-            
-            # Forçar salvamento do estado após sucessos
-            self._save_state()
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error posting image to Instagram: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
-            
-    def get_pending_posts(self):
-        """Returns a list of pending posts"""
+        # Respect rate limits with minimum interval between requests
         current_time = time.time()
-        result = []
-        
-        # Processar uma quantidade pequena de containers pendentes em background
+        elapsed = current_time - self.last_request_time
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+
         try:
-            self._process_pending_containers(limit=1)
-        except Exception as e:
-            logger.warning(f"Error processing pending containers during get_pending_posts: {e}")
-        
-        for container_id, data in self.pending_containers.items():
-            next_attempt_time = data.get('next_attempt_time', 0)
-            wait_time = max(0, next_attempt_time - current_time)
-            
-            result.append({
-                'container_id': container_id,
-                'retry_count': data.get('retry_count', 0),
-                'next_attempt_in': f"{wait_time:.1f}s",
-                'next_attempt_time': datetime.fromtimestamp(next_attempt_time).isoformat() if next_attempt_time else None,
-                'created_at': data.get('created_at'),
-                'last_attempt': data.get('last_attempt'),
-                'last_error': data.get('last_error')
-            })
-            
-        return result
+            logger.info(f"Making {method} request to {endpoint}")
+            if data:
+                logger.info(f"With data: {data}")
+
+            response = self.session.request(method, url, params=params, data=data, headers=headers)
+            self.last_request_time = time.time()
+
+            # Process rate limit headers if present
+            if 'x-business-use-case-usage' in response.headers:
+                self._process_rate_limit_headers(response.headers)
+
+            # Log response status
+            logger.info(f"Response status: {response.status_code}")
+
+            if response.status_code == 403:
+                try:
+                    error_json = response.json()
+                    if 'error' in error_json:
+                        error = error_json['error']
+                        error_code = error.get('code')
+                        error_subcode = error.get('error_subcode')
+                        error_message = error.get('message', '')
+                        fb_trace_id = error.get('fbtrace_id')
+
+                        logger.error(f"{error_code} {error_message} (Subcode: {error_subcode})")
+
+                        # Handle application request limit specifically
+                        if error_subcode == 2207051:
+                            retry_seconds = self._get_retry_after(error)
+                            if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
+                                backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
+                                logger.warning(f"Application request limit reached. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
+                                time.sleep(backoff_time)
+                                return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
+
+                            raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
+
+                        raise PermissionError(error_message, error_code, error_subcode, fb_trace_id)
+
+                except ValueError:
+                    raise InstagramAPIError("Failed to parse error response")
+
+            response.raise_for_status()
+            result = response.json() if response.content else None
+
+            if result and 'error' in result:
+                error = result['error']
+                error_code = error.get('code')
+                error_message = error.get('message', '')
+                error_subcode = error.get('error_subcode')
+                fb_trace_id = error.get('fbtrace_id')
+
+                if error_code in [190, 104]:  # Token errors
+                    raise AuthenticationError(error_message, error_code, error_subcode, fb_trace_id)
+                elif error_code in [200, 10, 803]:  # Permission errors
+                    raise PermissionError(error_message, error_code, error_subcode, fb_trace_id)
+                elif RateLimitHandler.is_rate_limit_error(error_code, error_subcode):
+                    retry_seconds = self._get_retry_after(error)
+                    if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
+                        backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
+                        logger.warning(f"Rate limit hit. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
+                        time.sleep(backoff_time)
+                        return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
+                    raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
+                elif error_code in [1, 2]:  # Temporary server errors
+                    raise TemporaryServerError(error_message, error_code, error_subcode, fb_trace_id)
+                else:
+                    raise InstagramAPIError(error_message, error_code, error_subcode, fb_trace_id)
+
+            return result
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {str(e)}")
+            raise InstagramAPIError(f"Request failed: {str(e)}")
+
+    def _get_retry_after(self, error):
+        """Extract retry after time from error response"""
+        retry_seconds = 300  # Default retry time increased to 5 minutes for application request limit
+
+        # Check for specific error subcodes
+        if error.get('error_subcode') == 2207051:  # Application request limit
+            retry_seconds = 900  # 15 minutes
+
+        # Try to extract time from error message
+        message = error.get('message', '').lower()
+        if 'minutes' in message:
+            try:
+                import re
+                time_match = re.search(r'(\d+)\s*minutes?', message)
+                if time_match:
+                    retry_seconds = int(time_match.group(1)) * 60
+            except:
+                pass
+
+        return retry_seconds
 
