@@ -2,69 +2,44 @@
 
 ## Overview
 
-Instagram Agent é um sistema avançado de automação para redes sociais que ajuda a gerenciar e automatizar a publicação de conteúdo no Instagram através de uma interface API robusta. Suporta diversos tipos de conteúdo, incluindo imagens individuais, carrosséis, e vídeos/reels.
+Instagram Agent é um sistema avançado de automação para redes sociais que ajuda a gerenciar e automatizar a publicação de conteúdo no Instagram através de uma interface web intuitiva e API robusta. Suporta diversos tipos de conteúdo, incluindo imagens individuais, carrosséis, e vídeos/reels.
 
 ## Features
 
 - **Publicação de imagens** com geração automática de legendas
 - **Suporte a carrosséis** com múltiplas imagens (2-10 imagens)
 - **Upload de vídeos e reels** com otimização automática
-- **Geração de legendas com IA** usando CrewAI
-- **Descrição inteligente de conteúdo** usando API Gemini
-- **Integração com webhooks** para publicação automatizada
-- **Interface web** para gerenciamento manual de conteúdo
-- **Sistema de filas** para processar grandes volumes de publicações
-- **Monitoramento em tempo real** do status das publicações
+- **Geração de legendas com IA** usando diferentes estilos:
+  - Divertido e alegre
+  - Profissional e sério
+  - Inspirador e motivacional
+  - Informativo e educativo
+- **Personalização de narrativa** com opções de pessoa do discurso
+- **Interface web amigável** com tabs para diferentes tipos de conteúdo
+- **Monitoramento em tempo real** do status das publicações e limites da API
 
-## Quick Links
+## Interface Web (Streamlit)
 
-- [Guia de Instalação](installation/quickstart.md)
-- [Documentação da API](api/README.md)
-- [Guia de Configuração](guides/configuration.md)
-- [Solução de Problemas](troubleshooting/common.md)
+### Tabs Disponíveis
 
-## Tipos de Conteúdo Suportados
+1. **Postar Foto**
+   - Upload de imagem individual
+   - Configuração de estilo de legenda
+   - Escolha da pessoa do discurso
+   - Preview da imagem antes do envio
 
-### Imagens Individuais
-- Formatos: JPG, PNG
-- Aplicação automática de filtros e bordas
-- Geração de legendas com IA
+2. **Postar Reels**
+   - Upload de vídeos
+   - Configurações específicas para reels
+   - Otimização automática para requisitos do Instagram
 
-### Carrosséis
-- 2 a 10 imagens por carrossel
-- Mesmos formatos e processamento de imagens individuais
-- Ideal para contar histórias ou mostrar produtos
+3. **Postar Carrossel**
+   - Upload múltiplo de imagens (2-10)
+   - Preview das imagens selecionadas
+   - Legenda única para todo o carrossel
 
-### Vídeos e Reels
-- Formatos: MP4, MOV
-- Otimização automática para requisitos do Instagram
-- Opção de compartilhar no feed
-
-## Modos de Uso
-
-### Interface Web (Streamlit)
-Acesse todas as funcionalidades através de uma interface amigável:
-- Upload e pré-visualização de mídia
-- Personalização de legendas
-- Controle de publicação
-
-### API REST
-Integre com outros sistemas usando a API REST completa:
-- Endpoints para todos os tipos de mídia
-- Sistema de webhooks para automação
-- Monitoramento de status
-
-### Webhooks
-Receba e processe mensagens para publicação automática:
-- Comandos via texto para iniciar carrosséis
-- Upload de imagens e vídeos
-- Controle de status via mensagens
-
-## Recursos Técnicos
-
-- Processamento robusto de imagens e vídeos
-- Sistema de filas para gerenciar publicações
-- Tratamento avançado de erros e limites de taxa
-- Monitoramento de status em tempo real
-
-Para começar, veja o [Guia de Instalação](installation/quickstart.md) ou a [Documentação da API](api/README.md).
+4. **Status da Fila**
+   - Taxa de uso da API
+   - Limites de requisições
+   - Tempo até reset dos limites
+   - Status geral da conta

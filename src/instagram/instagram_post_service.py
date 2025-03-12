@@ -31,14 +31,14 @@ class InstagramPostService(BaseInstagramService):
     _last_verification_time = 0
     _verification_interval = 300  # Verify published posts every 5 minutes
 
-    def __new__(cls, access_token=None, ig_user_id=None):
+    def __new__(cls, access_token=None, ig_user_id=None, skip_token_validation=False):
         # Padrão Singleton para evitar múltiplas instanciações e carregamentos de estado
         if cls._instance is None:
             cls._instance = super(InstagramPostService, cls).__new__(cls)
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, access_token=None, ig_user_id=None):
+    def __init__(self, access_token=None, ig_user_id=None, skip_token_validation=False):
         # Evita reinicialização se já inicializado
         if getattr(self, '_initialized', False):
             return
@@ -66,6 +66,7 @@ class InstagramPostService(BaseInstagramService):
             'failed_posts': 0,
             'rate_limited_posts': 0
         }
+        self.skip_token_validation = skip_token_validation
         self._load_state()
         self._load_published_containers()
 

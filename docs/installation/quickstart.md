@@ -1,93 +1,83 @@
 # Quick Start Guide
 
-Get up and running with Agent Social Media quickly.
-
 ## Prerequisites
 
-Before you begin, ensure you have:
-
-- Python 3.12 or newer
-- FFmpeg installed for video processing
-- Git for version control
-- Instagram Business or Creator accoun
-- Required API keys and tokens
+- Python 3.11 or higher
+- UV package manager
+- Instagram Business Account
+- Instagram Access Token
+- Instagram User ID
 
 ## Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/acessoia/agentcrewai.gi
-   cd agentcrewai
-   ```
+1. Install UV if not already installed:
+```bash
+pip install uv
+```
 
-2. Run the setup script:
-   ```bash
-   chmod +x scripts/setup.sh
-   ./scripts/setup.sh
-   ```
+2. Create and activate virtual environment:
+```bash
+uv venv
+source venv/bin/activate  # On Windows use: venv\Scripts\activate
+```
 
-   This will:
-   - Create necessary directories
-   - Install dependencies
-   - Set up pre-commit hooks
-   - Create a .env template
+3. Install dependencies:
+```bash
+uv sync
+```
 
-3. Configure your environment:
-   - Copy `.env.example` to `.env`
-   - Fill in your API keys and tokens
-   - Configure paths and settings
+## Configuration
 
-4. Validate your setup:
-   ```bash
-   python scripts/validate_setup.py
-   ```
-
-## Quick Tes
-
-Test your installation by:
-
-1. Starting the server:
-   ```bash
-   python src/app.py
-   ```
-
-2. Running the test endpoint:
-   ```bash
-   curl http://localhost:5001/debug/send-tes
-   ```
+1. Create a `.env` file in the root directory
+2. Add required environment variables:
+```
+INSTAGRAM_ACCESS_TOKEN=your_access_token
+INSTAGRAM_USER_ID=your_user_id
+```
 
 ## Using the Web Interface
 
 1. Start the Streamlit interface:
-   ```bash
-   streamlit run streamlit_app.py
-   ```
+```bash
+streamlit run streamlit_app.py
+```
 
 2. Open your browser to `http://localhost:8501`
 
-3. Try uploading an image and posting it to Instagram
+3. Navigate through the available tabs:
+   - **Postar Foto**: Single image posts
+   - **Postar Reels**: Video/reels posts
+   - **Postar Carrossel**: Multiple image posts
+   - **Status da Fila**: API status monitoring
+
+4. For image posts:
+   - Choose an image to upload
+   - Select caption style and narrative person
+   - Add optional custom caption
+   - Preview and publish
+
+5. For carrossel posts:
+   - Upload 2-10 images
+   - Add a single caption for all images
+   - Preview selections before publishing
+
+6. Monitor API limits and account status in the Status tab
+
+## Troubleshooting
+
+If you encounter issues:
+
+1. Check the logs:
+```bash
+tail -f logs/app_debug.log
+```
+
+2. Verify your environment variables are set correctly
+3. Ensure your Instagram tokens are valid
+4. Check API rate limits in the Status tab
 
 ## Next Steps
 
-- Read the [Configuration Guide](configuration.md) for detailed setup
-- Check the [User Guide](../guides/overview.md) for usage instructions
-- Review [Common Issues](../troubleshooting/common.md) if you encounter problems
-
-## Development Setup
-
-For development, install additional tools:
-
-```bash
-pip install -r requirements-dev.tx
-```
-
-This includes:
-- Testing tools (pytest)
-- Code formatting (black)
-- Type checking (mypy)
-- Documentation tools (mkdocs)
-
-Run tests to verify everything works:
-```bash
-python -m pytes
-```
+- Review the [User Guide](../guides/overview.md) for detailed usage
+- Check [API Documentation](../api/overview.md) for programmatic access
+- See [Common Issues](../troubleshooting/common.md) for problem resolution

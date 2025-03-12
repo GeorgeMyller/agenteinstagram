@@ -49,7 +49,7 @@ class ReelsPublisher(BaseInstagramService):
         9007: "Permissão de publicação de Reels negada",
     }
 
-    def __init__(self, access_token=None, ig_user_id=None):
+    def __init__(self, access_token=None, ig_user_id=None, skip_token_validation=False):
         load_dotenv()
         access_token = access_token or (
             os.getenv('INSTAGRAM_API_KEY') or
@@ -65,6 +65,10 @@ class ReelsPublisher(BaseInstagramService):
             )
             
         super().__init__(access_token, ig_user_id)
+        self.skip_token_validation = skip_token_validation
+        
+        if skip_token_validation:
+            logger.warning("Instagram token validation skipped for ReelsPublisher due to skip_token_validation=True flag")
 
     def create_reels_container(self, video_url, caption, share_to_feed=True,
                              audio_name=None, thumbnail_url=None, user_tags=None):

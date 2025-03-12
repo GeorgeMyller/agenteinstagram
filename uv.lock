@@ -27,6 +27,7 @@ dependencies = [
     { name = "psutil" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "setuptools" },
     { name = "streamlit" },
     { name = "urllib3" },
 ]
@@ -49,6 +50,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "python-dotenv" },
     { name = "requests", specifier = ">=2.32.3" },
+    { name = "setuptools", specifier = ">=75.8.0" },
     { name = "streamlit", specifier = ">=1.32.0" },
     { name = "urllib3", specifier = ">=2.3.0" },
 ]

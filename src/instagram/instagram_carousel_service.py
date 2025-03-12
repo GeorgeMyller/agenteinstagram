@@ -13,6 +13,7 @@ from src.instagram.base_instagram_service import (
 
 logger = logging.getLogger('InstagramCarouselService')
 
+
 class CarouselCreationError(Exception):
     """Raised when there are issues creating a carousel"""
     def __init__(self, message, error_code=None, error_subcode=None, fb_trace_id=None):
@@ -67,7 +68,7 @@ class InstagramCarouselService(BaseInstagramService):
     # Class-level rate limit state
     _rate_limit_state = RateLimitState()
 
-    def __init__(self, access_token=None, ig_user_id=None):
+    def __init__(self, access_token=None, ig_user_id=None, skip_token_validation=False):
         load_dotenv()
         access_token = access_token or os.getenv('INSTAGRAM_API_KEY')
         ig_user_id = ig_user_id or os.getenv('INSTAGRAM_ACCOUNT_ID')
@@ -80,7 +81,12 @@ class InstagramCarouselService(BaseInstagramService):
             
         super().__init__(access_token, ig_user_id)
         self.token_expires_at = None
-        self._validate_token()
+        self.skip_token_validation = skip_token_validation
+        
+        if not skip_token_validation:
+            self._validate_token()
+        else:
+            logger.warning("Instagram token validation skipped due to skip_token_validation=True flag")
 
     def _validate_token(self, force_check=False):
         """Validates the access token and retrieves its expiration time.

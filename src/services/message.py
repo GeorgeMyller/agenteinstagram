@@ -132,6 +132,8 @@ class Message:
         self.image_scan_lengths = image_data.get("scanLengths")
         self.image_mid_quality_file_sha256 = image_data.get("midQualityFileSha256")
         self.image_base64 = self.data["data"]["message"].get("base64")
+        # Adicionar o atributo que estava faltando para converter base64 para bytes
+        self.image_base64_bytes = self.decode_base64(self.data["data"]["message"].get("base64"))
         
     def extract_document_message(self):
         """Extrai dados de uma mensagem de documento e define como atributos da classe."""
@@ -168,6 +170,7 @@ class Message:
         self.video_gif_playback = video_data.get("gifPlayback", False)
         self.video_view_once = video_data.get("viewOnce", False)
         self.video_base64 = self.data["data"]["message"].get("base64")
+        self.video_base64_bytes = self.decode_base64(self.data["data"]["message"].get("base64"))
 
     def decode_base64(self, base64_string):
         """Converte uma string base64 em bytes."""

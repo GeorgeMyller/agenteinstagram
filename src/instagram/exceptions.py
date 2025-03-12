@@ -1,54 +1,62 @@
 """
-This module contains all custom exceptions used throughout the Instagram integration.
-All exceptions inherit from the base InstagramError class.
+Este módulo contém todas as exceções personalizadas usadas na integração com o Instagram.
+Todas as exceções herdam da classe base InstagramError.
 """
 
 class InstagramError(Exception):
-    """Base exception class for all Instagram-related errors."""
-    def __init__(self, message, error_code=None, error_subcode=None, fbtrace_id=None):
+    """Classe base para todas as exceções relacionadas ao Instagram"""
+    def __init__(self, message: str, error_code: str = None, 
+                 error_subcode: str = None, fb_trace_id: str = None,
+                 is_retriable: bool = False):
         self.error_code = error_code
         self.error_subcode = error_subcode
-        self.fbtrace_id = fbtrace_id
+        self.fb_trace_id = fb_trace_id
+        self.is_retriable = is_retriable
         super().__init__(message)
 
     def __str__(self):
+        details = []
+        if self.error_code:
+            details.append(f"Code: {self.error_code}")
+        if self.error_subcode:
+            details.append(f"Subcode: {self.error_subcode}")
+        if self.fb_trace_id:
+            details.append(f"FB Trace ID: {self.fb_trace_id}")
+        
         base_message = super().__str__()
-        if self.error_code or self.error_subcode or self.fbtrace_id:
-            return f"{base_message} (Code: {self.error_code}, Subcode: {self.error_subcode}, Trace ID: {self.fbtrace_id})"
+        if details:
+            return f"{base_message} ({', '.join(details)})"
         return base_message
 
 class AuthenticationError(InstagramError):
-    """Raised for authentication failures (token expired, invalid, etc)."""
+    """Erro de autenticação (token expirado, inválido, etc)"""
     pass
 
 class PermissionError(InstagramError):
-    """Raised for permission-related errors (missing scopes, etc)."""
+    """Erro de permissões (escopos faltando, etc)"""
     pass
 
 class RateLimitError(InstagramError):
-    """Raised when API rate limits are exceeded."""
-    def __init__(self, message, retry_seconds=300, error_code=None, error_subcode=None, fbtrace_id=None):
-        super().__init__(message, error_code, error_subcode, fbtrace_id)
-        self.retry_seconds = retry_seconds
+    """Erro quando os limites de taxa são excedidos"""
+    def __init__(self, *args, retry_after: int = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retry_after = retry_after
+        self.is_retriable = True
 
 class MediaError(InstagramError):
-    """Raised for media-related errors (format, size, upload failures)."""
+    """Erro relacionado à mídia (formato, tamanho, falha no upload)"""
     pass
-
-class TemporaryServerError(InstagramError):
-    """Raised for temporary Instagram server errors that may be retried."""
-    pass
-
-class CarouselError(InstagramError):
-    """Base class for carousel-related errors."""
-    def __init__(self, message, error_code=None, error_subcode=None, fbtrace_id=None, retriable=False):
-        super().__init__(message, error_code, error_subcode, fbtrace_id)
-        self.retriable = retriable
 
 class ValidationError(InstagramError):
-    """Raised when media or data validation fails."""
+    """Erro quando a validação de mídia ou dados falha"""
     pass
 
 class ConfigurationError(InstagramError):
-    """Raised for configuration-related errors (missing credentials, etc)."""
+    """Erro relacionado à configuração (credenciais faltando, etc)"""
     pass
+
+class TemporaryError(InstagramError):
+    """Erro temporário que pode ser tentado novamente"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_retriable = True
