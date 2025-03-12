@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Dict, Any
 import os
 from .base_instagram_service import BaseInstagramService
-from .instagram_post_service import InstagramPostService  # Importando o serviço correto
+from .instagram_post_service import InstagramPostService
 from .carousel_normalizer import CarouselNormalizer
 from .describe_carousel_tool import CarouselDescriber
 from .crew_post_instagram import InstagramPostCrew
@@ -10,9 +10,12 @@ from .instagram_carousel_service import InstagramCarouselService
 from .instagram_reels_publisher import ReelsPublisher
 from .carousel_poster import upload_carousel_images, post_carousel_to_instagram
 from .instagram_video_processor import VideoProcessor
+from .image_validator import InstagramImageValidator
 import logging
+from dotenv import load_dotenv
+from urllib.parse import urlparse
+load_dotenv()
 
-# Configurar logger
 logger = logging.getLogger(__name__)
 
 class InstagramFacade:
@@ -22,8 +25,13 @@ class InstagramFacade:
     """
     
     def __init__(self, access_token: str, ig_user_id: str, skip_token_validation: bool = False):
-        self.access_token = access_token
-        self.ig_user_id = ig_user_id
+        access_token = access_token or (
+            os.getenv('INSTAGRAM_API_KEY') or
+            os.getenv('INSTAGRAM_ACCESS_TOKEN') or
+            os.getenv('FACEBOOK_ACCESS_TOKEN')
+        )
+        ig_user_id = ig_user_id or os.getenv("INSTAGRAM_ACCOUNT_ID")
+
         self.skip_token_validation = skip_token_validation
         
         # Inicializar os serviços com a opção de ignorar validação de token
@@ -36,28 +44,114 @@ class InstagramFacade:
         self.describer = CarouselDescriber()
         self.crew = InstagramPostCrew()
 
+    def post_carousel(self, image_paths: List[str], caption: str = None) -> Dict[str, Any]:
+        """Posta um carrossel de fotos no Instagram com validação aprimorada"""
+        try:
+            logger.info(f"Iniciando postagem de carrossel com {len(image_paths)} imagens")
+            
+            # Input validation
+            if not image_paths or len(image_paths) < 2:
+                return {'status': 'error', 'message': 'Mínimo de 2 imagens necessário para carrossel'}
+            if len(image_paths) > 10:
+                return {'status': 'error', 'message': 'Máximo de 10 imagens permitido para carrossel'}
+            
+            # Normalize and validate images
+            valid_images = []
+            for image_path in image_paths:
+                is_valid, message = self.validate_media(image_path)
+                if not is_valid:
+                    logger.warning(f"Imagem inválida {image_path}: {message}")
+                    continue
+                valid_images.append(image_path)
+            
+            if len(valid_images) < 2:
+                return {
+                    'status': 'error',
+                    'message': f'Número insuficiente de imagens válidas ({len(valid_images)}). Mínimo: 2'
+                }
+
+            # Normalize carousel images
+            normalized_paths = self.normalizer.normalize_carousel_images(valid_images)
+            
+            # Upload to Imgur in parallel for better performance
+            media_urls = []
+            import asyncio
+            import aiohttp
+            import concurrent.futures
+
+            async def upload_image(image_path):
+                if urlparse(image_path).scheme in ('http', 'https'):
+                    return image_path
+                    
+                try:
+                    with open(image_path, 'rb') as img_file:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(
+                                'https://api.imgur.com/3/upload',
+                                headers={'Authorization': f"Client-ID {os.getenv('IMGUR_CLIENT_ID', '546c25a59c58ad7')}"},
+                                data={'image': img_file.read()}
+                            ) as response:
+                                data = await response.json()
+                                if data.get('success'):
+                                    return data['data']['link']
+                except Exception as e:
+                    logger.error(f"Erro ao fazer upload da imagem {image_path}: {str(e)}")
+                return None
+
+            # Run uploads in parallel with timeout
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    futures = [upload_image(path) for path in normalized_paths]
+                    media_urls = [url for url in loop.run_until_complete(asyncio.gather(*futures)) if url]
+                finally:
+                    loop.close()
+
+            if len(media_urls) < 2:
+                return {
+                    'status': 'error',
+                    'message': f'Falha ao fazer upload das imagens. URLs válidas: {len(media_urls)}'
+                }
+
+            # Use carousel service with improved error handling
+            result = self.carousel_service.post_carousel(media_urls, caption)
+            logger.info(f"Resultado da postagem do carrossel: {result}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Erro ao postar carrossel: {str(e)}", exc_info=True)
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+
     def post_single_photo(self, image_path: str, caption: str = None) -> Dict[str, Any]:
         """Posta uma única foto no Instagram"""
         try:
-            # Usar o serviço específico de postagem
             logger.info(f"Iniciando postagem de foto única: {image_path}")
             
-            # Criar container para a imagem
+            # Validate and optimize image first
+            validator = InstagramImageValidator()
+            is_valid, issues = validator.validate_single_photo(image_path)
+            if not is_valid:
+                logger.error(f"Image validation failed: {issues}")
+                return {'status': 'error', 'message': f'Invalid image: {issues}'}
+                
+            # Optimize image before upload
+            optimized_path = validator.optimize_for_instagram(image_path)
+            if not optimized_path:
+                return {'status': 'error', 'message': 'Failed to optimize image'}
+
+            # Create container for the image
             import requests
-            from urllib.parse import urlparse
             
-            # Verificar se é um URL ou um caminho local
+            # Check if it's a URL or local path
             if urlparse(image_path).scheme in ('http', 'https'):
-                # É um URL
                 image_url = image_path
             else:
-                # É um caminho local, precisamos fazer upload para o Imgur
-                from os.path import exists
-                if not exists(image_path):
-                    return {'status': 'error', 'message': f'Arquivo não encontrado: {image_path}'}
-                
                 try:
-                    with open(image_path, 'rb') as img_file:
+                    with open(optimized_path, 'rb') as img_file:
                         response = requests.post(
                             'https://api.imgur.com/3/upload',
                             headers={'Authorization': 'Client-ID ' + os.getenv('IMGUR_CLIENT_ID', '546c25a59c58ad7')},
@@ -65,24 +159,24 @@ class InstagramFacade:
                         )
                         data = response.json()
                         if not data.get('success'):
-                            logger.error(f"Falha ao fazer upload da imagem: {data}")
-                            return {'status': 'error', 'message': 'Falha ao fazer upload da imagem'}
+                            logger.error(f"Failed to upload image: {data}")
+                            return {'status': 'error', 'message': 'Failed to upload image'}
                         image_url = data['data']['link']
                 except Exception as e:
-                    logger.error(f"Erro ao fazer upload da imagem: {str(e)}")
-                    return {'status': 'error', 'message': f'Erro ao fazer upload da imagem: {str(e)}'}
+                    logger.error(f"Error uploading image: {str(e)}")
+                    return {'status': 'error', 'message': f'Error uploading image: {str(e)}'}
             
-            # Criar container de mídia
+            # Create media container
             container_id = self.post_service.create_media_container(image_url, caption)
             if not container_id:
-                return {'status': 'error', 'message': 'Falha ao criar container de mídia'}
+                return {'status': 'error', 'message': 'Failed to create media container'}
             
-            # Aguardar o container ficar pronto
+            # Wait for container to be ready
             status = self.post_service.wait_for_container_status(container_id)
             if status != 'FINISHED':
-                return {'status': 'error', 'message': f'Container não ficou pronto. Status: {status}'}
+                return {'status': 'error', 'message': f'Container not ready. Status: {status}'}
             
-            # Publicar o container
+            # Publish the container
             post_id = self.post_service.publish_media(container_id)
             
             if post_id:
@@ -96,63 +190,6 @@ class InstagramFacade:
         except Exception as e:
             logger.error(f"Erro ao postar foto: {str(e)}")
             return {'status': 'error', 'message': str(e)}
-
-    def post_carousel(self, image_paths: List[str], caption: str = None) -> Dict[str, Any]:
-        """Posta um carrossel de fotos no Instagram"""
-        try:
-            logger.info(f"Iniciando postagem de carrossel com {len(image_paths)} imagens")
-            
-            # Normalizar imagens se necessário usando o serviço existente
-            normalized_paths = self.normalizer.normalize_carousel_images(image_paths)
-            
-            # Upload das imagens para URLs públicas
-            import requests
-            from urllib.parse import urlparse
-            
-            media_urls = []
-            
-            for image_path in normalized_paths:
-                # Verificar se já é um URL
-                if urlparse(image_path).scheme in ('http', 'https'):
-                    media_urls.append(image_path)
-                    continue
-                
-                # Upload da imagem para o Imgur
-                try:
-                    with open(image_path, 'rb') as img_file:
-                        response = requests.post(
-                            'https://api.imgur.com/3/upload',
-                            headers={'Authorization': 'Client-ID ' + os.getenv('IMGUR_CLIENT_ID', '546c25a59c58ad7')},
-                            files={'image': img_file}
-                        )
-                        data = response.json()
-                        if not data.get('success'):
-                            logger.error(f"Falha ao fazer upload da imagem: {data}")
-                            continue
-                        media_urls.append(data['data']['link'])
-                except Exception as e:
-                    logger.error(f"Erro ao fazer upload da imagem {image_path}: {str(e)}")
-                    continue
-            
-            # Verificar se temos URLs suficientes
-            if len(media_urls) < 2:
-                return {
-                    'status': 'error', 
-                    'message': f'Número insuficiente de imagens válidas para carrossel. Encontradas: {len(media_urls)}, necessárias: pelo menos 2'
-                }
-            
-            # Usar o serviço de carrossel para criar e publicar
-            result = self.carousel_service.post_carousel(media_urls, caption)
-            
-            # Return the result directly since it now has the correct format
-            return result
-                
-        except Exception as e:
-            logger.error(f"Erro ao postar carrossel: {str(e)}")
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
 
     def post_reels(self, video_path: str, caption: str, share_to_feed: bool = True, hashtags: List[str] = None) -> Dict[str, Any]:
         """Posta um reels no Instagram"""

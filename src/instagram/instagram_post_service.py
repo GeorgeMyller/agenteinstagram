@@ -375,22 +375,91 @@ class InstagramPostService(BaseInstagramService):
         """Creates a media container for the post."""
         params = {
             'image_url': image_url,
-            'caption': caption,
-            'media_type': 'IMAGE'  # Explicitamente definindo como IMAGE
+            'caption': caption[:2200] if caption else '',  # Instagram caption limit
+            'media_type': 'IMAGE'
         }
 
+        # Validate URL before attempting to create container
         try:
-            logger.info(f"Creating media container with params: {params}")  # Log params
-            result = self._make_request('POST', f"{self.ig_user_id}/media", data=params)
-            if result and 'id' in result:
-                container_id = result['id']
-                logger.info(f"Media container created with ID: {container_id}")
-                return container_id
-            logger.error("Failed to create media container")
+            import requests
+            from PIL import Image
+            import io
+
+            # Add headers to mimic browser request
+            headers = {
+                'User-Agent': 'Mozilla/5.0',
+                'Accept': 'image/jpeg, image/png, */*'
+            }
+            
+            # First check if URL is accessible
+            response = requests.head(image_url, timeout=10, headers=headers)
+            if response.status_code != 200:
+                logger.error(f"Image URL not accessible: {image_url}")
+                return None
+
+            content_type = response.headers.get('content-type', '').lower()
+            if not any(supported in content_type for supported in ['image/jpeg', 'image/png']):
+                logger.error(f"Unsupported media type: {content_type}")
+                return None
+
+            # Download and validate the actual image
+            img_response = requests.get(image_url, timeout=10, headers=headers)
+            img = Image.open(io.BytesIO(img_response.content))
+            
+            # Check dimensions
+            width, height = img.size
+            if width < 320 or height < 320:
+                logger.error(f"Image too small: {width}x{height}")
+                return None
+                
+            # Check aspect ratio
+            aspect_ratio = width / height
+            if aspect_ratio < 0.8 or aspect_ratio > 1.91:
+                logger.error(f"Invalid aspect ratio: {aspect_ratio:.2f}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to validate image URL: {e}")
             return None
-        except InstagramAPIError as e:
-            logger.error(f"Failed to create media container: {e}")
-            raise
+
+        retry_count = 0
+        max_retries = 3
+        base_delay = 5
+
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Creating media container with params: {params}")
+                result = self._make_request('POST', f"{self.ig_user_id}/media", data=params)
+                
+                if result and 'id' in result:
+                    container_id = result['id']
+                    logger.info(f"Media container created with ID: {container_id}")
+                    return container_id
+                
+                logger.error(f"Failed to create container, response: {result}")
+                
+            except RateLimitError as e:
+                retry_after = getattr(e, 'retry_seconds', base_delay * (2 ** retry_count))
+                if retry_count < max_retries - 1:
+                    logger.warning(f"Rate limit hit. Waiting {retry_after}s before retry...")
+                    time.sleep(retry_after)
+                else:
+                    raise
+                    
+            except InstagramAPIError as e:
+                if hasattr(e, 'error_code') and e.error_code == 400:
+                    logger.error(f"Bad Request error: {str(e)}")
+                    return None
+                raise
+                    
+            retry_count += 1
+            if retry_count < max_retries:
+                delay = base_delay * (2 ** retry_count)
+                logger.info(f"Retrying container creation in {delay}s...")
+                time.sleep(delay)
+
+        logger.error("Failed to create media container after all retries")
+        return None
 
     def check_container_status(self, container_id):
         """Verifica o status do container de mídia."""

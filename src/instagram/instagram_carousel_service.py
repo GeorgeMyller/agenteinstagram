@@ -64,15 +64,14 @@ class InstagramCarouselService(BaseInstagramService):
 
     SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png"]
     MAX_MEDIA_SIZE = 8 * 1024 * 1024  # 8MB in bytes
-
-    # Class-level rate limit state
-    _rate_limit_state = RateLimitState()
+    MAX_RETRIES = 3
+    BASE_DELAY = 5
 
     def __init__(self, access_token=None, ig_user_id=None, skip_token_validation=False):
         load_dotenv()
         access_token = access_token or os.getenv('INSTAGRAM_API_KEY')
         ig_user_id = ig_user_id or os.getenv('INSTAGRAM_ACCOUNT_ID')
-        self.instagram_account_id = ig_user_id  # Add this line
+        
         if not access_token or not ig_user_id:
             raise ValueError(
                 "Credenciais incompletas. Defina INSTAGRAM_API_KEY e "
@@ -85,216 +84,89 @@ class InstagramCarouselService(BaseInstagramService):
         
         if not skip_token_validation:
             self._validate_token()
-        else:
-            logger.warning("Instagram token validation skipped due to skip_token_validation=True flag")
 
-    def _validate_token(self, force_check=False):
-        """Validates the access token and retrieves its expiration time.
-        
-        Args:
-            force_check: If True, always check the token validity with the API.
-                        If False (default), might use cached validation results.
-        """
+    def post_carousel(self, media_urls: List[str], caption: str) -> Dict[str, Any]:
+        """Handles the full flow of creating and publishing a carousel post."""
         try:
-            # Add more detailed logging
-            logger.info(f"Validating Instagram token (force_check={force_check})")
-            logger.info(f"Using Instagram Account ID: {self.instagram_account_id}")
-            
-            response = self._make_request(
-                "GET",
-                "debug_token",
-                params={"input_token": self.access_token}
-            )
-            logger.info(f"API response: {response}")  # Log the full response
-            if response and 'data' in response and response['data'].get('is_valid'):
-                logger.info("Token de acesso validado com sucesso.")
-                
-                # Check and log scopes
-                scopes = response['data'].get('scopes', [])
-                logger.info(f"Token scopes: {scopes}")
-                
-                if 'instagram_basic' not in scopes:
-                    logger.warning("Token is missing 'instagram_basic' permission")
-                
-                if 'instagram_content_publish' not in scopes:
-                    logger.warning("Token is missing 'instagram_content_publish' permission - REQUIRED for posting!")
-                
-                # Check for other important permissions
-                missing_perms = []
-                required_perms = ['instagram_basic', 'instagram_content_publish']
-                for perm in required_perms:
-                    if perm not in scopes:
-                        missing_perms.append(perm)
-                
-                if missing_perms:
-                    logger.error(f"Token is missing required permissions: {missing_perms}")
-                    raise PermissionError(
-                        f"Token is missing required permissions: {missing_perms}. "
-                        f"Please request these permissions in your app and get a new token."
-                    )
-                
-                self.token_expires_at = response['data'].get('expires_at')
-                if self.token_expires_at:
-                    logger.info(f"Token will expire at: {datetime.fromtimestamp(self.token_expires_at)}")
-                    
-                    # Check if token needs refresh soon
-                    if time.time() > self.token_expires_at - (86400 * 3):  # 3 days before expiration
-                        logger.warning("Token will expire soon. Consider refreshing it.")
-            else:
-                logger.error("Access token is invalid or expired.")
-                raise AuthenticationError("Access token is invalid or expired.")
-        except InstagramAPIError as e:
-            logger.error(f"Error validating token: {e}")
-            raise
-
-    def _refresh_token(self):
-        """Refreshes the access token."""
-        if not os.getenv("INSTAGRAM_API_KEY"):
-            raise AuthenticationError("Cannot refresh token. No long-lived access token available.")
-
-        logger.info("Refreshing Instagram access token...")
-        try:
-            response = self._make_request(
-                "GET",
-                "oauth/access_token",
-                params={
-                    "grant_type": "ig_refresh_token",
-                    "client_secret": os.getenv("INSTAGRAM_CLIENT_SECRET"),
-                    "access_token": self.access_token,
+            if len(media_urls) < 2 or len(media_urls) > 10:
+                return {
+                    'status': 'error',
+                    'message': f'Invalid number of media URLs. Found: {len(media_urls)}, required: 2-10'
                 }
-            )
-            self.access_token = response['access_token']
-            self.token_expires_at = time.time() + response['expires_in']
-            logger.info(f"Token refreshed. New expiration: {datetime.fromtimestamp(self.token_expires_at)}")
-            
-            # Update the .env file (with warning)
-            self._update_env_file("INSTAGRAM_API_KEY", self.access_token)
-        except InstagramAPIError as e:
-            logger.error(f"Error refreshing token: {e}")
-            raise
 
-    def _update_env_file(self, key, new_value):
-        """Updates the .env file with the new token (use with caution)."""
-        try:
-            with open(".env", "r") as f:
-                lines = f.readlines()
-            updated_lines = []
-            found = False
-            for line in lines:
-                if line.startswith(f"{key}="):
-                    updated_lines.append(f"{key}={new_value}\n")
-                    found = True
-                else:
-                    updated_lines.append(line)
-            if not found:
-                updated_lines.append(f"{key}={new_value}\n")
-            with open(".env", "w") as f:
-                f.writelines(updated_lines)
-            logger.warning(
-                ".env file updated. THIS IS GENERALLY NOT RECOMMENDED FOR PRODUCTION."
-            )
-        except Exception as e:
-            logger.error(f"Error updating .env file: {e}")
+            # Validate all media first with parallel processing
+            valid_media_urls = []
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                validation_futures = {executor.submit(self._validate_media, url): url for url in media_urls}
+                for future in concurrent.futures.as_completed(validation_futures):
+                    url = validation_futures[future]
+                    try:
+                        if future.result():
+                            valid_media_urls.append(url)
+                    except Exception as e:
+                        logger.warning(f"Failed to validate {url}: {str(e)}")
 
-    def _validate_media(self, media_url: str) -> bool:
-        """Validates media URL and type before uploading with retry mechanism."""
-        max_retries = 5
-        base_delay = 5  # seconds - increased from 2 to 5
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Validating media URL (attempt {attempt+1}/{max_retries}): {media_url}")
-                
-                # Create a new session for each attempt to avoid connection pooling issues
-                import requests
-                session = requests.Session()
-                
-                # Add user agent to mimic browser request
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                    'Accept': 'image/jpeg, image/png, */*'
+            if len(valid_media_urls) < 2:
+                return {
+                    'status': 'error',
+                    'message': f'Not enough valid media URLs. Found: {len(valid_media_urls)}, required: at least 2'
                 }
-                
-                response = session.head(media_url, timeout=20, headers=headers)  # Increased timeout
-                
-                if response.status_code != 200:
-                    logger.error(f"Media URL not accessible: {media_url}, status code: {response.status_code}")
-                    
-                    # If we get a 429, we should back off more aggressively
-                    if response.status_code == 429:
-                        # Use retry-after header if present, otherwise use exponential backoff
-                        retry_after = int(response.headers.get('retry-after', base_delay * (2 ** attempt)))
-                        # Ensure we wait at least 10 seconds for Imgur rate limits
-                        retry_after = max(retry_after, 10 + random.randint(1, 10))
-                        logger.warning(f"Rate limit hit from image host. Waiting {retry_after}s before retry...")
+
+            # Create carousel container with retry logic
+            container_id = None
+            retry_count = 0
+            while retry_count < self.MAX_RETRIES and not container_id:
+                try:
+                    container_id = self.create_carousel_container(valid_media_urls, caption)
+                    if container_id:
+                        break
+                except (RateLimitError, TemporaryServerError) as e:
+                    retry_after = getattr(e, 'retry_seconds', self.BASE_DELAY * (2 ** retry_count))
+                    if retry_count < self.MAX_RETRIES - 1:
+                        logger.warning(f"Retrying container creation after {retry_after}s...")
                         time.sleep(retry_after)
-                    elif attempt < max_retries - 1:
-                        # Exponential backoff with jitter for other errors
-                        delay = base_delay * (2 ** attempt) + random.uniform(0, 3)
-                        logger.warning(f"Will retry after {delay:.2f}s...")
-                        time.sleep(delay)
-                    continue
+                    retry_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to create carousel container: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
 
-                content_type = response.headers.get('content-type', '').lower()
-                if content_type not in self.SUPPORTED_MEDIA_TYPES:
-                    logger.error(f"Unsupported media type: {content_type}")
-                    return False
+            if not container_id:
+                return {'status': 'error', 'message': 'Failed to create carousel container'}
 
-                content_length = int(response.headers.get('content-length', 0))
-                if content_length > self.MAX_MEDIA_SIZE:
-                    logger.error(f"Media file too large: {content_length} bytes")
-                    return False
+            # Wait for container with improved status checking
+            logger.info(f"Waiting for container {container_id} to be ready...")
+            status = self.wait_for_container_status(container_id)
 
-                logger.info(f"Media validation successful: {media_url}")
-                return True
-                
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error validating media (attempt {attempt+1}/{max_retries}): {str(e)}")
-                
-                if "too many 429 error responses" in str(e) or "429" in str(e):
-                    # This is likely a rate limit issue
-                    delay = base_delay * (3 ** attempt) + random.uniform(5, 15)  # More aggressive backoff
-                    logger.warning(f"Rate limit hit from image host. Waiting {delay:.2f}s before retry...")
-                    time.sleep(delay)
-                elif attempt < max_retries - 1:
-                    # General network error, retry with exponential backoff
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 5)
-                    logger.warning(f"Network error, will retry after {delay:.2f}s...")
-                    time.sleep(delay)
-            except Exception as e:
-                logger.error(f"Unexpected error validating media: {str(e)}")
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 5)
-                    logger.warning(f"Will retry after {delay:.2f}s...")
-                    time.sleep(delay)
-        
-        logger.error(f"Failed to validate media after {max_retries} attempts: {media_url}")
-        return False
+            if status not in ['FINISHED', 'PUBLISHED']:
+                if retry_count > 0:  # If we already retried creation, try publishing anyway
+                    logger.warning(f"Container status {status}, attempting publish after retries...")
+                else:
+                    return {'status': 'error', 'message': f'Container not ready. Status: {status}'}
 
-    def _create_child_container(self, media_url: str) -> Optional[str]:
-        """Creates a child container for a carousel image."""
-        if self.token_expires_at and time.time() > self.token_expires_at - 60:
-            self._refresh_token()
+            # Publish with retry logic
+            post_id = None
+            publish_retry = 0
+            while publish_retry < self.MAX_RETRIES and not post_id:
+                try:
+                    post_id = self.publish_carousel(container_id)
+                    if post_id:
+                        return {'status': 'success', 'id': post_id}
+                except (RateLimitError, TemporaryServerError) as e:
+                    retry_after = getattr(e, 'retry_seconds', self.BASE_DELAY * (2 ** publish_retry))
+                    if publish_retry < self.MAX_RETRIES - 1:
+                        logger.warning(f"Retrying publish after {retry_after}s...")
+                        time.sleep(retry_after)
+                    publish_retry += 1
+                except Exception as e:
+                    logger.error(f"Failed to publish carousel: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
 
-        if not self._validate_media(media_url):
-            logger.error(f"Media validation failed for: {media_url}")
-            return None
+            return {'status': 'error', 'message': 'Failed to publish carousel after retries'}
 
-        params = {
-            'image_url': media_url,
-            'is_carousel_item': 'true'
-        }
-
-        try:
-            result = self._make_request('POST', f"{self.ig_user_id}/media", data=params)
-            if result and 'id' in result:
-                container_id = result['id']
-                logger.info(f"Child container created: {container_id}")
-                return container_id
-            return None
-        except InstagramAPIError as e:
-            logger.error(f"Failed to create child container: {e}")
-            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in post_carousel: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
 
     def create_carousel_container(self, media_urls: List[str], caption: str) -> Optional[str]:
         """Creates a container for a carousel post."""
@@ -501,154 +373,78 @@ class InstagramCarouselService(BaseInstagramService):
                 
             raise
 
-    def post_carousel(self, media_urls: List[str], caption: str) -> Dict[str, Any]:
-        """Handles the full flow of creating and publishing a carousel post."""
+    def _validate_media(self, media_url: str) -> bool:
+        """Validates media URL and type before uploading."""
         try:
-            if len(media_urls) < 2 or len(media_urls) > 10:
-                return {
-                    'status': 'error',
-                    'message': f'Invalid number of media URLs. Found: {len(media_urls)}, required: 2-10'
-                }
-
-            if self._rate_limit_state.should_backoff():
-                wait_time = self._rate_limit_state.get_backoff_time()
-                logger.warning(f"Still in backoff period. Waiting {wait_time:.1f} seconds...")
-                time.sleep(wait_time)
-                
-            max_attempts = 3
-            base_delay = 30  # Aumentado para 30 segundos
+            import requests
             
-            for attempt in range(max_attempts):
-                try:
-                    # Create carousel container
-                    logger.info(f"Tentativa {attempt+1}/{max_attempts} de criar carrossel")
-                    container_id = self.create_carousel_container(media_urls, caption)
-                    if not container_id:
-                        if attempt < max_attempts - 1:
-                            delay = base_delay * (2 ** attempt)
-                            logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
-                            time.sleep(delay)
-                            continue
-                        return {
-                            'status': 'error',
-                            'message': 'Failed to create carousel container'
-                        }
-                    
-                    # Atraso maior após criação bem-sucedida do container
-                    logger.info(f"Container criado com sucesso: {container_id}. Aguardando processamento...")
-                    time.sleep(20)  # Atraso após criação do container
-                    
-                    # Wait for container to be ready
-                    status = self.wait_for_container_status(container_id)
-                    
-                    # Se o status não for FINISHED mas também não for um erro crítico, 
-                    # tente publicar mesmo assim após algumas tentativas
-                    if status != 'FINISHED':
-                        if attempt >= 1 and status == 'BAD_REQUEST':
-                            # Após a primeira tentativa, se tivermos BAD_REQUEST no status,
-                            # tente publicar mesmo assim (pode ser um problema de verificação)
-                            logger.warning(f"Status não é FINISHED ({status}), mas tentando publicar mesmo assim após múltiplas tentativas")
-                            time.sleep(30)  # Espera adicional antes de tentar publicar
-                        else:
-                            if attempt < max_attempts - 1:
-                                delay = base_delay * (2 ** attempt)
-                                logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
-                                time.sleep(delay)
-                                continue
-                            return {
-                                'status': 'error',
-                                'message': f'Container not ready. Final status: {status}'
-                            }
-                    
-                    # Add longer delay before publishing
-                    logger.info("Adding extra delay before publishing...")
-                    time.sleep(30)  # Aumentado para 30 segundos
-                    
-                    # Publish carousel
-                    result = None
-                    try:
-                        # Tenta publicar
-                        result = self.publish_carousel(container_id)
-                    except InstagramAPIError as e:
-                        logger.error(f"Erro ao publicar carrossel: {str(e)}")
-                        
-                        # Se o erro for de rate limit, espere e tente novamente
-                        if "too many requests" in str(e).lower() or "rate limit" in str(e).lower():
-                            if attempt < max_attempts - 1:
-                                delay = base_delay * (3 ** attempt)  # Backoff mais agressivo
-                                logger.warning(f"Rate limit detectado. Aguardando {delay}s...")
-                                time.sleep(delay)
-                                continue
-                            return {
-                                'status': 'error',
-                                'message': 'Rate limit exceeded'
-                            }
-                        
-                        # Para outros erros, se não for a última tentativa, tente novamente
-                        if attempt < max_attempts - 1:
-                            delay = base_delay * (2 ** attempt)
-                            logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
-                            time.sleep(delay)
-                            continue
-                        return {
-                            'status': 'error',
-                            'message': str(e)
-                        }
-                    
-                    if result:
-                        return {
-                            'status': 'success',
-                            'id': result
-                        }
-                    
-                    # Se chegou aqui, a publicação falhou mas não lançou exceção
-                    if attempt < max_attempts - 1:
-                        delay = base_delay * (2 ** attempt)
-                        logger.info(f"Falha na publicação. Aguardando {delay}s antes da próxima tentativa...")
-                        time.sleep(delay)
-                        continue
-                    return {
-                        'status': 'error',
-                        'message': 'Failed to publish carousel'
-                    }
-                    
-                except PermissionError as e:
-                    if "request limit reached" in str(e).lower():
-                        self._handle_rate_limit()
-                        if attempt < max_attempts - 1:
-                            continue
-                        return {
-                            'status': 'error',
-                            'message': 'Rate limit reached'
-                        }
-                    return {
-                        'status': 'error',
-                        'message': str(e)
-                    }
-                    
-                except Exception as e:
-                    logger.error(f"Error posting carousel (attempt {attempt + 1}): {str(e)}")
-                    if attempt < max_attempts - 1:
-                        delay = base_delay * (2 ** attempt)
-                        logger.info(f"Retrying in {delay} seconds...")
-                        time.sleep(delay)
-                        continue
-                    return {
-                        'status': 'error',
-                        'message': str(e)
-                    }
-                    
-            return {
-                'status': 'error',
-                'message': 'All attempts to post carousel failed'
+            logger.info(f"Validating media URL: {media_url}")
+            
+            # Add headers to mimic browser request
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'Accept': 'image/jpeg, image/png, */*'
             }
-
+            
+            response = requests.head(media_url, timeout=20, headers=headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Media URL not accessible: {media_url}, status code: {response.status_code}")
+                return False
+                
+            content_type = response.headers.get('content-type', '').lower()
+            if content_type not in self.SUPPORTED_MEDIA_TYPES:
+                logger.error(f"Unsupported media type: {content_type}")
+                return False
+                
+            content_length = int(response.headers.get('content-length', 0))
+            if content_length > self.MAX_MEDIA_SIZE:
+                logger.error(f"Media file too large: {content_length} bytes")
+                return False
+                
+            logger.info(f"Media validation successful: {media_url}")
+            return True
+            
         except Exception as e:
-            logger.error(f"Unexpected error in post_carousel: {str(e)}")
-            return {
-                'status': 'error',
-                'message': str(e)
-            }
+            logger.error(f"Error validating media: {str(e)}")
+            return False
+
+    def _validate_token(self, force_check=False):
+        """Validates the access token and retrieves its expiration time."""
+        try:
+            logger.info(f"Validating Instagram token (force_check={force_check})")
+            logger.info(f"Using Instagram Account ID: {self.ig_user_id}")
+            
+            response = self._make_request(
+                "GET",
+                "debug_token",
+                params={"input_token": self.access_token}
+            )
+            
+            if response and 'data' in response and response['data'].get('is_valid'):
+                logger.info("Token validated successfully")
+                
+                # Check scopes
+                scopes = response['data'].get('scopes', [])
+                if 'instagram_basic' not in scopes:
+                    logger.warning("Token missing 'instagram_basic' permission")
+                if 'instagram_content_publish' not in scopes:
+                    logger.warning("Token missing 'instagram_content_publish' permission")
+                
+                # Store expiration
+                self.token_expires_at = response['data'].get('expires_at')
+                if self.token_expires_at:
+                    from datetime import datetime
+                    logger.info(f"Token expires at: {datetime.fromtimestamp(self.token_expires_at)}")
+                
+                return True
+            else:
+                logger.error("Token validation failed")
+                raise AuthenticationError("Invalid or expired access token")
+                
+        except Exception as e:
+            logger.error(f"Error validating token: {str(e)}")
+            raise
 
     def check_token_permissions(self):
         """
@@ -686,3 +482,61 @@ class InstagramCarouselService(BaseInstagramService):
         delay = self._rate_limit_state.record_error()
         logger.warning(f"Rate limit hit. Backing off for {delay:.1f} seconds...")
         time.sleep(delay)
+
+    def _refresh_token(self):
+        """Refreshes the access token."""
+        if not os.getenv("INSTAGRAM_API_KEY"):
+            raise AuthenticationError("Cannot refresh token. No long-lived access token available.")
+
+        logger.info("Refreshing Instagram access token...")
+        try:
+            response = self._make_request(
+                "GET",
+                "oauth/access_token",
+                params={
+                    "grant_type": "ig_refresh_token",
+                    "client_secret": os.getenv("INSTAGRAM_CLIENT_SECRET"),
+                    "access_token": self.access_token,
+                }
+            )
+            self.access_token = response['access_token']
+            self.token_expires_at = time.time() + response['expires_in']
+            logger.info(f"Token refreshed. New expiration: {datetime.fromtimestamp(self.token_expires_at)}")
+            
+            # Update the .env file
+            self._update_env_file("INSTAGRAM_API_KEY", self.access_token)
+        except Exception as e:
+            logger.error(f"Error refreshing token: {str(e)}")
+            raise
+
+    def _update_env_file(self, key: str, new_value: str):
+        """Updates the .env file with the new token (use with caution)."""
+        try:
+            env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
+            if not os.path.exists(env_path):
+                logger.warning(f"No .env file found at {env_path}")
+                return
+
+            # Read current contents
+            with open(env_path, 'r') as f:
+                lines = f.readlines()
+
+            # Update the specific key
+            key_found = False
+            for i, line in enumerate(lines):
+                if line.startswith(f"{key}="):
+                    lines[i] = f"{key}={new_value}\n"
+                    key_found = True
+                    break
+
+            # Add key if not found
+            if not key_found:
+                lines.append(f"\n{key}={new_value}\n")
+
+            # Write back
+            with open(env_path, 'w') as f:
+                f.writelines(lines)
+
+            logger.info(f"Updated {key} in .env file")
+        except Exception as e:
+            logger.error(f"Failed to update .env file: {str(e)}")

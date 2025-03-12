@@ -38,7 +38,7 @@ def handle_message():
     """Endpoint principal para processar mensagens recebidas"""
     try:
         data = request.json
-        logger.info(f"Mensagem recebida: {data}")
+        logger.info("Mensagem recebida:")
         
         # Criar objeto de mensagem
         message = MessageFactory.create_message(data)
@@ -84,7 +84,7 @@ def handle_message():
                 f.write(message.image_base64_bytes)
             
             # Postar a imagem no Instagram
-            caption = message.image_caption or "Imagem compartilhada via WhatsApp"
+            caption = message.image_caption or ""
             post_result = instagram.post_single_photo(temp_image_path, caption)
             
             # Informar resultado ao usuário
