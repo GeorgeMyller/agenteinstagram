@@ -1,2 +1,8 @@
-code_light.txt
-code_light.txt
+.env
+__pycache__/
+*.pyc
+venv_new/
+.DS_Store
+temp/
+*.log
+api_state.json
