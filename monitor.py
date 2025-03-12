@@ -24,7 +24,7 @@ app = Flask(__name__, template_folder="monitoring_templates")
 
 # Inicializar o facade do Instagram
 instagram = InstagramFacade(
-    access_token=os.getenv('INSTAGRAM_ACCESS_TOKEN'),
+    access_token=os.getenv('INSTAGRAM_API_KEY'),
     ig_user_id=os.getenv('INSTAGRAM_USER_ID')
 )
 

@@ -10,7 +10,7 @@ load_dotenv()
 
 # Configurar o Facade do Instagram
 instagram = InstagramFacade(
-    access_token=os.getenv('INSTAGRAM_ACCESS_TOKEN'),
+    access_token=os.getenv('INSTAGRAM_API_KEY'),
     ig_user_id=os.getenv('INSTAGRAM_USER_ID')
 )
 

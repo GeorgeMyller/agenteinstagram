@@ -19,15 +19,18 @@ load_dotenv()
 # Definir o ID do grupo autorizado
 AUTHORIZED_GROUP_ID = os.getenv('AUTHORIZED_GROUP_ID')  # ID do grupo autorizado
 
-# Configuração para ignorar validação de token em ambiente de desenvolvimento
-SKIP_TOKEN_VALIDATION = os.getenv('SKIP_TOKEN_VALIDATION', 'False').lower() == 'true'
+try:
+    # Inicializar os serviços
+    instagram = InstagramFacade(
+        access_token=os.getenv('INSTAGRAM_API_KEY'),
+        ig_user_id=os.getenv('INSTAGRAM_ACCOUNT_ID'),
+        skip_token_validation=False
+    )
+    logger.info("Instagram service initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing Instagram service: {e}")
+    raise
 
-# Inicializar os serviços
-instagram = InstagramFacade(
-    access_token=os.getenv('INSTAGRAM_ACCESS_TOKEN'),
-    ig_user_id=os.getenv('INSTAGRAM_USER_ID'),
-    skip_token_validation=SKIP_TOKEN_VALIDATION
-)
 message_sender = MessageSender()
 
 @app.route('/messages-upsert', methods=['POST'])

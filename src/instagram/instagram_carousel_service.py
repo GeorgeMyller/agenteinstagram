@@ -105,6 +105,7 @@ class InstagramCarouselService(BaseInstagramService):
                 "debug_token",
                 params={"input_token": self.access_token}
             )
+            logger.info(f"API response: {response}")  # Log the full response
             if response and 'data' in response and response['data'].get('is_valid'):
                 logger.info("Token de acesso validado com sucesso.")
                 

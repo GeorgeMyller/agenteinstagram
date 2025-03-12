@@ -31,7 +31,7 @@ uv sync
 1. Create a `.env` file in the root directory
 2. Add required environment variables:
 ```
-INSTAGRAM_ACCESS_TOKEN=your_access_token
+INSTAGRAM_API_KEY=your_access_token
 INSTAGRAM_USER_ID=your_user_id
 ```
 

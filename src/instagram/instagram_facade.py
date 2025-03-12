@@ -51,41 +51,23 @@ class InstagramFacade:
                 # É um URL
                 image_url = image_path
             else:
-                # É um caminho local, precisamos fazer upload para um serviço temporário
-                # Usar um serviço simples para upload temporário
+                # É um caminho local, precisamos fazer upload para o Imgur
                 from os.path import exists
                 if not exists(image_path):
                     return {'status': 'error', 'message': f'Arquivo não encontrado: {image_path}'}
                 
-                # Upload da imagem para uma URL temporária
                 try:
                     with open(image_path, 'rb') as img_file:
-                        # Subir para imgbb.com (você pode modificar para outro serviço se preferir)
-                        imgbb_key = os.getenv('IMGBB_API_KEY')
-                        if imgbb_key:
-                            # Se tiver chave do imgbb, usamos ele
-                            response = requests.post(
-                                'https://api.imgbb.com/1/upload',
-                                params={'key': imgbb_key},
-                                files={'image': img_file}
-                            )
-                            data = response.json()
-                            if not data.get('success'):
-                                logger.error(f"Falha ao fazer upload da imagem: {data}")
-                                return {'status': 'error', 'message': 'Falha ao fazer upload da imagem'}
-                            image_url = data['data']['url']
-                        else:
-                            # Caso contrário, subir para um serviço temporário
-                            response = requests.post(
-                                'https://api.imgur.com/3/upload',
-                                headers={'Authorization': 'Client-ID ' + os.getenv('IMGUR_CLIENT_ID', '546c25a59c58ad7')},
-                                files={'image': img_file}
-                            )
-                            data = response.json()
-                            if not data.get('success'):
-                                logger.error(f"Falha ao fazer upload da imagem: {data}")
-                                return {'status': 'error', 'message': 'Falha ao fazer upload da imagem'}
-                            image_url = data['data']['link']
+                        response = requests.post(
+                            'https://api.imgur.com/3/upload',
+                            headers={'Authorization': 'Client-ID ' + os.getenv('IMGUR_CLIENT_ID', '546c25a59c58ad7')},
+                            files={'image': img_file}
+                        )
+                        data = response.json()
+                        if not data.get('success'):
+                            logger.error(f"Falha ao fazer upload da imagem: {data}")
+                            return {'status': 'error', 'message': 'Falha ao fazer upload da imagem'}
+                        image_url = data['data']['link']
                 except Exception as e:
                     logger.error(f"Erro ao fazer upload da imagem: {str(e)}")
                     return {'status': 'error', 'message': f'Erro ao fazer upload da imagem: {str(e)}'}
@@ -135,34 +117,19 @@ class InstagramFacade:
                     media_urls.append(image_path)
                     continue
                 
-                # Upload da imagem para URL temporária
+                # Upload da imagem para o Imgur
                 try:
                     with open(image_path, 'rb') as img_file:
-                        # Subir para imgbb.com ou outro serviço
-                        imgbb_key = os.getenv('IMGBB_API_KEY')
-                        if imgbb_key:
-                            response = requests.post(
-                                'https://api.imgbb.com/1/upload',
-                                params={'key': imgbb_key},
-                                files={'image': img_file}
-                            )
-                            data = response.json()
-                            if not data.get('success'):
-                                logger.error(f"Falha ao fazer upload da imagem: {data}")
-                                continue
-                            media_urls.append(data['data']['url'])
-                        else:
-                            # Caso contrário, subir para imgur
-                            response = requests.post(
-                                'https://api.imgur.com/3/upload',
-                                headers={'Authorization': 'Client-ID ' + os.getenv('IMGUR_CLIENT_ID', '546c25a59c58ad7')},
-                                files={'image': img_file}
-                            )
-                            data = response.json()
-                            if not data.get('success'):
-                                logger.error(f"Falha ao fazer upload da imagem: {data}")
-                                continue
-                            media_urls.append(data['data']['link'])
+                        response = requests.post(
+                            'https://api.imgur.com/3/upload',
+                            headers={'Authorization': 'Client-ID ' + os.getenv('IMGUR_CLIENT_ID', '546c25a59c58ad7')},
+                            files={'image': img_file}
+                        )
+                        data = response.json()
+                        if not data.get('success'):
+                            logger.error(f"Falha ao fazer upload da imagem: {data}")
+                            continue
+                        media_urls.append(data['data']['link'])
                 except Exception as e:
                     logger.error(f"Erro ao fazer upload da imagem {image_path}: {str(e)}")
                     continue
