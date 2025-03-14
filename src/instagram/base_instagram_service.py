@@ -1,299 +1,423 @@
+"""
+Instagram API Client Service Base Class
+
+Provides core functionality for interacting with the Instagram Graph API including:
+- Authentication and credential management 
+- Rate limit handling with exponential backoff
+- Error classification and recovery
+- Request retries with circuit breaking
+- Media upload and validation
+- Response parsing and error handling
+
+Usage Examples:
+    Basic usage:
+    >>> service = BaseInstagramService(api_key="key", account_id="123")
+    >>> result = service.post_image("photo.jpg", "My caption")
+    
+    Error handling:
+    >>> try:
+    ...     service.post_carousel(["img1.jpg", "img2.jpg"])
+    ... except RateLimitError as e:
+    ...     # Wait and retry after rate limit expires
+    ...     time.sleep(e.retry_after)
+    ...     service.post_carousel(["img1.jpg", "img2.jpg"])
+    
+    With monitoring:
+    >>> with ApiMonitor() as monitor:
+    ...     try:
+    ...         result = service.post_video("video.mp4")
+    ...         monitor.track_api_call("post_video", success=True)
+    ...     except Exception as e:
+    ...         monitor.track_error("post_video", str(e))
+"""
+
 import os
 import time
 import json
 import logging
 import requests
-from datetime import datetime
-from dotenv import load_dotenv
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-import random
-import math
+from typing import Dict, List, Optional, Any, Union
+from datetime import datetime, timedelta
+from pathlib import Path
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('InstagramAPI')
+from ..utils.monitor import ApiMonitor
+from .errors import (
+    AuthenticationError,
+    RateLimitError, 
+    MediaError,
+    BusinessValidationError
+)
 
-class AuthenticationError(Exception):
-    """Raised when there are issues with authentication"""
-    def __init__(self, message, error_code=None, error_subcode=None, fbtrace_id=None):
-        self.error_code = error_code
-        self.error_subcode = error_subcode
-        self.fbtrace_id = fbtrace_id
-        super().__init__(message)
-
-class PermissionError(Exception):
-    """Raised when the app lacks necessary permissions"""
-    def __init__(self, message, error_code=None, error_subcode=None, fbtrace_id=None):
-        self.error_code = error_code
-        self.error_subcode = error_subcode
-        self.fbtrace_id = fbtrace_id
-        super().__init__(message)
-
-class RateLimitError(Exception):
-    """Raised when rate limits are hit"""
-    def __init__(self, message, retry_seconds=300, error_code=None, error_subcode=None, fbtrace_id=None):
-        self.retry_seconds = retry_seconds
-        self.error_code = error_code
-        self.error_subcode = error_subcode
-        self.fbtrace_id = fbtrace_id
-        super().__init__(message)
-
-class MediaError(Exception):
-    """Raised when there are issues with the media"""
-    def __init__(self, message, error_code=None, error_subcode=None, fbtrace_id=None):
-        self.error_code = error_code
-        self.error_subcode = error_subcode
-        self.fbtrace_id = fbtrace_id
-        super().__init__(message)
-
-class TemporaryServerError(Exception):
-    """Raised for temporary server issues"""
-    def __init__(self, message, error_code=None, error_subcode=None, fbtrace_id=None):
-        self.error_code = error_code
-        self.error_subcode = error_subcode
-        self.fbtrace_id = fbtrace_id
-        super().__init__(message)
-
-class InstagramAPIError(Exception):
-    """Base class for Instagram API errors"""
-    def __init__(self, message, error_code=None, error_subcode=None, fbtrace_id=None):
-        self.error_code = error_code
-        self.error_subcode = error_subcode
-        self.fbtrace_id = fbtrace_id
-        super().__init__(message)
-
-class RateLimitHandler:
-    """Handles rate limiting with exponential backoff"""
-    
-    INITIAL_DELAY = 5  # Initial delay in seconds (increased from 2)
-    MAX_DELAY = 3600  # Maximum delay in seconds (1 hour)
-    MAX_ATTEMPTS = 5  # Maximum retry attempts
-    RATE_LIMIT_CODES = [4, 17, 32, 613]  # Extended list of rate limit error codes
-    RATE_LIMIT_SUBCODES = [2207051]  # Specific subcode for application request limit
-    
-    @classmethod
-    def is_rate_limit_error(cls, error_code, error_subcode=None):
-        """Check if an error is related to rate limiting"""
-        if error_code in cls.RATE_LIMIT_CODES:
-            if error_subcode is None or error_subcode in cls.RATE_LIMIT_SUBCODES:
-                return True
-        return False
-    
-    @classmethod
-    def calculate_backoff_time(cls, attempt, base_delay=None):
-        """Calculate backoff time with jitter"""
-        if base_delay is None:
-            base_delay = cls.INITIAL_DELAY
-            
-        # For application request limit (subcode 2207051), use longer delays
-        if attempt == 0:
-            delay = 300  # Start with 5 minutes for first attempt
-        else:
-            delay = min(cls.MAX_DELAY, base_delay * (2 ** attempt))
-            
-        # Add jitter (±25%) to avoid thundering herd problem
-        jitter = random.uniform(0.75, 1.25)
-        return delay * jitter
+logger = logging.getLogger(__name__)
 
 class BaseInstagramService:
-    """Base class for Instagram API services with common functionality"""
+    """
+    Base class for Instagram API services.
     
-    API_VERSION = "v22.0"  # Latest stable version
-    base_url = f"https://graph.facebook.com/{API_VERSION}"
-    min_request_interval = 1  # Minimum seconds between requests
+    Handles:
+    - API authentication
+    - Request retries
+    - Rate limiting
+    - Error handling
+    - Response parsing
+    - Media validation
     
-    def __init__(self, access_token, ig_user_id):
-        """Initialize with access token and Instagram user ID"""
-        self.access_token = access_token
-        self.ig_user_id = ig_user_id
-        self.last_request_time = 0
-        self.rate_limit_window = {}
-        
-        # Configure session with retries
-        self.session = requests.Session()
-        retry_strategy = Retry(
-            total=3,  # Number of retries for failed requests
-            backoff_factor=0.5,  # Factor to apply between attempts
-            status_forcelist=[500, 502, 503, 504]  # HTTP status codes to retry on
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
+    Args:
+        api_key: Instagram API key
+        account_id: Instagram account ID
+        max_retries: Maximum number of retries (default: 3)
+        retry_delay: Base delay between retries in seconds (default: 1)
+        timeout: Request timeout in seconds (default: 30)
+    """
     
-    def _make_request(self, method, endpoint, params=None, data=None, headers=None, retry_attempt=0):
-        """Make an API request with enhanced rate limiting and error handling"""
-        url = f"{self.base_url}/{endpoint}"
+    def __init__(
+        self,
+        api_key: str,
+        account_id: str,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+        timeout: int = 30
+    ):
+        # API credentials and configuration
+        self.api_key = api_key
+        self.account_id = account_id
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.timeout = timeout
         
-        # Add access token to params
-        if params is None:
-            params = {}
-        params['access_token'] = self.access_token
+        # Rate limit tracking
+        self._rate_limit_remaining = None
+        self._rate_limit_reset = None
         
-        # Respect rate limits with minimum interval between requests
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-        if elapsed < self.min_request_interval:
-            time.sleep(self.min_request_interval - elapsed)
+        # Request statistics 
+        self._request_count = 0
+        self._error_count = 0
+        self._last_request_time = None
         
+        # Initialize monitoring
+        self._monitor = ApiMonitor()
+        
+    def verify_credentials(self) -> bool:
+        """
+        Verify API credentials are valid.
+        
+        Returns:
+            bool: True if credentials are valid
+            
+        Raises:
+            AuthenticationError: If credentials are invalid
+            
+        Example:
+            >>> service = BaseInstagramService("key", "123")
+            >>> if service.verify_credentials():
+            ...     print("Credentials valid")
+        """
         try:
-            logger.info(f"Making {method} request to {endpoint}")
-            if data:
-                logger.info(f"With data: {data}")
+            # Try to get account info as credential test
+            self._make_request(
+                "GET",
+                f"/{self.account_id}",
+                params={"fields": "id,name"}
+            )
+            return True
+        except AuthenticationError:
+            return False
             
-            response = self.session.request(method, url, params=params, data=data, headers=headers)
-            self.last_request_time = time.time()
-            
-            # Process rate limit headers if present
-            if 'x-business-use-case-usage' in response.headers:
-                self._process_rate_limit_headers(response.headers)
-            
-            # Log response status
-            logger.info(f"Response status: {response.status_code}")
-            
-            if response.status_code == 403:
-                try:
-                    error_json = response.json()
-                    if 'error' in error_json:
-                        error = error_json['error']
-                        error_code = error.get('code')
-                        error_subcode = error.get('error_subcode')
-                        error_message = error.get('message', '')
-                        fb_trace_id = error.get('fbtrace_id')
-                        
-                        logger.error(f"{error_code} {error_message} (Subcode: {error_subcode})")
-                        
-                        # Handle application request limit specifically
-                        if error_subcode == 2207051:
-                            retry_seconds = 300  # Start with 5 minutes
-                            if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
-                                backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
-                                logger.warning(f"Application request limit reached. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
-                                time.sleep(backoff_time)
-                                return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
-                            
-                        raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
-                        
-                except ValueError:
-                    raise InstagramAPIError("Failed to parse error response")
-            
-            response.raise_for_status()
-            result = response.json() if response.content else None
-            
-            if result and 'error' in result:
-                error = result['error']
-                error_code = error.get('code')
-                error_message = error.get('message', '')
-                error_subcode = error.get('error_subcode')
-                fb_trace_id = error.get('fbtrace_id')
-                
-                if error_code in [190, 104]:  # Token errors
-                    raise AuthenticationError(error_message, error_code, error_subcode, fb_trace_id)
-                elif error_code in [200, 10, 803]:  # Permission errors
-                    raise PermissionError(error_message, error_code, error_subcode, fb_trace_id)
-                elif RateLimitHandler.is_rate_limit_error(error_code, error_subcode):
-                    retry_seconds = self._get_retry_after(error)
-                    if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
-                        backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
-                        logger.warning(f"Rate limit hit. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
-                        time.sleep(backoff_time)
-                        return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
-                    raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
-                elif error_code in [1, 2]:  # Temporary server errors
-                    raise TemporaryServerError(error_message, error_code, error_subcode, fb_trace_id)
-                else:
-                    raise InstagramAPIError(error_message, error_code, error_subcode, fb_trace_id)
-            
-            return result
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {str(e)}")
-            raise InstagramAPIError(f"Request failed: {str(e)}")
-    
-    def _process_rate_limit_headers(self, headers):
-        """Process rate limit information from response headers"""
-        usage_header = headers.get('x-business-use-case-usage')
-        if usage_header:
-            try:
-                usage_data = json.loads(usage_header)
-                for app_id, metrics in usage_data.items():
-                    if isinstance(metrics, list) and metrics:
-                        rate_data = metrics[0]
-                        if 'estimated_time_to_regain_access' in rate_data:
-                            self.rate_limit_window[app_id] = time.time() + rate_data['estimated_time_to_regain_access']
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse rate limit headers")
-    
-    def _get_retry_after(self, error):
-        """Extract retry after time from error response"""
-        # Default retry time increased to 5 minutes for application request limit
-        retry_seconds = 300
+    def post_image(
+        self,
+        image_path: Union[str, Path],
+        caption: Optional[str] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Post a single image to Instagram.
         
-        # Check for specific error subcodes
-        if error.get('error_subcode') == 2207051:  # Application request limit
-            retry_seconds = 900  # 15 minutes
+        Args:
+            image_path: Path to image file
+            caption: Image caption
+            **kwargs: Additional post parameters:
+                - location_id: Location ID to tag
+                - user_tags: List of user tags
+                - first_comment: First comment on post
         
-        # Try to extract time from error message
-        message = error.get('message', '').lower()
-        if 'minutes' in message:
-            try:
-                import re
-                time_match = re.search(r'(\d+)\s*minutes?', message)
-                if time_match:
-                    retry_seconds = int(time_match.group(1)) * 60
-            except:
-                pass
+        Returns:
+            dict: API response with media ID and status
+            
+        Raises:
+            MediaError: If image is invalid
+            RateLimitError: If rate limit exceeded
+            
+        Example:
+            >>> result = service.post_image(
+            ...     "photo.jpg",
+            ...     "My photo!",
+            ...     location_id="123456789",
+            ...     user_tags=[{
+            ...         "username": "friend",
+            ...         "x": 0.5,
+            ...         "y": 0.5
+            ...     }]
+            ... )
+            >>> print(f"Posted with ID: {result['id']}")
+        """
+        # Validate image
+        self._validate_image(image_path)
         
-        return retry_seconds
-
-    def check_token_permissions(self):
-        """Check if the access token has the necessary permissions"""
+        # Prepare request data
+        data = {
+            "image_url": self._get_image_url(image_path),
+            "caption": caption,
+            **kwargs
+        }
+        
+        # Upload image
         try:
-            response = self._make_request('GET', 'debug_token', params={'input_token': self.access_token})
-            if not response or 'data' not in response:
-                return False, ["Unable to verify token"]
-            
-            token_data = response['data']
-            if not token_data.get('is_valid', False):
-                return False, ["Token is invalid or expired"]
-            
-            scopes = token_data.get('scopes', [])
-            required_permissions = ['instagram_basic', 'instagram_content_publish']
-            missing = [p for p in required_permissions if p not in scopes]
-            
-            return len(missing) == 0, missing
-            
-        except Exception as e:
-            logger.error(f"Error checking token permissions: {e}")
-            return False, [str(e)]
-    
-    def get_app_usage_info(self):
-        """Get current app usage and rate limit information"""
-        try:
-            result = requests.get(
-                f"{self.base_url}/me",
-                params={
-                    'access_token': self.access_token,
-                    'debug': 'all',
-                    'fields': 'id,name'
-                }
+            response = self._make_request(
+                "POST",
+                f"/{self.account_id}/media",
+                json=data
             )
             
-            headers = result.headers
-            debug_info = result.json().get('__debug', {})
+            # Track successful upload
+            self._monitor.track_api_call(
+                "post_image",
+                success=True,
+                media_id=response["id"]
+            )
             
-            usage_info = {
-                'app_usage': debug_info.get('app_usage', {}),
-                'page_usage': debug_info.get('page_usage', {}),
-                'headers': {
-                    'x-app-usage': headers.get('x-app-usage'),
-                    'x-ad-account-usage': headers.get('x-ad-account-usage'),
-                    'x-business-use-case-usage': headers.get('x-business-use-case-usage'),
-                    'x-fb-api-version': headers.get('facebook-api-version')
-                }
-            }
+            return response
             
-            return usage_info
         except Exception as e:
-            logging.error(f"Error getting usage info: {str(e)}")
-            return {'error': str(e)}
+            # Track failed upload
+            self._monitor.track_error("post_image", str(e))
+            raise
+            
+    def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        retry_count: int = 0,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Make an API request with retries and error handling.
+        
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            retry_count: Current retry attempt
+            **kwargs: Request parameters
+            
+        Returns:
+            dict: Parsed API response
+            
+        Raises:
+            AuthenticationError: Invalid credentials
+            RateLimitError: Rate limit exceeded
+            MediaError: Invalid media
+            BusinessValidationError: Business validation failed
+        """
+        # Add authentication
+        kwargs.setdefault("headers", {}).update({
+            "Authorization": f"Bearer {self.api_key}"
+        })
+        
+        # Track request timing
+        start_time = time.time()
+        self._last_request_time = datetime.now()
+        
+        try:
+            # Make request
+            response = requests.request(
+                method,
+                f"https://graph.facebook.com/v16.0{endpoint}",
+                timeout=self.timeout,
+                **kwargs
+            )
+            
+            # Update rate limit info
+            self._update_rate_limits(response.headers)
+            
+            # Parse response
+            data = response.json()
+            
+            if "error" in data:
+                # Handle different error types
+                error = data["error"]
+                if error["code"] in (190, 2203007):
+                    raise AuthenticationError(error)
+                elif error["code"] == 4:
+                    raise RateLimitError(error)
+                elif error["code"] in range(2208001, 2208999):
+                    raise MediaError(error)
+                elif error["code"] in range(2207001, 2207999):
+                    raise BusinessValidationError(error)
+                    
+                # Generic error - maybe retry
+                if retry_count < self.max_retries:
+                    # Exponential backoff
+                    delay = self.retry_delay * (2 ** retry_count)
+                    time.sleep(delay)
+                    return self._make_request(
+                        method,
+                        endpoint,
+                        retry_count + 1,
+                        **kwargs
+                    )
+                    
+                raise Exception(f"API Error: {error}")
+                
+            # Track successful request
+            duration = time.time() - start_time
+            self._monitor.track_api_call(
+                endpoint,
+                success=True,
+                duration=duration
+            )
+            
+            return data
+            
+        except requests.RequestException as e:
+            # Track failed request
+            self._monitor.track_error(endpoint, str(e))
+            
+            # Retry on connection errors
+            if retry_count < self.max_retries:
+                delay = self.retry_delay * (2 ** retry_count)
+                time.sleep(delay)
+                return self._make_request(
+                    method,
+                    endpoint,
+                    retry_count + 1,
+                    **kwargs
+                )
+                
+            raise
+            
+    def _validate_image(self, image_path: Union[str, Path]):
+        """
+        Validate image file meets Instagram requirements.
+        
+        Args:
+            image_path: Path to image file
+            
+        Raises:
+            MediaError: If image is invalid
+            
+        Checks:
+        - File exists
+        - Valid image format
+        - Size limits
+        - Aspect ratio
+        - Color space
+        """
+        from PIL import Image
+        
+        # Convert to Path
+        path = Path(image_path)
+        
+        # Check file exists
+        if not path.exists():
+            raise MediaError({
+                "message": f"Image file not found: {path}"
+            })
+            
+        try:
+            # Open and validate image
+            with Image.open(path) as img:
+                # Check format
+                if img.format not in ("JPEG", "PNG"):
+                    raise MediaError({
+                        "message": "Image must be JPEG or PNG"
+                    })
+                    
+                # Check dimensions
+                width, height = img.size
+                aspect = width / height
+                
+                if width < 320 or height < 320:
+                    raise MediaError({
+                        "message": "Image too small (min 320x320)"
+                    })
+                    
+                if aspect < 0.8 or aspect > 1.91:
+                    raise MediaError({
+                        "message": "Invalid aspect ratio (must be 0.8-1.91)"
+                    })
+                    
+                # Check color mode
+                if img.mode not in ("RGB", "RGBA"):
+                    raise MediaError({
+                        "message": "Image must be RGB or RGBA"
+                    })
+                    
+        except Exception as e:
+            if not isinstance(e, MediaError):
+                raise MediaError({
+                    "message": f"Invalid image: {str(e)}"
+                })
+            raise
+            
+    def _update_rate_limits(self, headers: Dict[str, str]):
+        """
+        Update rate limit tracking from response headers.
+        
+        Args:
+            headers: Response headers
+            
+        Rate limit headers:
+        - X-App-Usage: App-level rate limit info
+        - X-Rate-Limit-Remaining: Remaining requests
+        - X-Rate-Limit-Reset: Time until reset
+        """
+        # Parse rate limit headers
+        if "X-Rate-Limit-Remaining" in headers:
+            self._rate_limit_remaining = int(
+                headers["X-Rate-Limit-Remaining"]
+            )
+            
+        if "X-Rate-Limit-Reset" in headers:
+            self._rate_limit_reset = datetime.now() + timedelta(
+                seconds=int(headers["X-Rate-Limit-Reset"])
+            )
+            
+        # Check app usage
+        if "X-App-Usage" in headers:
+            usage = json.loads(headers["X-App-Usage"])
+            
+            # Log if nearing limits
+            if usage.get("call_count", 0) > 80:
+                logger.warning(
+                    "Approaching API rate limit: "
+                    f"{usage['call_count']}% used"
+                )
+                
+    def _get_image_url(self, image_path: Union[str, Path]) -> str:
+        """
+        Get publicly accessible URL for image file.
+        
+        For testing, returns the file path. In production,
+        would upload to CDN/object storage first.
+        
+        Args:
+            image_path: Path to image file
+            
+        Returns:
+            str: Public URL for the image
+        """
+        # TODO: Upload to storage and return URL
+        return str(image_path)
+        
+    def __enter__(self):
+        """Start monitoring when used as context manager."""
+        self._monitor.start()
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Stop monitoring and log any errors."""
+        self._monitor.stop()
+        if exc_type is not None:
+            logger.error(
+                f"Error in Instagram service: {exc_type.__name__}"
+                f"\n{str(exc_val)}"
+            )

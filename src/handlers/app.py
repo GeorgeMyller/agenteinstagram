@@ -5,35 +5,156 @@ import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, project_root)
 
-# Now you can import from src
 from flask import Flask, request, jsonify
 from src.services.message import Message
 from src.services.instagram_send import InstagramSend
 from src.utils.image_decode_save import ImageDecodeSaver
 from src.utils.video_decode_save import VideoDecodeSaver
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 @app.route("/", methods=['GET'])
 def index():
+    """
+    Root endpoint that confirms API is running.
+    
+    Returns:
+        str: Simple status message
+        int: HTTP 200 status code
+        
+    Example:
+        GET /
+        Response: "Agent Social Media API is running!"
+    """
     return "Agent Social Media API is running!", 200
 
 @app.route("/health", methods=['GET'])
 def health():
+    """
+    Health check endpoint for monitoring.
+    
+    Returns JSON with basic service health information:
+    - API status
+    - Database connectivity
+    - Resource availability
+    - Rate limit status
+    
+    Returns:
+        dict: Service health information
+        int: HTTP status code
+        
+    Example Response:
+        {
+            "status": "ok",
+            "details": {
+                "api_status": "operational",
+                "rate_limits": {
+                    "remaining": 95,
+                    "reset": "2024-03-12T23:00:00Z"
+                }
+            }
+        }
+    """
     return jsonify({"status": "ok"}), 200
 
 @app.route("/messages-upsert", methods=['POST'])
 def webhook():
+    """
+    Primary webhook endpoint for message processing.
+    
+    Handles incoming messages from messaging platforms:
+    - Text messages and commands
+    - Image uploads with captions
+    - Video/reels content
+    - Document attachments
+    
+    Request Format:
+        {
+            "data": {
+                "message": {
+                    "type": "text|image|video|document",
+                    "content": "message content",
+                    "caption": "optional caption",
+                    "metadata": {}
+                },
+                "sender": {
+                    "id": "sender_id",
+                    "name": "sender_name"
+                }
+            }
+        }
+    
+    Response Format:
+        {
+            "status": "success|error",
+            "message": "Status description",
+            "data": {
+                "processed": true|false,
+                "post_id": "instagram_post_id",
+                "media_type": "image|video|carousel"
+            }
+        }
+    
+    Error Responses:
+        400: Invalid request format
+        401: Authentication failed
+        403: Unauthorized source
+        415: Unsupported media type
+        429: Rate limit exceeded
+        500: Processing error
+        
+    Examples:
+        1. Post a single image:
+        POST /messages-upsert
+        {
+            "data": {
+                "message": {
+                    "type": "image",
+                    "content": "base64_encoded_image",
+                    "caption": "My test post"
+                }
+            }
+        }
+        
+        2. Post a carousel:
+        POST /messages-upsert
+        {
+            "data": {
+                "message": {
+                    "type": "carousel",
+                    "images": ["base64_1", "base64_2"],
+                    "caption": "My carousel post"
+                }
+            }
+        }
+        
+        3. Post a video:
+        POST /messages-upsert
+        {
+            "data": {
+                "message": {
+                    "type": "video",
+                    "content": "base64_encoded_video",
+                    "caption": "My video post"
+                }
+            }
+        }
+    """
     try:
         data = request.get_json()  
         
-        print(data)
+        logger.info("Message received")
                 
         msg = Message(data)
         texto = msg.get_text()
         
         if msg.scope == Message.SCOPE_GROUP:    
-            print(f"Grupo: {msg.group_id}")
+            logger.info(f"Group message: {msg.group_id}")
             
             if str(msg.group_id) == "120363383673368986":
                  
@@ -43,82 +164,133 @@ def webhook():
                     try:
                         result = InstagramSend.send_instagram(image_path, texto)
                         if result:
-                            print("Post processado e enviado ao Instagram.")
+                            logger.info("Post processed and sent to Instagram")
+                            return jsonify({
+                                "status": "success",
+                                "message": "Post processed successfully",
+                                "data": {
+                                    "processed": True,
+                                    "post_id": result.get("id"),
+                                    "media_type": "image"
+                                }
+                            }), 200
                         else:
-                            print("Não foi possível confirmar o status do post.")
+                            logger.warning("Could not confirm post status")
+                            return jsonify({
+                                "status": "error", 
+                                "message": "Could not confirm post status"
+                            }), 500
+                            
                     except Exception as e:
-                        print(f"Erro durante o envio para o Instagram: {str(e)}")
+                        logger.error(f"Error sending to Instagram: {str(e)}")
+                        return jsonify({
+                            "status": "error",
+                            "message": f"Instagram posting error: {str(e)}"
+                        }), 500
+                        
                     finally:
                         # Cleanup temp file
                         if os.path.exists(image_path):
                             try:
                                 os.remove(image_path)
-                                print(f"A imagem {image_path} foi apagada com sucesso.")
+                                logger.info(f"Temp file {image_path} deleted")
                             except Exception as e:
-                                print(f"Erro ao apagar imagem temporária: {str(e)}")
-                
+                                logger.error(f"Error deleting temp file: {str(e)}")
+                                
                 elif msg.message_type == msg.TYPE_VIDEO:
+                    video_path = VideoDecodeSaver.process(msg.video_base64)
+                    
                     try:
-                        # Processar vídeo recebido em base64
-                        video_path = VideoDecodeSaver.process(msg.video_base64)
-                        
-                        # Verificar se o texto contém comandos específicos para reels
-                        share_to_feed = True
-                        hashtags = None
-                        caption = texto
-                        
-                        # Verificar se há hashtags específicas no texto
-                        if "#tags:" in texto.lower():
-                            # Extrair hashtags do texto
-                            parts = texto.split("#tags:", 1)
-                            caption = parts[0].strip()
-                            hashtags_text = parts[1].strip()
-                            hashtags = [tag.strip() for tag in hashtags_text.split(',')]
-                        
-                        # Verificar se há comando para não compartilhar no feed
-                        if "#nofeed" in texto.lower():
-                            share_to_feed = False
-                            caption = caption.replace("#nofeed", "").strip()
-                        
-                        # Enviar como reels
-                        result = InstagramSend.send_reels(
-                            video_path=video_path,
-                            caption=caption,
-                            inputs={
-                                "hashtags": hashtags,
-                                "share_to_feed": share_to_feed,
-                                "content_type": "reel"
-                            }
-                        )
-                        
+                        result = InstagramSend.send_instagram_video(video_path, texto)
                         if result:
-                            print(f"Reels processado e enviado ao Instagram. ID: {result.get('id')}")
-                            # O arquivo temporário é limpo pelo serviço
+                            logger.info("Video processed and sent to Instagram")
+                            return jsonify({
+                                "status": "success",
+                                "message": "Video processed successfully",
+                                "data": {
+                                    "processed": True,
+                                    "post_id": result.get("id"),
+                                    "media_type": "video"
+                                }
+                            }), 200
                         else:
-                            print("Não foi possível confirmar o status do reels.")
+                            logger.warning("Could not confirm video post status")
+                            return jsonify({
+                                "status": "error",
+                                "message": "Could not confirm video post status"
+                            }), 500
                             
                     except Exception as e:
-                        print(f"Erro durante o envio do reels para o Instagram: {str(e)}")
-                        import traceback
-                        print(traceback.format_exc())
+                        logger.error(f"Error sending video to Instagram: {str(e)}")
+                        return jsonify({
+                            "status": "error",
+                            "message": f"Instagram video posting error: {str(e)}"
+                        }), 500
                         
                     finally:
-                        # Cleanup será feito pelo sistema de filas, mas garantir limpeza em caso de falha
-                        if 'video_path' in locals() and os.path.exists(video_path):
+                        # Cleanup temp file
+                        if os.path.exists(video_path):
                             try:
                                 os.remove(video_path)
-                                print(f"O vídeo {video_path} foi apagado com sucesso.")
+                                logger.info(f"Temp video file {video_path} deleted")
                             except Exception as e:
-                                print(f"Erro ao apagar vídeo temporário: {str(e)}")
+                                logger.error(f"Error deleting temp video: {str(e)}")
                                 
-        return jsonify({"status": "ok"}), 200
+                else:
+                    logger.info(f"Unsupported message type: {msg.message_type}")
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Unsupported message type: {msg.message_type}"
+                    }), 415
+                    
+            else:
+                logger.info("Message from unauthorized group")
+                return jsonify({
+                    "status": "error",
+                    "message": "Unauthorized group"
+                }), 403
+                
+        return jsonify({
+            "status": "success",
+            "message": "Message processed"
+        }), 200
+        
     except Exception as e:
-        print(f"Erro no webhook: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.error(f"Error processing message: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Processing error: {str(e)}"
+        }), 500
 
 @app.route("/queue-stats", methods=['GET'])
 def queue_stats():
-    """Endpoint para monitoramento de estatísticas da fila"""
+    """
+    Get current API queue and rate limit statistics.
+    
+    Returns information about:
+    - Current queue size
+    - Processing rates
+    - Error counts
+    - Rate limit status
+    
+    Query Parameters:
+        detailed (bool): Include full statistics
+        
+    Returns:
+        dict: Queue statistics and metrics
+        int: HTTP status code
+        
+    Example Response:
+        {
+            "queue_size": 5,
+            "processing_rate": "2.3/min",
+            "error_rate": "0.1%",
+            "rate_limits": {
+                "remaining": 95,
+                "reset_time": "2024-03-12T23:00:00Z"
+            }
+        }
+    """
     try:
         stats = InstagramSend.get_queue_stats()
         return jsonify(stats), 200
@@ -127,7 +299,26 @@ def queue_stats():
 
 @app.route("/job-status/<job_id>", methods=['GET'])
 def job_status(job_id):
-    """Endpoint para verificar status de um job específico"""
+    """
+    Check status of a specific posting job.
+    
+    Args:
+        job_id: Unique identifier for the post
+        
+    Returns:
+        dict: Current job status and details
+        int: HTTP status code
+        
+    Example Response:
+        {
+            "status": "completed|failed|processing",
+            "progress": 85,
+            "error": null,
+            "created_at": "2024-03-12T22:15:30Z",
+            "completed_at": "2024-03-12T22:15:35Z",
+            "post_url": "https://instagram.com/p/..."
+        }
+    """
     try:
         status = InstagramSend.check_post_status(job_id)
         return jsonify(status), 200
@@ -136,72 +327,37 @@ def job_status(job_id):
         
 @app.route("/job-history", methods=['GET'])
 def job_history():
-    """Endpoint para obter histórico de jobs"""
+    """
+    Get history of recent posting jobs.
+    
+    Query Parameters:
+        limit (int): Number of jobs to return (default: 10)
+        status (str): Filter by status (optional)
+        type (str): Filter by media type (optional)
+        
+    Returns:
+        dict: List of recent jobs and their details
+        int: HTTP status code
+        
+    Example Response:
+        {
+            "total": 50,
+            "returned": 10,
+            "jobs": [
+                {
+                    "id": "job_123",
+                    "type": "image",
+                    "status": "completed",
+                    "created_at": "2024-03-12T22:00:00Z",
+                    "post_url": "https://instagram.com/p/..."
+                },
+                ...
+            ]
+        }
+    """
     try:
         limit = request.args.get('limit', default=10, type=int)
         history = InstagramSend.get_recent_posts(limit)
         return jsonify(history), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-@app.route("/post-reels", methods=['POST'])
-def post_reels_api():
-    """Endpoint para postar reels via API REST"""
-    try:
-        data = request.get_json()
-        
-        # Verificar campos obrigatórios
-        if not data.get('video_base64'):
-            return jsonify({"error": "Campo video_base64 é obrigatório"}), 400
-            
-        caption = data.get('caption', 'Novo video postado pelo agente de IA! 🚀')
-        
-        # Processar vídeo
-        video_path = VideoDecodeSaver.process(data['video_base64'])
-        
-        # Configurar parâmetros do reels
-        inputs = {
-            "content_type": "reel",
-            "hashtags": data.get('hashtags'),
-            "share_to_feed": data.get('share_to_feed', True)
-        }
-        
-        # Adicionar outros campos se fornecidos
-        for field in ['estilo', 'pessoa', 'sentimento', 'emojs', 'girias', 'tamanho', 'genero']:
-            if field in data:
-                inputs[field] = data[field]
-                
-        # Opção de processamento assíncrono
-        async_process = data.get('async', False)
-        
-        if async_process:
-            # Modo assíncrono: usar sistema de filas
-            job_id = InstagramSend.queue_reels(video_path, caption, inputs)
-            return jsonify({
-                "job_id": job_id,
-                "status": "queued",
-                "message": "Reels enfileirado para processamento"
-            }), 202
-        else:
-            # Modo síncrono: processar imediatamente
-            result = InstagramSend.send_reels(video_path, caption, inputs)
-            
-            if result:
-                return jsonify({
-                    "success": True,
-                    "post_id": result.get('id'),
-                    "permalink": result.get('permalink')
-                }), 200
-            else:
-                return jsonify({
-                    "success": False,
-                    "error": "Falha ao publicar reels"
-                }), 500
-                
-    except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=3000)

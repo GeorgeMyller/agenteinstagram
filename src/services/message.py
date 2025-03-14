@@ -1,7 +1,42 @@
-import base64
+from typing import Optional, Dict, Any
+import logging
+import os
+from datetime import datetime
+from src.utils.resource_manager import ResourceManager
+from src.utils.config import Config
 
+logger = logging.getLogger(__name__)
 
 class Message:
+    """
+    Message handler class that processes and extracts data from various message types.
+    Supports different message formats including text, audio, image, document, and video.
+
+    Features:
+        - Automatic message type detection
+        - Resource management for media files
+        - Temporary file cleanup
+        - Group/private message handling
+        - Base64 media decoding
+        
+    Message Types:
+        - TYPE_TEXT: Text messages and commands
+        - TYPE_AUDIO: Voice messages and audio files
+        - TYPE_IMAGE: Photos and image files
+        - TYPE_DOCUMENT: Document attachments
+        - TYPE_VIDEO: Video messages and reels
+
+    Scope Types:
+        - SCOPE_GROUP: Messages from group chats
+        - SCOPE_PRIVATE: Direct messages
+    
+    Example:
+        >>> msg = Message(raw_message_data)
+        >>> if msg.message_type == Message.TYPE_IMAGE:
+        ...     # Process image with automatic cleanup
+        ...     with resource_manager.temp_file(suffix='.jpg') as temp_path:
+        ...         temp_path.write_bytes(msg.image_base64_bytes)
+    """
     
     TYPE_TEXT = "conversation"
     TYPE_AUDIO = "audioMessage"
@@ -13,11 +48,38 @@ class Message:
     SCOPE_PRIVATE = "private"
     
     def __init__(self, raw_data):
+        """
+        Initialize message processor with raw message data.
+
+        Args:
+            raw_data (dict): Raw message data in either simple or complete format.
+                           Complete format includes 'data', 'event', 'instance', etc.
+                           Simple format contains only message content.
+
+        Example:
+            Complete format:
+            {
+                "event": "message",
+                "instance": "instance_id",
+                "data": {
+                    "message": {
+                        "conversation": "Hello"
+                    }
+                }
+            }
+
+            Simple format:
+            {
+                "message": {
+                    "conversation": "Hello"
+                }
+            }
+        """
+        self.resource_manager = ResourceManager()
+        self.config = Config.get_instance()
         
-            # Verifica se é um dicionário completo (possui a chave 'data') ou se é simples
+        # Handle different message formats
         if "data" not in raw_data:
-            # Formato simples: não tem 'event', 'instance', 'destination' etc.
-            # Envelopa o conteúdo em um dicionário com as chaves de nível superior nulas
             enveloped_data = {
                 "event": None,
                 "instance": None,
@@ -25,18 +87,36 @@ class Message:
                 "date_time": None,
                 "server_url": None,
                 "apikey": None,
-                "data": raw_data  # Todo o conteúdo simples vai para 'data'
+                "data": raw_data
             }
         else:
-            # Formato completo: já contém 'data' (e possivelmente 'event', 'instance' etc.)
             enveloped_data = raw_data
         
         self.data = enveloped_data
         self.extract_common_data()
         self.extract_specific_data()
-
+    
     def extract_common_data(self):
-        """Extrai os dados comuns e define os atributos da classe."""
+        """
+        Extract common metadata from the message.
+        
+        Processes and sets attributes for:
+        - Message source and destination
+        - Timestamps and IDs
+        - User information
+        - Message type and status
+        - Group/private chat context
+        
+        Example metadata structure:
+            {
+                "remoteJid": "1234567890@g.us",
+                "id": "msg_123",
+                "fromMe": false,
+                "timestamp": "1234567890",
+                "pushName": "User Name",
+                "status": "received"
+            }
+        """
         self.event = self.data.get("event")
         self.instance = self.data.get("instance")
         self.destination = self.data.get("destination")
@@ -47,7 +127,7 @@ class Message:
         data = self.data.get("data", {})
         key = data.get("key", {})
         
-        # Atributos diretos
+        # Core message attributes
         self.remote_jid = key.get("remoteJid")
         self.message_id = key.get("id")
         self.from_me = key.get("fromMe")
@@ -57,47 +137,97 @@ class Message:
         self.source = data.get("source")
         self.message_timestamp = data.get("messageTimestamp")
         self.message_type = data.get("messageType")
-        self.sender = data.get("sender")  # Disponível apenas para grupos
-        self.participant = key.get("participant")  # Número de quem enviou no grupo
+        self.sender = data.get("sender")
+        self.participant = key.get("participant")
 
-        # Determina o escopo da mensagem
         self.determine_scope()
 
     def determine_scope(self):
-        """Determina se a mensagem é de grupo ou privada e define os atributos correspondentes."""
+        """
+        Determine if message is from a group or private chat.
+        Sets scope-related attributes based on the message context.
+        
+        Group messages (ends with @g.us):
+            - Sets group_id from JID
+            - Sets phone from participant ID
+            
+        Private messages (ends with @s.whatsapp.net):
+            - Sets phone from JID
+            - Sets group_id to None
+            
+        Example:
+            Group: "123456789@g.us" -> group_id="123456789"
+            Private: "987654321@s.whatsapp.net" -> phone="987654321"
+        """
         if self.remote_jid.endswith("@g.us"):
             self.scope = self.SCOPE_GROUP
-            self.group_id = self.remote_jid.split("@")[0]  # ID do grupo
-            self.phone = self.participant.split("@")[0] if self.participant else None  # Número do remetente no grupo
+            self.group_id = self.remote_jid.split("@")[0]
+            self.phone = self.participant.split("@")[0] if self.participant else None
         elif self.remote_jid.endswith("@s.whatsapp.net"):
             self.scope = self.SCOPE_PRIVATE
-            self.phone = self.remote_jid.split("@")[0]  # Número do contato
-            self.group_id = None  # Não é aplicável em mensagens privadas
+            self.phone = self.remote_jid.split("@")[0]
+            self.group_id = None
         else:
-            self.scope = "unknown"  # Tipo desconhecido
+            self.scope = "unknown"
             self.phone = None
             self.group_id = None
 
     def extract_specific_data(self):
-        """Extrai dados específicos e os define como atributos da classe."""
-        if self.message_type == self.TYPE_TEXT:
-            self.extract_text_message()
-        elif self.message_type == self.TYPE_AUDIO:
-            self.extract_audio_message()
-        elif self.message_type == self.TYPE_IMAGE:
-            self.extract_image_message()
-        elif self.message_type == self.TYPE_DOCUMENT:
-            self.extract_document_message()
-        elif self.message_type == self.TYPE_VIDEO:
-            self.extract_video_message()
-
+        """
+        Extract data specific to the message type.
+        Delegates to appropriate handler based on message_type.
+        
+        Supported message types:
+        - Text: Plain text messages
+        - Audio: Voice messages and audio files
+        - Image: Photos and images
+        - Document: File attachments
+        - Video: Video messages and reels
+        
+        Each type has its own extraction method that handles:
+        - Media decoding (if applicable)
+        - Resource management
+        - Metadata extraction
+        - Temporary file handling
+        """
+        type_handlers = {
+            self.TYPE_TEXT: self.extract_text_message,
+            self.TYPE_AUDIO: self.extract_audio_message,
+            self.TYPE_IMAGE: self.extract_image_message,
+            self.TYPE_DOCUMENT: self.extract_document_message,
+            self.TYPE_VIDEO: self.extract_video_message
+        }
+        
+        handler = type_handlers.get(self.message_type)
+        if handler:
+            handler()
 
     def extract_text_message(self):
-        """Extrai dados de uma mensagem de texto e define como atributos."""
+        """
+        Extract plain text from message.
+        Sets text_message attribute with conversation content.
+        """
         self.text_message = self.data["data"]["message"].get("conversation")
 
     def extract_audio_message(self):
-        """Extrai dados de uma mensagem de áudio e define como atributos da classe."""
+        """
+        Extract audio message data and metadata.
+        
+        Processes:
+        - Base64 encoded audio data
+        - Audio format and duration
+        - Codec information
+        - Waveform data (if available)
+        
+        Example audio metadata:
+            {
+                "url": "https://example.com/audio.mp3",
+                "mimetype": "audio/mp4",
+                "fileSha256": "hash",
+                "seconds": 30,
+                "ptt": true
+            }
+        """
         audio_data = self.data["data"]["message"]["audioMessage"]
         self.audio_base64_bytes = self.data["data"]["message"].get("base64")
         self.audio_url = audio_data.get("url")
@@ -111,102 +241,116 @@ class Message:
         self.audio_direct_path = audio_data.get("directPath")
         self.audio_waveform = audio_data.get("waveform")
         self.audio_view_once = audio_data.get("viewOnce", False)
-        
-        
+
     def extract_image_message(self):
-        """Extrai dados de uma mensagem de imagem e define como atributos."""
-        image_data = self.data["data"]["message"]["imageMessage"]
-        self.image_url = image_data.get("url")
-        self.image_mimetype = image_data.get("mimetype")
-        self.image_caption = image_data.get("caption")
-        self.image_file_sha256 = image_data.get("fileSha256")
-        self.image_file_length = image_data.get("fileLength")
-        self.image_height = image_data.get("height")
-        self.image_width = image_data.get("width")
-        self.image_media_key = image_data.get("mediaKey")
-        self.image_file_enc_sha256 = image_data.get("fileEncSha256")
-        self.image_direct_path = image_data.get("directPath")
-        self.image_media_key_timestamp = image_data.get("mediaKeyTimestamp")
-        self.image_thumbnail_base64 = image_data.get("jpegThumbnail")
-        self.image_scans_sidecar = image_data.get("scansSidecar")
-        self.image_scan_lengths = image_data.get("scanLengths")
-        self.image_mid_quality_file_sha256 = image_data.get("midQualityFileSha256")
-        self.image_base64 = self.data["data"]["message"].get("base64")
-        # Adicionar o atributo que estava faltando para converter base64 para bytes
-        self.image_base64_bytes = self.decode_base64(self.data["data"]["message"].get("base64"))
+        """
+        Extract and process image message with resource management.
         
+        Features:
+        - Automatic base64 decoding
+        - Temporary file creation
+        - Resource cleanup scheduling
+        - Caption extraction
+        
+        Example:
+            Image data is saved to a temporary file and registered
+            for cleanup after 2 hours. The temporary path is stored
+            in self.image_path for processing.
+            
+        Note:
+            Uses ResourceManager for automatic cleanup of temp files.
+        """
+        message_data = self.data["data"]["message"].get("imageMessage", {})
+        self.image_caption = message_data.get("caption")
+        
+        # Get image data
+        self.image_base64 = message_data.get("base64")
+        if self.image_base64:
+            try:
+                import base64
+                self.image_base64_bytes = base64.b64decode(self.image_base64)
+                
+                # Save image using resource manager
+                with self.resource_manager.temp_file(suffix='.jpg') as temp_path:
+                    temp_path.write_bytes(self.image_base64_bytes)
+                    self.image_path = str(temp_path)
+                    self.resource_manager.register_resource(temp_path, lifetime_hours=2)
+                    
+                logger.info(f"Image saved to temporary file: {self.image_path}")
+                
+            except Exception as e:
+                logger.error(f"Error processing image: {e}")
+                self.image_base64_bytes = None
+                self.image_path = None
+
     def extract_document_message(self):
-        """Extrai dados de uma mensagem de documento e define como atributos da classe."""
-        document_data = self.data["data"]["message"]["documentMessage"]
-        self.document_url = document_data.get("url")
-        self.document_mimetype = document_data.get("mimetype")
-        self.document_title = document_data.get("title")
-        self.document_file_sha256 = document_data.get("fileSha256")
-        self.document_file_length = document_data.get("fileLength")
-        self.document_media_key = document_data.get("mediaKey")
-        self.document_file_name = document_data.get("fileName")
-        self.document_file_enc_sha256 = document_data.get("fileEncSha256")
-        self.document_direct_path = document_data.get("directPath")
-        self.document_caption = document_data.get("caption", None)
-        self.document_base64_bytes = self.decode_base64(self.data["data"]["message"].get("base64"))
+        """
+        Extract and process document attachments with resource management.
+        
+        Features:
+        - Original filename preservation
+        - Automatic base64 decoding
+        - Temporary file handling
+        - Resource cleanup after 1 hour
+        
+        The document is saved to a temporary file with its original
+        extension and registered for cleanup. The path is stored in
+        self.document_path for processing.
+        """
+        message_data = self.data["data"]["message"].get("documentMessage", {})
+        self.document_filename = message_data.get("fileName")
+        
+        self.document_base64 = message_data.get("base64")
+        if self.document_base64:
+            try:
+                import base64
+                self.document_base64_bytes = base64.b64decode(self.document_base64)
+                
+                # Save document using resource manager
+                with self.resource_manager.temp_file(suffix=os.path.splitext(self.document_filename)[1]) as temp_path:
+                    temp_path.write_bytes(self.document_base64_bytes)
+                    self.document_path = str(temp_path)
+                    self.resource_manager.register_resource(temp_path, lifetime_hours=1)
+                    
+                logger.info(f"Document saved to temporary file: {self.document_path}")
+                
+            except Exception as e:
+                logger.error(f"Error processing document: {e}")
+                self.document_base64_bytes = None
+                self.document_path = None
 
     def extract_video_message(self):
-        """Extrai dados de uma mensagem de vídeo e define como atributos da classe."""
-        video_data = self.data["data"]["message"]["videoMessage"]
-        self.video_url = video_data.get("url")
-        self.video_mimetype = video_data.get("mimetype")
-        self.video_caption = video_data.get("caption")
-        self.video_file_sha256 = video_data.get("fileSha256")
-        self.video_file_length = video_data.get("fileLength")
-        self.video_height = video_data.get("height")
-        self.video_width = video_data.get("width")
-        self.video_media_key = video_data.get("mediaKey")
-        self.video_file_enc_sha256 = video_data.get("fileEncSha256")
-        self.video_direct_path = video_data.get("directPath")
-        self.video_media_key_timestamp = video_data.get("mediaKeyTimestamp")
-        self.video_seconds = video_data.get("seconds")
-        self.video_streaming_sidecar = video_data.get("streamingSidecar")
-        self.video_thumbnail_base64 = video_data.get("jpegThumbnail")
-        self.video_gif_playback = video_data.get("gifPlayback", False)
-        self.video_view_once = video_data.get("viewOnce", False)
-        self.video_base64 = self.data["data"]["message"].get("base64")
-        self.video_base64_bytes = self.decode_base64(self.data["data"]["message"].get("base64"))
-
-    def decode_base64(self, base64_string):
-        """Converte uma string base64 em bytes."""
-        if base64_string:
-            return base64.b64decode(base64_string)
-        return None
-
-    def get(self):
-        """Retorna todos os atributos como um dicionário."""
-        return self.__dict__
-
-    def get_text(self):
-        """Retorna o texto da mensagem, dependendo do tipo."""
-        text = ""
-        if self.message_type == self.TYPE_TEXT:
-            text = self.text_message
-        elif self.message_type == self.TYPE_IMAGE:
-            text = self.image_caption
-        elif self.message_type == self.TYPE_DOCUMENT:
-            text = self.document_caption
-        elif self.message_type == self.TYPE_VIDEO:
-            text = self.video_caption
-            
-        return text
-
-    def get_name(self):
-        """Retorna o nome do remetente."""
-        return self.push_name
-
-    @staticmethod
-    def get_messages(messages):
-        """Retorna uma lista de objetos `Message` a partir de uma lista de mensagens."""
-        msgs = messages['messages']['records']
+        """
+        Extract and process video message with resource management.
         
-        mensagens = []
-        for msg in msgs:
-            mensagens.append(Message(msg))
+        Features:
+        - Video caption extraction
+        - Base64 decoding
+        - Temporary MP4 file creation
+        - Extended cleanup time (3 hours)
         
-        return mensagens
+        Videos are given a longer cleanup window due to potentially
+        longer processing times. The temporary path is stored in
+        self.video_path for further processing.
+        """
+        message_data = self.data["data"]["message"].get("videoMessage", {})
+        self.video_caption = message_data.get("caption")
+        
+        self.video_base64 = message_data.get("base64")
+        if self.video_base64:
+            try:
+                import base64
+                self.video_base64_bytes = base64.b64decode(self.video_base64)
+                
+                # Save video using resource manager
+                with self.resource_manager.temp_file(suffix='.mp4') as temp_path:
+                    temp_path.write_bytes(self.video_base64_bytes)
+                    self.video_path = str(temp_path)
+                    self.resource_manager.register_resource(temp_path, lifetime_hours=3)
+                    
+                logger.info(f"Video saved to temporary file: {self.video_path}")
+                
+            except Exception as e:
+                logger.error(f"Error processing video: {e}")
+                self.video_base64_bytes = None
+                self.video_path = None

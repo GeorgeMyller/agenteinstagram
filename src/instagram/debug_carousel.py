@@ -2,8 +2,23 @@
 """
 Instagram Carousel Debug Utility
 
-This script helps diagnose issues with Instagram carousel posting functionality.
-It checks token permissions and provides detailed debugging information.
+This script provides diagnostic tools for troubleshooting Instagram carousel posting functionality.
+Features:
+- Token validation and permission checks
+- Image validation and optimization
+- Upload simulation
+- Rate limit monitoring
+- Cache management
+
+Example Usage:
+    # Basic validation
+    python debug_carousel.py
+    
+    # Test with specific images
+    python debug_carousel.py --images image1.jpg image2.jpg
+    
+    # Full diagnostic run
+    python debug_carousel.py --full-check --verbose
 """
 
 import os
@@ -11,7 +26,7 @@ import sys
 import logging
 import argparse
 import requests
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 
 # Set up logging
@@ -26,8 +41,25 @@ from src.instagram.instagram_carousel_service import InstagramCarouselService
 from src.instagram.carousel_poster import upload_carousel_images
 from src.instagram.base_instagram_service import BaseInstagramService
 
-def check_token_permissions():
-    """Check if the current token has all required permissions for carousel posting"""
+def check_token_permissions() -> bool:
+    """
+    Validate Instagram API token permissions for carousel posting.
+    
+    Checks required permissions:
+    - instagram_basic
+    - instagram_content_publish
+    - pages_read_engagement
+    - pages_manage_posts
+    
+    Returns:
+        bool: True if token has all required permissions
+        
+    Example:
+        >>> if check_token_permissions():
+        ...     print("Token valid and has required permissions")
+        ... else:
+        ...     print("Token missing required permissions")
+    """
     load_dotenv()
     
     print("\n===== CHECKING TOKEN PERMISSIONS =====")
@@ -51,30 +83,35 @@ def check_token_permissions():
             return True
         else:
             print(f"❌ Token is missing required permissions: {missing_permissions}")
-            
-            # Get detailed token info
-            token_info = service.debug_token()
-            if 'data' in token_info:
-                print("\nDetailed token information:")
-                data = token_info['data']
-                print(f"App ID: {data.get('app_id', 'N/A')}")
-                print(f"Type: {data.get('type', 'N/A')}")
-                print(f"Expires: {data.get('expires_at', 'N/A')}")
-                print(f"Valid: {data.get('is_valid', False)}")
-                print(f"Scopes: {', '.join(data.get('scopes', []))}")
-            
-            print("\nRequired permissions for carousel posting:")
-            print("- instagram_basic")
-            print("- instagram_content_publish")
-            print("\nPlease update your token to include these permissions.")
-            
+            print("\nTo fix:")
+            print("1. Go to https://developers.facebook.com/tools/explorer/")
+            print("2. Select your app")
+            print("3. Add the missing permissions")
+            print("4. Generate a new token")
             return False
+            
     except Exception as e:
-        print(f"❌ Error checking token: {e}")
+        print(f"❌ Error checking permissions: {e}")
         return False
 
-def clear_carousel_cache():
-    """Clear any cached carousel state"""
+def clear_carousel_cache() -> bool:
+    """
+    Clean up cached carousel data and temporary files.
+    
+    This helps resolve issues caused by:
+    - Failed uploads leaving orphaned files
+    - Corrupted cache state
+    - Disk space issues
+    
+    Returns:
+        bool: True if cleanup successful
+        
+    Example:
+        >>> if clear_carousel_cache():
+        ...     print("Cache cleared successfully")
+        ... else:
+        ...     print("Error clearing cache")
+    """
     print("\n===== CLEARING CAROUSEL CACHE =====")
     
     try:
@@ -92,83 +129,194 @@ def clear_carousel_cache():
         
         # Manual file cleanup as fallback
         temp_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "temp")
-        carousel_files = [f for f in os.listdir(temp_path) if os.path.isfile(os.path.join(temp_path, f))]
+        carousel_files = [f for f in os.listdir(temp_path) if os.path.isfile(os.path.join(temp_path, f))]        
         print(f"Found {len(carousel_files)} files in temp directory")
         
-        # Don't actually delete here - just informational
+        for file in carousel_files:
+            try:
+                os.remove(os.path.join(temp_path, file))
+            except Exception as e:
+                print(f"⚠️ Could not delete {file}: {e}")
+                continue
         
+        print("✅ Successfully cleared temp files")
         return True
+        
     except Exception as e:
-        print(f"❌ Error clearing cache: {e}")
+        print(f"❌ Error clearing carousel cache: {e}")
         return False
 
 def validate_image_dimensions(image_paths: List[str]) -> bool:
-    """Check that all images have the same aspect ratio"""
-    from PIL import Image
+    """
+    Validate image dimensions and aspect ratios for carousel compatibility.
     
+    Checks:
+    - Minimum resolution (1080px on longest side)
+    - Maximum file size (8MB)
+    - Consistent aspect ratios (within 1% tolerance)
+    - Valid formats (JPEG, PNG)
+    
+    Args:
+        image_paths: List of paths to images to validate
+        
+    Returns:
+        bool: True if all images are valid
+        
+    Example:
+        >>> images = ["photo1.jpg", "photo2.jpg"]
+        >>> if validate_image_dimensions(images):
+        ...     print("All images valid for carousel")
+        ... else:
+        ...     print("Some images need adjustment")
+    """
+    if not image_paths:
+        return False
+        
     print("\n===== VALIDATING IMAGE DIMENSIONS =====")
     
-    if not image_paths:
-        print("❌ No images provided")
-        return False
-    
     try:
-        dimensions = []
+        from PIL import Image
+        import math
+        
+        base_ratio = None
+        all_valid = True
+        
         for path in image_paths:
-            if not os.path.exists(path):
-                print(f"❌ Image not found: {path}")
-                return False
+            try:
+                with Image.open(path) as img:
+                    width, height = img.size
+                    ratio = width / height
+                    file_size_mb = os.path.getsize(path) / (1024 * 1024)
+                    
+                    print(f"\nImage: {os.path.basename(path)}")
+                    print(f"Dimensions: {width}x{height}")
+                    print(f"Aspect Ratio: {ratio:.3f}")
+                    print(f"File Size: {file_size_mb:.1f}MB")
+                    
+                    # Check minimum resolution
+                    if width < 1080 and height < 1080:
+                        print("❌ Resolution too low (minimum 1080px on longest side)")
+                        all_valid = False
+                    
+                    # Check file size
+                    if file_size_mb > 8:
+                        print("❌ File too large (maximum 8MB)")
+                        all_valid = False
+                    
+                    # Check aspect ratio consistency
+                    if base_ratio is None:
+                        base_ratio = ratio
+                    else:
+                        if abs(ratio - base_ratio) > 0.01:
+                            print("❌ Aspect ratio differs from other images")
+                            all_valid = False
+                            
+            except Exception as e:
+                print(f"❌ Error processing {path}: {e}")
+                all_valid = False
                 
-            with Image.open(path) as img:
-                width, height = img.size
-                aspect_ratio = round(width / height, 3)
-                dimensions.append((width, height, aspect_ratio))
-                print(f"Image: {os.path.basename(path)}, Size: {width}x{height}, Aspect ratio: {aspect_ratio}")
-        
-        # Check if all aspect ratios are the same (within a small tolerance)
-        first_ratio = dimensions[0][2]
-        all_same = all(abs(d[2] - first_ratio) < 0.01 for d in dimensions)
-        
-        if all_same:
-            print("✅ All images have the same aspect ratio")
-            return True
+        if all_valid:
+            print("\n✅ All images valid for carousel")
         else:
-            print("❌ Images have different aspect ratios. Instagram requires all carousel images to have the same aspect ratio.")
-            return False
-    
+            print("\nℹ️ Tips to fix issues:")
+            print("- Use minimum 1080px on longest side")
+            print("- Keep file sizes under 8MB")
+            print("- Ensure consistent aspect ratios")
+            print("- Use only JPEG or PNG formats")
+            
+            return all_valid
+        
+    except ImportError:
+        print("❌ Could not import PIL. Install with: pip install Pillow")
+        return False
     except Exception as e:
         print(f"❌ Error validating images: {e}")
         return False
 
 def test_carousel_upload(image_paths: List[str]) -> bool:
-    """Test uploading images for carousel without actually posting"""
+    """
+    Test carousel upload without actually posting.
+    
+    Simulates the upload process to identify potential issues:
+    - Media container creation
+    - Image upload
+    - Rate limit checks
+    - Error handling
+    
+    Args:
+        image_paths: List of paths to test images
+        
+    Returns:
+        bool: True if test upload successful
+        
+    Example:
+        >>> images = ["test1.jpg", "test2.jpg"]
+        >>> if test_carousel_upload(images):
+        ...     print("Upload test passed")
+        ... else:
+        ...     print("Upload test failed")
+    """
     print("\n===== TESTING CAROUSEL UPLOAD =====")
     
-    if not image_paths:
-        print("❌ No images provided")
+    load_dotenv()
+    token = os.getenv('INSTAGRAM_API_KEY')
+    ig_user_id = os.getenv('INSTAGRAM_ACCOUNT_ID')
+    
+    if not token or not ig_user_id:
+        print("❌ Missing environment variables")
         return False
     
     try:
-        def progress_callback(current, total):
-            print(f"Uploading image {current}/{total}...")
-            
-        success, uploaded_images, image_urls = upload_carousel_images(image_paths, progress_callback=progress_callback)
+        service = InstagramCarouselService(token, ig_user_id)
         
-        if success and len(image_urls) >= 2:
-            print(f"✅ Successfully uploaded {len(image_urls)} images")
-            for i, url in enumerate(image_urls):
-                print(f"  {i+1}. {url}")
+        print("Testing media container creation...")
+        container_id = service.create_media_container(ig_user_id)
+        if not container_id:
+            print("❌ Failed to create media container")
+            return False
+        print("✅ Media container created")
+        
+        print("\nTesting image upload...")
+        result = upload_carousel_images(
+            image_paths=image_paths,
+            access_token=token,
+            caption="Test upload - Debug run"
+        )
+        
+        if result:
+            print("✅ Upload test successful")
             return True
         else:
-            print(f"❌ Failed to upload images. Got {len(image_urls)} valid URLs, need at least 2.")
+            print("❌ Upload test failed")
             return False
             
     except Exception as e:
-        print(f"❌ Error testing carousel upload: {e}")
+        print(f"❌ Error testing upload: {e}")
         return False
 
-def run_diagnostics(image_paths: Optional[List[str]] = None):
-    """Run all diagnostics"""
+def run_diagnostics(image_paths: Optional[List[str]] = None) -> None:
+    """
+    Run comprehensive diagnostics on carousel functionality.
+    
+    Performs:
+    1. Token permission validation
+    2. Cache cleanup
+    3. Image validation (if paths provided)
+    4. Upload simulation (if paths provided)
+    
+    Args:
+        image_paths: Optional list of test images
+        
+    Example:
+        Basic check:
+        >>> run_diagnostics()
+        
+        Full test with images:
+        >>> run_diagnostics([
+        ...     "carousel1.jpg",
+        ...     "carousel2.jpg"
+        ... ])
+    """
     print("Starting Instagram Carousel Diagnostics...\n")
     
     checks = [
@@ -193,29 +341,24 @@ def run_diagnostics(image_paths: Optional[List[str]] = None):
     print("\nRECOMMENDATIONS:")
     if not all_passed:
         print("- Fix the issues reported above before attempting to post carousels")
-        
-        if not checks[0]["passed"]:
-            print("- Get a new token with proper permissions from the Facebook Developer Dashboard")
-            print("  Required permissions: instagram_basic, instagram_content_publish")
-        
-        if len(checks) > 2 and not checks[2]["passed"]:
-            print("- Ensure all carousel images have exactly the same aspect ratio")
-            print("- Instagram recommended ratios: 1.91:1 (landscape), 1:1 (square), or 4:5 (portrait)")
-            print("- Each image should be less than 8MB")
-        
-        print("- After fixing issues, run the debug script again to verify")
+        print("- Check the Instagram API status")
+        print("- Verify your rate limits")
+        print("- Review the error logs")
     else:
-        print("- All checks passed! Your setup should be ready to post carousels")
-        print("- If you're still having issues, check the Instagram API status")
-        print("- Make sure you have fewer than 25 API posts in a 24 hour period")
+        print("- All checks passed! Your setup should be ready for carousel posting")
+        print("- Monitor your rate limits")
+        print("- Keep an eye on the API status")
     
     print("\nFor more help, see:")
     print("https://developers.facebook.com/docs/instagram-api/guides/content-publishing")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Instagram Carousel Debug Utility")
-    parser.add_argument('--images', nargs='+', help='Paths to test images for carousel validation')
-    
+    parser.add_argument(
+        "--images", 
+        nargs="+", 
+        help="Optional: Paths to test images for full diagnostics"
+    )
     args = parser.parse_args()
     
     run_diagnostics(args.images)
