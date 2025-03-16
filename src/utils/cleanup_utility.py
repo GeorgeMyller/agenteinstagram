@@ -1,259 +1,208 @@
 import os
-import time
+import glob
 import logging
-import shutil
 from pathlib import Path
-from typing import List, Optional, Dict
-from datetime import datetime, timedelta
-from .config import Config
+from typing import List, Dict, Any
+import time
 
 logger = logging.getLogger(__name__)
 
 class CleanupUtility:
-    """
-    Utility class for managing temporary files and directories.
-    Implements aggressive cleanup strategies and disk usage monitoring.
-    """
+    """Utility class for file cleanup operations"""
     
-    def __init__(self):
-        """Initialize cleanup utility with configuration."""
-        self.config = Config.get_instance()
-    
-    @staticmethod
-    def cleanup_temp_files(base_dir: str, pattern: str = "temp-*", max_age_hours: int = 24) -> int:
+    def cleanup_temp_files(self, directory: str, pattern: str, max_age_hours: int) -> Dict[str, Any]:
         """
-        Remove temporary files matching a pattern and older than max_age_hours.
-        Now includes size-based cleanup and handles locked files.
+        Clean up temporary files matching pattern and older than max_age_hours.
         
         Args:
-            base_dir: Base directory to clean
-            pattern: File pattern to match (glob pattern)
-            max_age_hours: Maximum age in hours before deletion
+            directory: Directory to clean
+            pattern: File pattern to match (glob style)
+            max_age_hours: Maximum file age in hours
             
         Returns:
-            int: Number of files removed
+            Dict with cleanup results
         """
         try:
-            if not os.path.exists(base_dir):
-                logger.warning(f"Directory does not exist: {base_dir}")
-                return 0
-
-            path = Path(base_dir)
-            current_time = time.time()
-            max_age = max_age_hours * 3600
-            removed = 0
+            now = time.time()
+            max_age_seconds = max_age_hours * 3600
+            removed = []
+            errors = []
             
-            # Get files sorted by age (oldest first)
-            files = []
-            for file_path in path.glob(pattern):
-                if not file_path.is_file():
-                    continue
-                    
+            search_pattern = os.path.join(directory, pattern)
+            for file_path in glob.glob(search_pattern):
                 try:
-                    stat = file_path.stat()
-                    files.append((file_path, stat.st_mtime, stat.st_size))
-                except OSError:
-                    continue
+                    if now - os.path.getmtime(file_path) > max_age_seconds:
+                        os.remove(file_path)
+                        removed.append(file_path)
+                        logger.debug(f"Removed old file: {file_path}")
+                except OSError as e:
+                    errors.append(f"Error removing {file_path}: {e}")
+                    logger.warning(f"Failed to remove {file_path}: {e}")
             
-            files.sort(key=lambda x: x[1])  # Sort by modification time
+            return {
+                'removed': removed,
+                'count': len(removed),
+                'errors': errors
+            }
             
-            # First pass: Remove files by age
-            for file_path, mtime, _ in files:
-                file_age = current_time - mtime
-                if file_age > max_age:
+        except Exception as e:
+            logger.error(f"Error during temp file cleanup: {e}")
+            return {
+                'removed': [],
+                'count': 0,
+                'errors': [str(e)]
+            }
+    
+    def cleanup_empty_dirs(self, directory: str, max_age_hours: int) -> Dict[str, Any]:
+        """
+        Remove empty directories older than max_age_hours.
+        
+        Args:
+            directory: Root directory to clean
+            max_age_hours: Maximum directory age in hours
+            
+        Returns:
+            Dict with cleanup results
+        """
+        try:
+            now = time.time()
+            max_age_seconds = max_age_hours * 3600
+            removed = []
+            errors = []
+            
+            for root, dirs, _ in os.walk(directory, topdown=False):
+                for dir_name in dirs:
+                    dir_path = os.path.join(root, dir_name)
                     try:
-                        file_path.unlink(missing_ok=True)
-                        removed += 1
-                        logger.info(f"Removed old file: {file_path}")
+                        # Check if directory is empty and old enough
+                        if not os.listdir(dir_path) and \
+                           now - os.path.getmtime(dir_path) > max_age_seconds:
+                            os.rmdir(dir_path)
+                            removed.append(dir_path)
+                            logger.debug(f"Removed empty directory: {dir_path}")
                     except OSError as e:
+                        errors.append(f"Error removing directory {dir_path}: {e}")
+                        logger.warning(f"Failed to remove directory {dir_path}: {e}")
+            
+            return {
+                'removed': removed,
+                'count': len(removed),
+                'errors': errors
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during empty directory cleanup: {e}")
+            return {
+                'removed': [],
+                'count': 0,
+                'errors': [str(e)]
+            }
+    
+    def enforce_storage_limit(self, directory: str, max_size_mb: int, remove_oldest: bool = True) -> Dict[str, Any]:
+        """
+        Enforce storage limit by removing files when total size exceeds limit.
+        
+        Args:
+            directory: Directory to monitor
+            max_size_mb: Maximum allowed size in MB
+            remove_oldest: If True, remove oldest files first; if False, largest
+            
+        Returns:
+            Dict with enforcement results
+        """
+        try:
+            # Get all files with their sizes and timestamps
+            files_info = []
+            total_size = 0
+            
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    try:
+                        file_path = os.path.join(root, file)
+                        size = os.path.getsize(file_path)
+                        mtime = os.path.getmtime(file_path)
+                        total_size += size
+                        files_info.append((file_path, size, mtime))
+                    except OSError as e:
+                        logger.warning(f"Error getting file info for {file}: {e}")
+            
+            # Convert max_size_mb to bytes
+            max_size = max_size_mb * 1024 * 1024
+            removed = []
+            errors = []
+            
+            # If we're over limit, start removing files
+            if total_size > max_size:
+                # Sort files by age or size
+                if remove_oldest:
+                    files_info.sort(key=lambda x: x[2])  # Sort by mtime
+                else:
+                    files_info.sort(key=lambda x: x[1], reverse=True)  # Sort by size
+                
+                # Remove files until we're under limit
+                for file_path, size, _ in files_info:
+                    try:
+                        os.remove(file_path)
+                        removed.append(file_path)
+                        total_size -= size
+                        logger.debug(f"Removed file to enforce storage limit: {file_path}")
+                        
+                        if total_size <= max_size:
+                            break
+                    except OSError as e:
+                        errors.append(f"Error removing {file_path}: {e}")
                         logger.warning(f"Failed to remove {file_path}: {e}")
             
-            # Second pass: If directory is still too full, remove more files
-            if removed == 0:  # Only if no files were removed by age
-                total_size = sum(f[2] for f in files)
-                max_size = Config.get_instance().MAX_STORAGE_MB * 1024 * 1024
-                
-                if total_size > max_size:
-                    size_to_remove = total_size - max_size
-                    current_removed = 0
-                    
-                    for file_path, _, size in files:
-                        try:
-                            file_path.unlink(missing_ok=True)
-                            current_removed += size
-                            removed += 1
-                            logger.info(f"Removed file due to space constraints: {file_path}")
-                            
-                            if current_removed >= size_to_remove:
-                                break
-                        except OSError as e:
-                            logger.warning(f"Failed to remove {file_path}: {e}")
-
-            return removed
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-            return 0
-
-    @staticmethod
-    def cleanup_empty_dirs(base_dir: str, min_age_hours: int = 24) -> int:
-        """
-        Remove empty directories older than min_age_hours.
-        Now includes recursive cleanup and handles permissions.
-        
-        Args:
-            base_dir: Base directory to clean
-            min_age_hours: Minimum age in hours before deletion
-            
-        Returns:
-            int: Number of directories removed
-        """
-        try:
-            if not os.path.exists(base_dir):
-                logger.warning(f"Directory does not exist: {base_dir}")
-                return 0
-
-            path = Path(base_dir)
-            current_time = time.time()
-            min_age = min_age_hours * 3600
-            removed = 0
-
-            # Walk directory tree bottom-up
-            for dirpath, dirnames, filenames in os.walk(str(path), topdown=False):
-                if not filenames and not dirnames:  # Empty directory
-                    dir_path = Path(dirpath)
-                    if dir_path == path:  # Don't remove base directory
-                        continue
-                        
-                    try:
-                        dir_age = current_time - dir_path.stat().st_mtime
-                        if dir_age > min_age:
-                            dir_path.rmdir()
-                            removed += 1
-                            logger.info(f"Removed empty directory: {dir_path}")
-                    except OSError as e:
-                        logger.warning(f"Failed to remove {dir_path}: {e}")
-
-            return removed
-
-        except Exception as e:
-            logger.error(f"Error during directory cleanup: {e}")
-            return 0
-
-    @staticmethod
-    def get_disk_usage(path: str) -> Optional[Dict]:
-        """
-        Get detailed disk usage information for a path.
-        Now includes file counts and age statistics.
-        
-        Args:
-            path: Path to analyze
-            
-        Returns:
-            Optional[Dict]: Dictionary with usage statistics
-        """
-        try:
-            if not os.path.exists(path):
-                return None
-
-            total_size = 0
-            file_count = 0
-            dir_count = 0
-            oldest_file = (None, float('inf'))
-            newest_file = (None, 0)
-
-            for root, dirs, files in os.walk(path):
-                dir_count += len(dirs)
-                for file in files:
-                    file_path = Path(root) / file
-                    try:
-                        stats = file_path.stat()
-                        size = stats.st_size
-                        mtime = stats.st_mtime
-                        
-                        total_size += size
-                        file_count += 1
-                        
-                        if mtime < oldest_file[1]:
-                            oldest_file = (file_path, mtime)
-                        if mtime > newest_file[1]:
-                            newest_file = (file_path, mtime)
-                    except OSError:
-                        continue
-
             return {
-                'total_size_mb': total_size / (1024 * 1024),
-                'file_count': file_count,
-                'directory_count': dir_count,
-                'oldest_file': str(oldest_file[0]) if oldest_file[0] else None,
-                'newest_file': str(newest_file[0]) if newest_file[0] else None,
-                'oldest_file_age_hours': (time.time() - oldest_file[1]) / 3600 if oldest_file[0] else None,
-                'newest_file_age_hours': (time.time() - newest_file[1]) / 3600 if newest_file[0] else None
+                'removed': removed,
+                'count': len(removed),
+                'errors': errors,
+                'final_size_mb': total_size / (1024 * 1024)
             }
-
-        except Exception as e:
-            logger.error(f"Error getting disk usage: {e}")
-            return None
-
-    @staticmethod
-    def enforce_storage_limit(path: str, max_size_mb: int = 1000, remove_oldest: bool = True) -> bool:
-        """
-        Enforce storage limit on a directory.
-        Now includes smarter file selection and error handling.
-        
-        Args:
-            path: Path to manage
-            max_size_mb: Maximum allowed size in MB
-            remove_oldest: If True, remove oldest files first; otherwise largest
             
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            if not os.path.exists(path):
-                return False
-
-            usage = CleanupUtility.get_disk_usage(path)
-            if not usage:
-                return False
-
-            current_size_mb = usage['total_size_mb']
-            if current_size_mb <= max_size_mb:
-                return True
-
-            to_remove_mb = current_size_mb - max_size_mb
-            
-            # Get all files with their stats
-            files = []
-            for root, _, filenames in os.walk(path):
-                for filename in filenames:
-                    file_path = Path(root) / filename
-                    try:
-                        stats = file_path.stat()
-                        files.append((file_path, stats.st_mtime, stats.st_size))
-                    except OSError:
-                        continue
-
-            if remove_oldest:
-                # Sort by modification time (oldest first)
-                files.sort(key=lambda x: x[1])
-            else:
-                # Sort by size (largest first)
-                files.sort(key=lambda x: x[2], reverse=True)
-
-            removed_size = 0
-            for file_path, _, size in files:
-                size_mb = size / (1024 * 1024)
-                try:
-                    file_path.unlink()
-                    removed_size += size_mb
-                    logger.info(f"Removed {file_path} ({size_mb:.1f} MB)")
-                    if removed_size >= to_remove_mb:
-                        break
-                except OSError as e:
-                    logger.warning(f"Failed to remove {file_path}: {e}")
-
-            return True
-
         except Exception as e:
             logger.error(f"Error enforcing storage limit: {e}")
-            return False
+            return {
+                'removed': [],
+                'count': 0,
+                'errors': [str(e)],
+                'final_size_mb': 0
+            }
+            
+    def get_directory_size(self, directory: str) -> Dict[str, Any]:
+        """
+        Get total size and file count for a directory.
+        
+        Args:
+            directory: Directory to analyze
+            
+        Returns:
+            Dict with size information
+        """
+        try:
+            total_size = 0
+            file_count = 0
+            
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    try:
+                        file_path = os.path.join(root, file)
+                        total_size += os.path.getsize(file_path)
+                        file_count += 1
+                    except OSError as e:
+                        logger.warning(f"Error getting size for {file}: {e}")
+            
+            return {
+                'size_bytes': total_size,
+                'size_mb': total_size / (1024 * 1024),
+                'file_count': file_count
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting directory size: {e}")
+            return {
+                'size_bytes': 0,
+                'size_mb': 0,
+                'file_count': 0,
+                'error': str(e)
+            }

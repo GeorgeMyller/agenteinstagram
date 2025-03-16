@@ -50,6 +50,77 @@ from .errors import (
 
 logger = logging.getLogger(__name__)
 
+class InstagramAPIError(Exception):
+    """Base exception for Instagram API errors"""
+    def __init__(self, message: str, error_code: Optional[int] = None, 
+                 error_subcode: Optional[int] = None, fb_trace_id: Optional[str] = None):
+        self.error_code = error_code
+        self.error_subcode = error_subcode
+        self.fb_trace_id = fb_trace_id
+        super().__init__(message)
+
+class AuthenticationError(InstagramAPIError):
+    """Raised when there are issues with authentication"""
+    pass
+
+class PermissionError(InstagramAPIError):
+    """Raised when the app lacks required permissions"""
+    pass
+
+class RateLimitError(InstagramAPIError):
+    """Raised when hitting API rate limits"""
+    def __init__(self, message: str, retry_seconds: int, *args, **kwargs):
+        self.retry_seconds = retry_seconds
+        super().__init__(message, *args, **kwargs)
+
+class MediaError(InstagramAPIError):
+    """Raised when there are issues with media files"""
+    pass
+
+class TemporaryServerError(InstagramAPIError):
+    """Raised for temporary server issues"""
+    pass
+
+class RateLimitHandler:
+    """Handles rate limiting logic"""
+    
+    def __init__(self, window_seconds: int = 3600, max_requests: int = 200):
+        self.window_seconds = window_seconds
+        self.max_requests = max_requests
+        self.requests = []
+    
+    def check_rate_limit(self) -> bool:
+        """
+        Check if we're within rate limits
+        
+        Returns:
+            bool: True if request can proceed, False if rate limited
+        """
+        current_time = time.time()
+        window_start = current_time - self.window_seconds
+        
+        # Remove old requests
+        self.requests = [t for t in self.requests if t > window_start]
+        
+        return len(self.requests) < self.max_requests
+    
+    def add_request(self):
+        """Record a new request"""
+        self.requests.append(time.time())
+    
+    def get_retry_after(self) -> int:
+        """
+        Get seconds until rate limit resets
+        
+        Returns:
+            int: Seconds to wait
+        """
+        if not self.requests:
+            return 0
+            
+        oldest_request = min(self.requests)
+        return max(0, int(oldest_request + self.window_seconds - time.time()))
+
 class BaseInstagramService:
     """
     Base class for Instagram API services.

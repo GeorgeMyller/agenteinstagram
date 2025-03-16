@@ -1,6 +1,7 @@
-from typing import Optional, Union, List, Generator, Any
+from typing import Optional, Union, List, Generator, Any, Dict
 import os
 import logging
+import psutil
 from pathlib import Path
 from contextlib import contextmanager
 from .config import Config
@@ -12,12 +13,14 @@ class ResourceManager:
     """
     Resource manager for handling temporary files and cleanup operations.
     Provides context managers for automatic resource cleanup.
+    Manages and monitors system resources like disk space and memory.
     """
     
     def __init__(self):
         """Initialize the resource manager with configuration."""
         self.config = Config.get_instance()
         self.cleanup_util = CleanupUtility()
+        self.temp_dirs = ['temp', 'temp_videos']
         
     @contextmanager
     def temp_file(self, prefix: str = "temp-", suffix: str = "") -> Generator[Path, None, None]:
@@ -143,11 +146,147 @@ class ResourceManager:
             
         logger.debug(f"Registered resource for cleanup: {path}")
     
-    def monitor_disk_usage(self) -> dict:
+    def monitor_disk_usage(self) -> Dict[str, Any]:
         """
-        Monitor disk usage of temporary directory.
+        Monitor disk usage in temporary directories
         
         Returns:
-            dict: Dictionary containing disk usage statistics
+            Dict containing:
+            - total_size_mb: Total size of all files in MB
+            - file_count: Total number of files
+            - details: Per-directory breakdown
         """
-        return self.cleanup_util.get_disk_usage(str(self.get_temp_dir()))
+        try:
+            total_size = 0
+            total_files = 0
+            details = {}
+            
+            for temp_dir in self.temp_dirs:
+                if not os.path.exists(temp_dir):
+                    continue
+                    
+                dir_size = 0
+                file_count = 0
+                
+                for root, _, files in os.walk(temp_dir):
+                    for file in files:
+                        try:
+                            file_path = os.path.join(root, file)
+                            file_size = os.path.getsize(file_path)
+                            dir_size += file_size
+                            file_count += 1
+                        except OSError as e:
+                            logger.warning(f"Error getting size for {file}: {e}")
+                
+                total_size += dir_size
+                total_files += file_count
+                details[temp_dir] = {
+                    'size_mb': dir_size / (1024 * 1024),
+                    'file_count': file_count
+                }
+            
+            return {
+                'total_size_mb': total_size / (1024 * 1024),
+                'file_count': total_files,
+                'details': details
+            }
+            
+        except Exception as e:
+            logger.error(f"Error monitoring disk usage: {e}")
+            return {
+                'total_size_mb': 0,
+                'file_count': 0,
+                'details': {},
+                'error': str(e)
+            }
+            
+    def check_system_health(self) -> Dict[str, Any]:
+        """
+        Check overall system health including memory and CPU usage
+        
+        Returns:
+            Dict containing system health metrics
+        """
+        try:
+            memory = psutil.virtual_memory()
+            cpu_percent = psutil.cpu_percent(interval=1)
+            disk = psutil.disk_usage('/')
+            
+            return {
+                'memory': {
+                    'total_gb': memory.total / (1024**3),
+                    'available_gb': memory.available / (1024**3),
+                    'percent': memory.percent
+                },
+                'cpu': {
+                    'percent': cpu_percent
+                },
+                'disk': {
+                    'total_gb': disk.total / (1024**3),
+                    'free_gb': disk.free / (1024**3),
+                    'percent': disk.percent
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error checking system health: {e}")
+            return {'error': str(e)}
+            
+    def cleanup_old_files(self, max_age_hours: int = 24) -> Dict[str, Any]:
+        """
+        Clean up files older than specified age
+        
+        Args:
+            max_age_hours: Maximum age of files in hours
+            
+        Returns:
+            Dict containing cleanup results
+        """
+        try:
+            import time
+            
+            now = time.time()
+            max_age_seconds = max_age_hours * 3600
+            removed_files = []
+            errors = []
+            
+            for temp_dir in self.temp_dirs:
+                if not os.path.exists(temp_dir):
+                    continue
+                    
+                for root, _, files in os.walk(temp_dir):
+                    for file in files:
+                        try:
+                            file_path = os.path.join(root, file)
+                            if now - os.path.getmtime(file_path) > max_age_seconds:
+                                os.remove(file_path)
+                                removed_files.append(file_path)
+                        except OSError as e:
+                            errors.append(f"Error removing {file}: {e}")
+            
+            return {
+                'files_removed': len(removed_files),
+                'removed_files': removed_files,
+                'errors': errors
+            }
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+            return {
+                'files_removed': 0,
+                'removed_files': [],
+                'errors': [str(e)]
+            }
+    
+    def get_resource_limits(self) -> Dict[str, Any]:
+        """
+        Get resource limits and thresholds
+        
+        Returns:
+            Dict containing resource limits
+        """
+        return {
+            'max_file_size_mb': 100,  # Maximum size for any single file
+            'max_total_size_gb': 10,  # Maximum total storage
+            'max_files': 1000,        # Maximum number of files
+            'cleanup_age_hours': 24   # Age at which files are cleaned up
+        }

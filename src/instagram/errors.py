@@ -22,7 +22,7 @@ Usage Example:
         logger.error(f"Media processing failed: {e.details}")
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 import json
 
@@ -335,3 +335,103 @@ class BusinessValidationError(InstagramAPIError):
             steps.append("Review content guidelines")
             steps.append("Modify content to comply with policies")
         return steps
+
+"""
+Custom error classes for Instagram API services
+"""
+
+class InstagramError(Exception):
+    """Base exception class for Instagram-related errors"""
+    pass
+
+class AuthenticationError(InstagramError):
+    """Raised when there are authentication issues"""
+    
+    def __init__(self, error_data: Dict[str, Any]):
+        self.error_code = error_data.get('code')
+        self.error_subcode = error_data.get('error_subcode')
+        self.fb_trace_id = error_data.get('fbtrace_id')
+        super().__init__(error_data.get('message', 'Authentication failed'))
+
+class RateLimitError(InstagramError):
+    """Raised when hitting API rate limits"""
+    
+    def __init__(self, error_data: Dict[str, Any]):
+        self.error_code = error_data.get('code')
+        self.error_subcode = error_data.get('error_subcode')
+        self.retry_after = error_data.get('retry_after', 60)
+        super().__init__(error_data.get('message', 'Rate limit exceeded'))
+
+class MediaError(InstagramError):
+    """Raised for media-related errors (invalid format, size, etc)"""
+    
+    def __init__(self, error_data: Dict[str, Any]):
+        self.error_code = error_data.get('code')
+        self.error_subcode = error_data.get('error_subcode')
+        self.media_type = error_data.get('type')
+        super().__init__(error_data.get('message', 'Invalid media'))
+
+class BusinessValidationError(InstagramError):
+    """Raised when post violates business or content policies"""
+    
+    def __init__(self, error_data: Dict[str, Any]):
+        self.error_code = error_data.get('code')
+        self.error_subcode = error_data.get('error_subcode')
+        self.category = error_data.get('error_category')
+        super().__init__(error_data.get('message', 'Business validation failed'))
+
+class ContainerError(InstagramError):
+    """Raised when there are issues with media containers"""
+    
+    def __init__(self, container_id: str, status: str, message: Optional[str] = None):
+        self.container_id = container_id
+        self.status = status
+        super().__init__(message or f"Container {container_id} failed with status: {status}")
+
+class CarouselError(InstagramError):
+    """Raised for carousel-specific errors"""
+    
+    def __init__(self, message: str, child_errors: Optional[Dict[str, str]] = None):
+        self.child_errors = child_errors or {}
+        super().__init__(message)
+
+class PublicationError(InstagramError):
+    """Raised when publication of media fails"""
+    
+    def __init__(self, error_data: Dict[str, Any]):
+        self.error_code = error_data.get('code')
+        self.error_subcode = error_data.get('error_subcode')
+        self.publication_id = error_data.get('publication_id')
+        super().__init__(error_data.get('message', 'Publication failed'))
+
+class TimeoutError(InstagramError):
+    """Raised when operations timeout"""
+    
+    def __init__(self, operation: str, timeout: int):
+        self.operation = operation
+        self.timeout = timeout
+        super().__init__(f"{operation} timed out after {timeout} seconds")
+
+class ValidationError(InstagramError):
+    """Raised when input validation fails"""
+    
+    def __init__(self, message: str, field: Optional[str] = None, value: Any = None):
+        self.field = field
+        self.invalid_value = value
+        super().__init__(message)
+
+class ConfigurationError(InstagramError):
+    """Raised when there are configuration issues"""
+    
+    def __init__(self, message: str, missing_keys: Optional[list] = None):
+        self.missing_keys = missing_keys or []
+        super().__init__(message)
+
+class NetworkError(InstagramError):
+    """Raised for network-related issues"""
+    
+    def __init__(self, message: str, status_code: Optional[int] = None, 
+                 response: Optional[Dict] = None):
+        self.status_code = status_code
+        self.response = response
+        super().__init__(message)

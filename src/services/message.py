@@ -277,6 +277,9 @@ class Message:
         message_data = self.data["data"]["message"].get("imageMessage", {})
         self.image_caption = message_data.get("caption")
         
+        # Debug log to verify imageMessage and base64 attribute
+        logger.debug(f"imageMessage data: {message_data}")
+        
         # Get image data
         self.image_base64 = message_data.get("base64")
         if self.image_base64:
@@ -350,21 +353,30 @@ class Message:
         message_data = self.data["data"]["message"].get("videoMessage", {})
         self.video_caption = message_data.get("caption")
         
+        # Debug log to verify videoMessage and base64 attribute
+        logger.debug(f"videoMessage data: {message_data}")
+        
+        # Get video data
         self.video_base64 = message_data.get("base64")
-        if self.video_base64:
-            try:
-                import base64
-                self.video_base64_bytes = base64.b64decode(self.video_base64)
+        if not self.video_base64:
+            logger.error(f"No video data found in message (ID: {self.message_id})")
+            self.video_base64_bytes = None
+            self.video_path = None
+            return
+            
+        try:
+            import base64
+            self.video_base64_bytes = base64.b64decode(self.video_base64)
+            
+            # Save video using resource manager
+            with self.resource_manager.temp_file(suffix='.mp4') as temp_path:
+                temp_path.write_bytes(self.video_base64_bytes)
+                self.video_path = str(temp_path)
+                self.resource_manager.register_resource(temp_path, lifetime_hours=3)
                 
-                # Save video using resource manager
-                with self.resource_manager.temp_file(suffix='.mp4') as temp_path:
-                    temp_path.write_bytes(self.video_base64_bytes)
-                    self.video_path = str(temp_path)
-                    self.resource_manager.register_resource(temp_path, lifetime_hours=3)
-                    
-                logger.info(f"Video saved to temporary file: {self.video_path}")
-                
-            except Exception as e:
-                logger.error(f"Error processing video: {e}")
-                self.video_base64_bytes = None
-                self.video_path = None
+            logger.info(f"Video saved to temporary file: {self.video_path}")
+            
+        except Exception as e:
+            logger.error(f"Error processing video: {e}")
+            self.video_base64_bytes = None
+            self.video_path = None

@@ -1,331 +1,280 @@
 """
-Módulo especializado para publicação de Reels no Instagram
-Implementado com base nos exemplos oficiais da Meta para publicação de Reels
-Fonte: https://github.com/fbsamples/reels_publishing_apis
+Instagram Reels Publisher
 
-Este módulo implementa as melhores práticas e parâmetros específicos
-para a publicação de Reels no Instagram.
+Handles posting videos as Reels to Instagram, including:
+- Video validation and optimization
+- Container creation and management
+- Publishing reels
 """
 
 import os
 import time
-import json
 import logging
-import random
-from datetime import datetime
-from dotenv import load_dotenv
-from imgurpython import ImgurClient
+from typing import Optional, Dict, Any
+import requests
 from moviepy.editor import VideoFileClip
-from src.instagram.base_instagram_service import (
-    BaseInstagramService, AuthenticationError, PermissionError, 
-    RateLimitError, MediaError, TemporaryServerError, InstagramAPIError
-)
+from ..utils.config import ConfigManager as Config
 
-logger = logging.getLogger('ReelsPublisher')
+logger = logging.getLogger(__name__)
 
-class ReelsPublisher(BaseInstagramService):
-    """
-    Classe especializada para publicação de Reels no Instagram.
-    Implementa o fluxo completo de publicação conforme documentação oficial da Meta.
-    """
+class ReelsPublisher:
+    """Service for publishing Reels to Instagram"""
     
-    REELS_CONFIG = {
-        'aspect_ratio': '9:16',     # Proporção de aspecto padrão para Reels (vertical)
-        'min_duration': 3,          # Duração mínima em segundos
-        'max_duration': 90,         # Duração máxima em segundos
-        'recommended_duration': 30,  # Duração recomendada pela Meta
-        'min_width': 500,           # Largura mínima em pixels
-        'recommended_width': 1080,  # Largura recomendada em pixels
-        'recommended_height': 1920, # Altura recomendada em pixels
-        'video_formats': ['mp4'],   # Formatos suportados
-        'video_codecs': ['h264'],   # Codecs de vídeo recomendados
-        'audio_codecs': ['aac'],    # Codecs de áudio recomendados
-    }
-    
-    REELS_ERROR_CODES = {
-        2207026: "Formato de vídeo não suportado para Reels",
-        2207014: "Duração de vídeo não compatível com Reels",
-        2207013: "Proporção de aspecto do vídeo não é compatível com Reels",
-        9007: "Permissão de publicação de Reels negada",
-    }
-
-    def __init__(self, access_token=None, ig_user_id=None, skip_token_validation=False):
-        load_dotenv()
-        access_token = access_token or (
-            os.getenv('INSTAGRAM_API_KEY') or
-            os.getenv('INSTAGRAM_ACCESS_TOKEN') or
-            os.getenv('FACEBOOK_ACCESS_TOKEN')
-        )
-        ig_user_id = ig_user_id or os.getenv("INSTAGRAM_ACCOUNT_ID")
+    def __init__(self):
+        """Initialize the Reels publisher service"""
+        self.config = Config()
+        self.access_token = self.config.get_value('instagram.auth.access_token')
+        self.instagram_account_id = self.config.get_value('instagram.auth.business_account_id')
         
-        if not access_token or not ig_user_id:
-            raise ValueError(
-                "Credenciais incompletas. Defina INSTAGRAM_ACCESS_TOKEN e "
-                "INSTAGRAM_ACCOUNT_ID nas variáveis de ambiente ou forneça-os diretamente."
-            )
+        if not self.access_token or not self.instagram_account_id:
+            raise ValueError("Instagram API key and account ID must be configured")
             
-        super().__init__(access_token, ig_user_id)
-        self.skip_token_validation = skip_token_validation
+        self.api_version = 'v18.0'  # Instagram Graph API version
+        self.base_url = f'https://graph.facebook.com/{self.api_version}'
         
-        if skip_token_validation:
-            logger.warning("Instagram token validation skipped for ReelsPublisher due to skip_token_validation=True flag")
-
-    def create_reels_container(self, video_url, caption, share_to_feed=True,
-                             audio_name=None, thumbnail_url=None, user_tags=None):
-        """Cria um container para Reels."""
-        params = {
-            'media_type': 'REELS',
-            'video_url': video_url,
-            'caption': caption,
-            'share_to_feed': 'true' if share_to_feed else 'false'
-        }
+        # Video requirements
+        self.min_duration = 1.0  # seconds
+        self.max_duration = 90.0  # seconds
+        self.min_width = 600  # pixels
+        self.min_height = 600  # pixels
+        self.aspect_ratio_min = 4.0/5.0
+        self.aspect_ratio_max = 1.91
+    
+    def validate_video(self, video_path: str) -> Dict[str, Any]:
+        """
+        Validate video meets Instagram requirements
         
-        if audio_name:
-            params['audio_name'] = audio_name
-        if thumbnail_url:
-            params['thumbnail_url'] = thumbnail_url
-        if user_tags:
-            if isinstance(user_tags, list) and user_tags:
-                params['user_tags'] = json.dumps(user_tags)
-
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            Dict with validation results
+        """
         try:
-            result = self._make_request('POST', f"{self.ig_user_id}/media", data=params)
-            if result and 'id' in result:
-                container_id = result['id']
-                logger.info(f"Container de Reels criado com sucesso: {container_id}")
-                return container_id
-            logger.error("Falha ao criar container de Reels")
-            return None
-        except InstagramAPIError as e:
-            logger.error(f"Failed to create reels container: {e}")
-            raise
-
-    def check_container_status(self, container_id):
-        """Verifica o status do container de mídia."""
-        params = {
-            'fields': 'status_code,status'
-        }
+            if not os.path.exists(video_path):
+                return {'valid': False, 'error': 'Video file not found'}
+                
+            with VideoFileClip(video_path) as clip:
+                duration = clip.duration
+                width = clip.w
+                height = clip.h
+                aspect_ratio = width / height
+                
+                issues = []
+                
+                if duration < self.min_duration:
+                    issues.append(f"Video too short ({duration:.1f}s < {self.min_duration}s)")
+                elif duration > self.max_duration:
+                    issues.append(f"Video too long ({duration:.1f}s > {self.max_duration}s)")
+                    
+                if width < self.min_width or height < self.min_height:
+                    issues.append(f"Video dimensions too small ({width}x{height})")
+                    
+                if aspect_ratio < self.aspect_ratio_min:
+                    issues.append(f"Aspect ratio too narrow ({aspect_ratio:.2f})")
+                elif aspect_ratio > self.aspect_ratio_max:
+                    issues.append(f"Aspect ratio too wide ({aspect_ratio:.2f})")
+                
+                return {
+                    'valid': len(issues) == 0,
+                    'duration': duration,
+                    'dimensions': f"{width}x{height}",
+                    'aspect_ratio': aspect_ratio,
+                    'issues': issues
+                }
+                
+        except Exception as e:
+            logger.error(f"Error validating video: {e}")
+            return {'valid': False, 'error': str(e)}
+    
+    def optimize_video(self, video_path: str, output_path: Optional[str] = None) -> Optional[str]:
+        """
+        Optimize video for Instagram requirements
         
+        Args:
+            video_path: Path to input video
+            output_path: Optional path for optimized video
+            
+        Returns:
+            str: Path to optimized video if successful, None otherwise
+        """
         try:
-            result = self._make_request('GET', f"{container_id}", params=params)
-            if result:
-                status = result.get('status_code')
-                logger.info(f"Status do container: {status}")
-                if status == 'ERROR' and 'status' in result:
-                    logger.error(f"Detalhes do erro: {result['status']}")
-                return status
+            if not output_path:
+                filename = os.path.splitext(os.path.basename(video_path))[0]
+                output_path = os.path.join(
+                    os.path.dirname(video_path),
+                    f"{filename}_optimized.mp4"
+                )
+            
+            with VideoFileClip(video_path) as clip:
+                # Resize if needed
+                width = clip.w
+                height = clip.h
+                
+                if width < self.min_width or height < self.min_height:
+                    scale = max(
+                        self.min_width / width,
+                        self.min_height / height
+                    )
+                    clip = clip.resize(scale)
+                
+                # Trim if too long
+                if clip.duration > self.max_duration:
+                    clip = clip.subclip(0, self.max_duration)
+                
+                # Write optimized video
+                clip.write_videofile(
+                    output_path,
+                    codec='libx264',
+                    audio_codec='aac',
+                    temp_audiofile='temp-audio.m4a',
+                    remove_temp=True,
+                    threads=4,
+                    preset='medium'
+                )
+                
+                return output_path
+                
+        except Exception as e:
+            logger.error(f"Error optimizing video: {e}")
             return None
-        except InstagramAPIError as e:
-            logger.error(f"Failed to check container status: {e}")
-            raise
-
-    def publish_reels(self, container_id):
-        """Publica o Reels usando o container criado."""
-        params = {
-            'creation_id': container_id
-        }
+    
+    def create_container(self, video_url: str, caption: str, share_to_feed: bool = True) -> Optional[str]:
+        """
+        Create a container for a Reel
         
+        Args:
+            video_url: URL of the video
+            caption: Caption text
+            share_to_feed: Whether to share to main feed
+            
+        Returns:
+            str: Container ID if successful, None otherwise
+        """
         try:
-            result = self._make_request('POST', f"{self.ig_user_id}/media_publish", data=params)
-            if result and 'id' in result:
-                post_id = result['id']
-                logger.info(f"Reels publicado com sucesso: {post_id}")
-                return post_id
-            logger.error("Failed to publish reels")
+            endpoint = f'{self.base_url}/{self.instagram_account_id}/media'
+            
+            params = {
+                'media_type': 'REELS',
+                'video_url': video_url,
+                'caption': caption,
+                'share_to_feed': str(share_to_feed).lower(),
+                'access_token': self.access_token
+            }
+            
+            response = requests.post(endpoint, params=params)
+            response.raise_for_status()
+            
+            result = response.json()
+            if 'id' in result:
+                logger.info(f"Created Reels container: {result['id']}")
+                return result['id']
+            
+            logger.error(f"Failed to create Reels container: {result}")
             return None
-        except InstagramAPIError as e:
-            logger.error(f"Error publishing reels: {e}")
-            raise
-
-    def wait_for_container_status(self, container_id, max_attempts=30, delay=10):
-        """Aguarda o container estar pronto."""
-        for attempt in range(max_attempts):
+            
+        except Exception as e:
+            logger.error(f"Error creating Reels container: {e}")
+            return None
+    
+    def wait_for_container_status(self, container_id: str, timeout: int = 300) -> str:
+        """
+        Wait for Reels container to be ready
+        
+        Args:
+            container_id: Container ID to check
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            str: Container status
+        """
+        endpoint = f'{self.base_url}/{container_id}'
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
             try:
-                status = self.check_container_status(container_id)
+                response = requests.get(
+                    endpoint,
+                    params={'fields': 'status_code', 'access_token': self.access_token}
+                )
+                response.raise_for_status()
+                
+                result = response.json()
+                status = result.get('status_code')
+                
                 if status == 'FINISHED':
                     return status
                 elif status in ['ERROR', 'EXPIRED']:
-                    logger.error(f"Container failed with status: {status}")
+                    logger.error(f"Reels container failed with status: {status}")
                     return status
+                    
+                # Wait before checking again
+                time.sleep(5)
                 
-                backoff_time = delay * (2 ** attempt) + random.uniform(0, 5)
-                logger.info(f"Tentativa {attempt + 1}/{max_attempts}. Aguardando {backoff_time:.1f}s...")
-                time.sleep(backoff_time)
-                
-            except RateLimitError as e:
-                logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
-                time.sleep(e.retry_seconds)
             except Exception as e:
-                logger.error(f"Error checking container status: {str(e)}")
-                time.sleep(delay)
+                logger.error(f"Error checking Reels container status: {e}")
+                return 'ERROR'
         
-        logger.error(f"Container status check timed out after {max_attempts} attempts.")
+        logger.error("Reels container status check timed out")
         return 'TIMEOUT'
-
-    def post_reels(self, video_url, caption, share_to_feed=True,
-                  audio_name=None, thumbnail_url=None, user_tags=None,
-                  max_retries=30, retry_interval=10):
-        """Fluxo completo para postar um Reels."""
-        container_id = self.create_reels_container(
-            video_url, caption, share_to_feed, audio_name, thumbnail_url, user_tags
-        )
+    
+    def publish_reel(self, container_id: str) -> Optional[str]:
+        """
+        Publish a Reel container
         
-        if not container_id:
-            return None
-
-        logger.info(f"Aguardando processamento do Reels... (máx. {max_retries} tentativas)")
-        status = self.wait_for_container_status(container_id, max_attempts=max_retries, delay=retry_interval)
-        
-        if status != 'FINISHED':
-            logger.error(f"Processamento do vídeo falhou com status: {status}")
-            return None
-
-        post_id = self.publish_reels(container_id)
-        if not post_id:
-            return None
-
-        result = {
-            'id': post_id,
-            'container_id': container_id,
-            'media_type': 'REELS'
-        }
-        
-        logger.info("Reels publicado com sucesso!")
-        logger.info(f"ID: {post_id}")
-        
-        return result
-
-    def upload_local_video_to_reels(self, video_path, caption, hashtags=None,
-                                  optimize=True, thumbnail_path=None,
-                                  share_to_feed=True, audio_name=None):
-        """Envia um vídeo local para o Instagram como Reels."""
-        if not os.path.exists(video_path):
-            logger.error(f"Arquivo de vídeo não encontrado: {video_path}")
-            return None
-
-        final_caption = self._format_caption_with_hashtags(caption, hashtags)
-        thumbnail_url = None
-        
+        Args:
+            container_id: Container ID to publish
+            
+        Returns:
+            str: Post ID if successful, None otherwise
+        """
         try:
-            # Upload video to Imgur
-            imgur_client = ImgurClient(
-                os.getenv('IMGUR_CLIENT_ID'),
-                os.getenv('IMGUR_CLIENT_SECRET')
-            )
+            endpoint = f'{self.base_url}/{self.instagram_account_id}/media_publish'
             
-            # Upload thumbnail if provided
-            if thumbnail_path and os.path.exists(thumbnail_path):
-                logger.info(f"Enviando thumbnail personalizada: {thumbnail_path}")
-                thumb_result = imgur_client.upload_from_path(thumbnail_path)
-                if thumb_result and 'link' in thumb_result:
-                    thumbnail_url = thumb_result['link']
-                    logger.info(f"Thumbnail enviada: {thumbnail_url}")
-
-            logger.info(f"Enviando vídeo para Imgur...")
-            video_result = imgur_client.upload_from_path(video_path)
-            if not video_result or 'link' not in video_result:
-                logger.error("Falha no upload do vídeo para Imgur")
-                return None
-                
-            video_url = video_result['link']
-            logger.info(f"Vídeo disponível em: {video_url}")
-
-            result = self.post_reels(
-                video_url=video_url,
-                caption=final_caption,
-                share_to_feed=share_to_feed,
-                audio_name=audio_name,
-                thumbnail_url=thumbnail_url
-            )
+            params = {
+                'creation_id': container_id,
+                'access_token': self.access_token
+            }
             
-            return result
+            response = requests.post(endpoint, params=params)
+            response.raise_for_status()
+            
+            result = response.json()
+            if 'id' in result:
+                logger.info(f"Published Reel: {result['id']}")
+                return result['id']
+            
+            logger.error(f"Failed to publish Reel: {result}")
+            return None
             
         except Exception as e:
-            logger.exception(f"Erro na publicação do Reels: {e}")
+            logger.error(f"Error publishing Reel: {e}")
             return None
-
-    def _format_caption_with_hashtags(self, caption, hashtags=None):
-        """Formata a legenda com hashtags."""
-        if not hashtags:
-            return caption
-            
-        if isinstance(hashtags, str):
-            hashtag_list = [tag.strip() for tag in hashtags.split(',')]
-        else:
-            hashtag_list = hashtags
-            
-        hashtag_text = ' '.join([f"#{tag}" for tag in hashtag_list if tag])
-        
-        if caption:
-            return f"{caption}\n\n{hashtag_text}"
-        else:
-            return hashtag_text
-
-class ReelsValidator:
-    """Validates videos for Reels requirements"""
     
-    # Reels requirements based on Meta documentation
-    MIN_DURATION = 3  # seconds
-    MAX_DURATION = 90  # seconds
-    MIN_WIDTH = 500  # pixels
-    MIN_HEIGHT = 889  # pixels for 9:16 ratio
-    ALLOWED_FORMATS = ['mp4']
-    MAX_SIZE_MB = 100  # MB
-    
-    @classmethod
-    def validate(cls, video_path):
+    def get_post_permalink(self, post_id: str) -> Optional[str]:
         """
-        Validates a video for Reels requirements
-        Returns: (is_valid, message)
-        """
-        if not os.path.exists(video_path):
-            return False, "Video file not found"
-            
-        # Check file size
-        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-        if file_size_mb > cls.MAX_SIZE_MB:
-            return False, f"Video size exceeds {cls.MAX_SIZE_MB}MB (actual: {file_size_mb:.2f}MB)"
+        Get the permalink for a Reel
         
-        # Check file extension
-        _, ext = os.path.splitext(video_path)
-        if ext.lower().replace('.', '') not in cls.ALLOWED_FORMATS:
-            return False, f"Video format not supported. Use: {', '.join(cls.ALLOWED_FORMATS)}"
+        Args:
+            post_id: Post ID to get permalink for
             
+        Returns:
+            str: Post permalink if successful, None otherwise
+        """
         try:
-            with VideoFileClip(video_path) as clip:
-                # Check duration
-                duration = clip.duration
-                if duration < cls.MIN_DURATION:
-                    return False, f"Video too short ({duration:.1f}s). Minimum duration is {cls.MIN_DURATION}s"
-                if duration > cls.MAX_DURATION:
-                    return False, f"Video too long ({duration:.1f}s). Maximum duration is {cls.MAX_DURATION}s"
-                
-                # Check dimensions
-                width, height = clip.size
-                if width < cls.MIN_WIDTH:
-                    return False, f"Video width too small ({width}px). Minimum width is {cls.MIN_WIDTH}px"
-                if height < cls.MIN_HEIGHT:
-                    return False, f"Video height too small ({height}px). Recommended minimum height is {cls.MIN_HEIGHT}px"
-                
-                # Check aspect ratio
-                aspect_ratio = width / height
-                if aspect_ratio > 1.91 or aspect_ratio < 0.5:
-                    return False, f"Video aspect ratio ({aspect_ratio:.2f}) outside of recommended range (0.5-1.91)"
-                
-                return True, "Video meets Reels requirements"
-                
+            endpoint = f'{self.base_url}/{post_id}'
+            
+            params = {
+                'fields': 'permalink',
+                'access_token': self.access_token
+            }
+            
+            response = requests.get(endpoint, params=params)
+            response.raise_for_status()
+            
+            result = response.json()
+            return result.get('permalink')
+            
         except Exception as e:
-            return False, f"Error analyzing video: {str(e)}"
-
-# Update the publish method to include validation
-def publish(self, video_path, caption=""):
-    """Publish a video as an Instagram Reel"""
-    logging.info("Starting process to publish a Reel...")
-    
-    # Validate the video first
-    is_valid, validation_message = ReelsValidator.validate(video_path)
-    if not is_valid:
-        logging.error(f"Video validation failed: {validation_message}")
-        raise ValueError(f"Video doesn't meet Reels requirements: {validation_message}")
-    
-    # ... rest of existing publish method ...
+            logger.error(f"Error getting Reel permalink: {e}")
+            return None

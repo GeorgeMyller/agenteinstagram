@@ -1,233 +1,241 @@
-from flask import Flask, request, jsonify
-import logging
-from src.services.message import Message
-from src.utils.config import Config
-from src.utils.cleanup_scheduler import CleanupScheduler
-from src.utils.resource_manager import ResourceManager
-import os
-import tempfile
-import base64
-from src.instagram.image_validator import InstagramImageValidator
-from src.utils.image_decode_save import ImageDecodeSaver
+"""
+Instagram Publishing Application
 
-# Configure logging with detailed format
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+Provides endpoints for queuing and managing Instagram posts.
+Handles single images, carousels, and reels with proper rate limiting.
+"""
+
+import os
+import logging
+from typing import Dict, Any, List, Optional
+from flask import Flask, request, jsonify
+from datetime import datetime
+
+from src.instagram.instagram_post_service import InstagramPostService
+from src.instagram.instagram_carousel_service import InstagramCarouselService
+from src.instagram.instagram_reels_publisher import ReelsPublisher
+from src.instagram.image_validator import InstagramImageValidator
+from src.utils.monitor import ApiMonitor
+from src.utils.config import ConfigManager
+from src.utils.error_handler import error_handler, init_error_handlers
+
+app = Flask(__name__)
+monitor = ApiMonitor()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app
-app = Flask(__name__)
+# Initialize error handlers
+init_error_handlers(app)
 
-# Initialize configuration and resource management
-config = Config.get_instance()
-resource_manager = ResourceManager()
-cleanup_scheduler = CleanupScheduler.get_instance()
+# Initialize configuration
+config = ConfigManager()
+# Load configuration from file if it exists
+config_file_path = os.path.join(os.path.dirname(__file__), 'config.json')
+if os.path.exists(config_file_path):
+    config.load_file(config_file_path)
+    logger.info(f"Loaded configuration from {config_file_path}")
+# Also load from environment variables (these override file settings)
+config.load_env()
 
-def _handle_text_message(message: Message):
-    """Processes a text message"""
-    # ...existing code...
-    logger.info("Handling text message")
-    return {"type": "text", "content": message.data.get("message", {}).get("content", "")}
+# Initialize services
+post_service = InstagramPostService()
+carousel_service = InstagramCarouselService()
+reels_publisher = ReelsPublisher()
+image_validator = InstagramImageValidator()
 
-def _handle_image_message(message: Message):
-    """Processes an image message and posts it to Instagram"""
-    logger.info("Handling image message")
-    try:
-        # Use the attributes already processed by the Message class
-        image_base64 = message.image_base64
-        caption = message.image_caption or ""
-        
-        if not image_base64:
-            logger.error("No image data found in message")
-            return {"type": "image", "status": "error", "message": "No image data found"}
-            
-        # Rest of the function remains the same
-        try:
-            # Save base64 image using ImageDecodeSaver
-            temp_path = ImageDecodeSaver.process(image_base64)
-            logger.info(f"Image saved to temporary file: {temp_path}")
-            
-            # Validate and optimize image for Instagram
-            validator = InstagramImageValidator()
-            result = validator.process_single_photo(temp_path)
-            
-            if result['status'] == 'error':
-                logger.error(f"Image validation failed: {result['message']}")
-                return {"type": "image", "status": "error", "message": result['message']}
-            
-            # Use optimized image path for posting
-            optimized_path = result['image_path'] or temp_path
-            
-            try:
-                # Import and use InstagramSend to post the image
-                from src.instagram.instagram_send import InstagramSend
-                post_result = InstagramSend.send_instagram(optimized_path, caption)
-                
-                if post_result and post_result.get("status") == "success":
-                    logger.info(f"Image posted successfully to Instagram with ID: {post_result.get('id')}")
-                    return {
-                        "type": "image", 
-                        "status": "success", 
-                        "message": "Image posted successfully",
-                        "post_id": post_result.get("id")
-                    }
-                else:
-                    error_msg = post_result.get("message") if post_result else "Unknown error"
-                    logger.error(f"Failed to post image: {error_msg}")
-                    return {
-                        "type": "image", 
-                        "status": "error", 
-                        "message": f"Failed to post image: {error_msg}"
-                    }
-            finally:
-                # Clean up temporary files
-                for path in [temp_path, optimized_path]:
-                    if path and os.path.exists(path):
-                        try:
-                            os.unlink(path)
-                            logger.info(f"Cleaned up temporary file: {path}")
-                        except Exception as e:
-                            logger.warning(f"Failed to clean up temporary file {path}: {e}")
-                            
-        except Exception as e:
-            logger.error(f"Error processing image: {str(e)}")
-            return {"type": "image", "status": "error", "message": str(e)}
-            
-    except Exception as e:
-        logger.error(f"Error handling image message: {str(e)}")
-        return {"type": "image", "status": "error", "message": str(e)}
-
-def _handle_video_message(message: Message):
-    """Processes a video message"""
-    # ...existing code...
-    logger.info("Handling video message")
-    return {"type": "video", "content": message.data.get("message", {}).get("content", "")}
-
-def _handle_unsupported_type(message: Message):
-    """Handles unsupported message types"""
-    logger.info("Unsupported message type received")
-    return {"error": "Unsupported message type"}
-
-def initialize_app_wrapper():
-    """
-    Initialize application components before first request.
+@app.route('/health', methods=['GET'])
+@error_handler
+def health_check():
+    """Health check endpoint"""
+    # Check Instagram API credentials
+    is_valid, missing = post_service.check_token_permissions()
     
-    Performs:
-    1. Starts cleanup scheduler for temporary files
-    2. Validates configuration
-    3. Initializes resource monitoring
-    4. Logs initial system status
-    """
-    try:
-        # Start cleanup scheduler
-        cleanup_scheduler.start()
-        logger.info("Cleanup scheduler started successfully")
-        
-        # Log initial disk usage
-        usage = resource_manager.monitor_disk_usage()
-        if usage:
-            logger.info(f"Initial storage usage: {usage['total_size_mb']:.1f}MB")
-    except Exception as e:
-        logger.error(f"Error during application initialization: {e}")
-
-# Register initialization: if before_first_request is available, use it;
-# otherwise, call the initializer directly.
-if hasattr(app, 'before_first_request'):
-    app.before_first_request(initialize_app_wrapper)
-else:
-    initialize_app_wrapper()
-
-@app.route('/messages-upsert', methods=['POST'])
-def handle_message():
-    """
-    Primary endpoint for processing incoming messages.
+    # Get API health metrics
+    health = monitor.check_health()
     
-    Handles various message types:
-    - Text messages and commands
-    - Image uploads with captions
-    - Video/reels content
-    - Document attachments
-    """
-    try:
-        data = request.json
-        logger.info("Message received:")
-        
-        # Create message object
-        message = Message(data)
-        
-        # Verify if message is from authorized group
-        if config.AUTHORIZED_GROUP_ID is None or message.remote_jid != config.AUTHORIZED_GROUP_ID:
-            logger.info(f"Message ignored - unauthorized source: {message.remote_jid}")
-            return jsonify({
-                "status": "ignored", 
-                "message": "Message from unauthorized source"
-            }), 403
-        
-        # Process message based on type
-        logger.info(f"Processing message from authorized group: {message.remote_jid}")
-        
-        if message.message_type == message.TYPE_TEXT:
-            response = _handle_text_message(message)
-        elif message.message_type == message.TYPE_IMAGE:
-            response = _handle_image_message(message)
-        elif message.message_type == message.TYPE_VIDEO:
-            response = _handle_video_message(message)
-        else:
-            response = _handle_unsupported_type(message)
-            
+    return jsonify({
+        'status': 'healthy' if is_valid else 'degraded',
+        'missing_permissions': missing,
+        'api_health': health,
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/post/image', methods=['POST'])
+@error_handler
+def queue_image_post():
+    """Queue a single image post"""
+    data = request.get_json()
+    if not data:
         return jsonify({
-            "status": "success", 
-            "message": "Message processed successfully",
-            "response": response
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            'status': 'error',
+            'message': 'No data provided'
+        }), 400
+    
+    image_path = data.get('image_path')
+    caption = data.get('caption')
+    
+    if not image_path:
         return jsonify({
-            "status": "error",
-            "message": str(e)
+            'status': 'error',
+            'message': 'image_path is required'
+        }), 400
+    
+    # Validate image
+    validation = image_validator.process_single_photo(image_path)
+    if validation['status'] == 'error':
+        return jsonify({
+            'status': 'error',
+            'message': validation['message']
+        }), 400
+    
+    # Queue post
+    container_id = post_service.create_media_container(image_path, caption)
+    if not container_id:
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to create media container'
         }), 500
-
-@app.route('/debug/storage-status', methods=['GET'])
-def storage_status():
-    """
-    Debug endpoint to check storage usage and system status.
     
-    Returns detailed information about:
-    - Current storage usage
-    - File counts and types
-    - Resource age statistics
-    - System performance metrics
-    """
-    try:
-        usage = resource_manager.monitor_disk_usage()
-        return jsonify(usage), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({
+        'status': 'success',
+        'message': 'Post queued successfully',
+        'container_id': container_id
+    })
+
+@app.route('/post/carousel', methods=['POST'])
+@error_handler
+def queue_carousel_post():
+    """Queue a carousel post"""
+    data = request.get_json()
+    if not data:
+        return jsonify({
+            'status': 'error',
+            'message': 'No data provided'
+        }), 400
+    
+    image_paths = data.get('image_paths', [])
+    caption = data.get('caption')
+    
+    if not image_paths:
+        return jsonify({
+            'status': 'error',
+            'message': 'image_paths is required'
+        }), 400
+    
+    # Validate images
+    validation = image_validator.process_carousel(image_paths)
+    if validation['status'] == 'error':
+        return jsonify({
+            'status': 'error',
+            'message': validation['message'],
+            'details': validation['images']
+        }), 400
+    
+    # Queue carousel
+    container_id = carousel_service.create_carousel_container(image_paths, caption)
+    if not container_id:
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to create carousel container'
+        }), 500
+    
+    return jsonify({
+        'status': 'success',
+        'message': 'Carousel queued successfully',
+        'container_id': container_id
+    })
+
+@app.route('/post/reel', methods=['POST'])
+@error_handler
+def queue_reel_post():
+    """Queue a reel post"""
+    data = request.get_json()
+    if not data:
+        return jsonify({
+            'status': 'error',
+            'message': 'No data provided'
+        }), 400
+    
+    video_path = data.get('video_path')
+    caption = data.get('caption')
+    share_to_feed = data.get('share_to_feed', True)
+    
+    if not video_path:
+        return jsonify({
+            'status': 'error',
+            'message': 'video_path is required'
+        }), 400
+    
+    # Validate video
+    validation = reels_publisher.validate_video(video_path)
+    if not validation.get('valid'):
+        return jsonify({
+            'status': 'error',
+            'message': 'Invalid video',
+            'details': validation
+        }), 400
+    
+    # Queue reel
+    container_id = reels_publisher.create_container(
+        video_path,
+        caption,
+        share_to_feed
+    )
+    if not container_id:
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to create reel container'
+        }), 500
+    
+    return jsonify({
+        'status': 'success',
+        'message': 'Reel queued successfully',
+        'container_id': container_id
+    })
+
+@app.route('/post/status/<container_id>', methods=['GET'])
+@error_handler
+def check_post_status(container_id):
+    """Check status of a queued post"""
+    # Try each service type
+    services = [post_service, carousel_service, reels_publisher]
+    
+    for service in services:
+        try:
+            status = service.wait_for_container_status(container_id)
+            if status:
+                return jsonify({
+                    'status': 'success',
+                    'container_status': status
+                })
+        except Exception:
+            continue
+    
+    return jsonify({
+        'status': 'error',
+        'message': 'Container not found'
+    }), 404
+
+@app.route('/monitor/stats', methods=['GET'])
+@error_handler
+def get_monitor_stats():
+    """Get API monitoring statistics"""
+    stats = monitor.get_stats()
+    return jsonify({
+        'status': 'success',
+        'stats': stats
+    })
 
 if __name__ == '__main__':
+    # Start monitoring
+    monitor.start()
+    
     try:
-        # Get port from environment variable or use default
-        port = int(os.environ.get('PORT', 5001))
-        max_port_attempts = 10
-        
-        # Try ports until we find an available one
-        for port_attempt in range(port, port + max_port_attempts):
-            try:
-                app.run(host='0.0.0.0', port=port_attempt, debug=True)
-                break
-            except OSError as e:
-                if port_attempt < port + max_port_attempts - 1:
-                    logger.warning(f"Port {port_attempt} is in use, trying {port_attempt + 1}")
-                    continue
-                else:
-                    raise e
+        # Run Flask app
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port)
     finally:
-        cleanup_scheduler.stop()
-
-# ASGI adapter for running with uvicorn (or similar command)
-# When using "uvicorn app:asgi_app", the ASGI adapter will enable the Flask app to run.
-from asgiref.wsgi import WsgiToAsgi
-asgi_app = WsgiToAsgi(app)
+        # Stop monitoring
+        monitor.stop()
