@@ -1,136 +1,161 @@
-# Media Validation Tool
+# Validação de Mídia
 
-The `validate_media.py` script helps you verify that your media files meet Instagram's requirements before attempting to upload them.
+Este guia explica como a validação de mídia funciona no Instagram Agent e como configurá-la para garantir que todas as publicações atendam aos requisitos do Instagram.
 
-## Usage
+## Requisitos do Instagram
 
-```bash
-./scripts/validate_media.py [--type {image,video,auto}] FILES...
+O Instagram tem requisitos específicos para diferentes tipos de mídia. O sistema de validação do Instagram Agent garante que todo o conteúdo enviado atenda a esses requisitos.
+
+### Requisitos para Imagens
+
+- **Formatos suportados**: JPG, PNG
+- **Resolução mínima**: 320 x 320 pixels
+- **Resolução máxima recomendada**: 1080 x 1080 pixels (quadrado)
+- **Proporções suportadas**: 
+  - 1:1 (quadrado)
+  - 4:5 (retrato)
+  - 1.91:1 (paisagem)
+- **Tamanho máximo do arquivo**: 8MB
+
+### Requisitos para Carrosséis
+
+- **Número de imagens**: 2-10 imagens
+- **Consistência**: Todas as imagens devem ter a mesma proporção
+- **Formatos e limites**: Mesmos das imagens individuais
+
+### Requisitos para Vídeos
+
+- **Formatos suportados**: MP4, MOV
+- **Codec de vídeo**: H.264
+- **Codec de áudio**: AAC
+- **Resolução mínima**: 600 x 600 pixels
+- **Relação de aspecto**: 1:1 a 1.91:1 (horizontal) ou 4:5 (vertical)
+- **Duração**:
+  - Feed: 3-60 segundos
+  - Reels: 3-90 segundos
+- **Tamanho máximo**: 100MB
+
+## Sistema de Validação
+
+O Instagram Agent possui um sistema de validação automática que verifica:
+
+1. Formato do arquivo
+2. Dimensões e proporção
+3. Tamanho do arquivo
+4. Duração (para vídeos)
+5. Qualidade da mídia
+
+## Configuração da Validação
+
+### Modificando Limites
+
+Você pode ajustar os limites de validação editando o arquivo `.env`:
+
+```
+# Limites de Validação
+MAX_IMAGE_SIZE=8000000  # 8MB em bytes
+MAX_VIDEO_SIZE=100000000  # 100MB em bytes
+MIN_IMAGE_DIMENSION=320
+MAX_IMAGE_DIMENSION=1080
+MIN_VIDEO_DURATION=3
+MAX_VIDEO_DURATION_FEED=60
+MAX_VIDEO_DURATION_REEL=90
 ```
 
-### Examples
+### Desativando Validações Específicas
 
-Validate a single image:
-```bash
-./scripts/validate_media.py path/to/image.jpg
-```
-
-Validate multiple videos:
-```bash
-./scripts/validate_media.py video1.mp4 video2.mp4 --type video
-```
-
-Validate mixed media:
-```bash
-./scripts/validate_media.py *.jpg *.mp4
-```
-
-## Requirements Checked
-
-### Images
-- Format: JPEG or PNG only
-- Size: Maximum 8MB
-- Dimensions: Minimum 320x320 pixels
-- Aspect Ratio: Between 0.8 and 1.91 (4:5 to 1.91:1)
-
-### Videos
-- Format: MP4 or MOV
-- Codec: H.264 video, AAC audio
-- Duration: 3-90 seconds
-- Resolution: Minimum 600x600 pixels
-- Aspect Ratio: Between 0.8 and 1.91
-- Size: Maximum 100MB
-
-## Error Messages
-
-The tool provides detailed feedback about any issues found:
+Para cenários de teste ou casos especiais, você pode desativar certas validações:
 
 ```
-Validating: example.jpg
-==================================================
-❌ File has the following issues:
-  • File too large: 12.5MB (max 8MB)
-  • Invalid aspect ratio: 2.5 (must be between 0.8 and 1.91)
+SKIP_DIMENSION_CHECK=False
+SKIP_SIZE_CHECK=False
+SKIP_FORMAT_CHECK=False
+SKIP_DURATION_CHECK=False
 ```
 
-## Common Issues and Solutions
+## Pré-processamento de Mídia
 
-### Image Issues
+### Redimensionamento Automático
 
-1. **File too large**
-   - Use image compression
-   - Reduce dimensions if unnecessarily large
-   - Convert to JPEG if using PNG
-
-2. **Invalid aspect ratio**
-   - Crop image to supported ratio
-   - Common ratios: 1:1 (square), 4:5 (portrait), 1.91:1 (landscape)
-
-### Video Issues
-
-1. **Incorrect codec**
-   - Convert using FFmpeg:
-     ```bash
-     ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4
-     ```
-
-2. **Duration issues**
-   - Trim video if too long
-   - Loop or extend if too shor
-   - Use our video editor tool
-
-3. **Resolution too low**
-   - Upscale with quality preservation
-   - Re-record in higher quality
-   - Use better camera settings
-
-## Integration with Workflow
-
-The validation tool is integrated into our main workflow:
-- Pre-upload validation
-- Batch processing
-- Automated optimization
-
-### Automated Usage
+O sistema pode redimensionar automaticamente imagens para os requisitos do Instagram:
 
 ```python
-from scripts.validate_media import validate_image, validate_video
-
-# In your code
-def process_media(file_path: str):
-    if file_path.endswith(('.jpg', '.jpeg', '.png')):
-        is_valid, issues = validate_image(file_path)
-    elif file_path.endswith(('.mp4', '.mov')):
-        is_valid, issues = validate_video(file_path)
-
-    if not is_valid:
-        # Handle issues or optimize automatically
-        pass
+# Exemplo de configuração de redimensionamento
+RESIZE_OVERSIZED_IMAGES=True
+TARGET_RESOLUTION=1080  # Lado mais longo em pixels
+PRESERVE_ASPECT_RATIO=True
 ```
 
-## Best Practices
+### Otimização de Vídeo
 
-1. **Always validate before upload**
-   - Saves time and API calls
-   - Prevents failed uploads
-   - Better user experience
+Para vídeos que não atendem aos requisitos, o sistema pode realizar otimização automática:
 
-2. **Use appropriate tools**
-   - Image editing for aspect ratio
-   - Video compression for size
-   - Format conversion when needed
+1. Conversão para formato compatível (H.264/AAC)
+2. Redimensionamento para resolução adequada
+3. Ajuste de bitrate e qualidade
+4. Correção de duração (corte ou loop)
 
-3. **Monitor changes**
-   - Instagram requirements may change
-   - Keep tool updated
-   - Check official documentation
+Esta otimização ocorre automaticamente quando necessário.
 
-## Suppor
+## Detecção de Problemas Comuns
 
-If you encounter issues:
-1. Check the troubleshooting guide
-2. Review Instagram's current requirements
-3. Open an issue on GitHub
-4. Contact support team
+O sistema identifica automaticamente os seguintes problemas:
 
-Remember to always test media files before attempting to upload them to Instagram to ensure the best possible success rate for your posts.
+### Problemas de Imagem
+
+- Resolução muito baixa
+- Proporção não suportada
+- Formato de arquivo incompatível
+- Imagem corrompida
+- Metadados excessivos
+
+### Problemas de Vídeo
+
+- Codec incompatível
+- Áudio ausente ou com problema
+- Duração inadequada
+- Taxa de quadros muito baixa
+- Bitrate insuficiente
+
+## Solução de Problemas de Validação
+
+Se suas mídias falharem na validação:
+
+### Para Imagens
+
+1. Redimensione usando ferramentas como Photoshop, GIMP ou online
+2. Verifique a proporção (1:1, 4:5, 1.91:1)
+3. Converta para JPG ou PNG se estiver usando outros formatos
+4. Compacte para reduzir o tamanho do arquivo
+
+### Para Vídeos
+
+1. Use o FFmpeg para converter para formato compatível:
+   ```bash
+   ffmpeg -i input.mov -c:v libx264 -preset slow -crf 22 -c:a aac -b:a 128k output.mp4
+   ```
+
+2. Redimensione vídeos:
+   ```bash
+   ffmpeg -i input.mp4 -vf scale=1080:1080 output.mp4
+   ```
+
+3. Ajuste a duração:
+   ```bash
+   # Para cortar para 60 segundos
+   ffmpeg -i input.mp4 -t 60 -c copy output.mp4
+   ```
+
+## Testes de Validação
+
+Para testar se sua mídia passa na validação:
+
+```bash
+python tests/test_media.py --image path/to/image.jpg
+python tests/test_media.py --video path/to/video.mp4
+```
+
+## Próximos Passos
+
+- Consulte a [Configuração de Bordas](setup.md#configuração-de-bordas-e-filtros) para personalizar o estilo visual
+- Veja a [Solução de Problemas](../troubleshooting/common.md) para lidar com erros específicos de validação
