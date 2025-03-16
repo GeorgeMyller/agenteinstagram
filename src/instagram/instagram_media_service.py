@@ -3,23 +3,40 @@ from .base_instagram_service import BaseInstagramService
 from .exceptions import InstagramError, MediaError, ValidationError
 
 class InstagramMediaService(BaseInstagramService):
-    """
-    Serviço unificado para gerenciar publicações de mídia no Instagram.
-    Combina funcionalidades de publicação de fotos e carrossel.
-    """
+    """Service for managing media uploads and validation for Instagram."""
 
-    # Configurações de mídia do Instagram
     MEDIA_CONFIG = {
-        'aspect_ratio': {
-            'min': 4.0/5.0,  # Instagram minimum (4:5)
-            'max': 1.91      # Instagram maximum (1.91:1)
+        'image': {
+            'aspect_ratio': {
+                'min': 4.0/5.0,  # Instagram minimum (4:5)
+                'max': 1.91      # Instagram maximum (1.91:1)
+            },
+            'resolution': {
+                'min': 320,
+                'max': 1440
+            },
+            'size_limit_mb': 8,
+            'formats': ['jpg', 'jpeg', 'png']
         },
-        'resolution': {
-            'min': 320,
-            'max': 1440
-        },
-        'size_limit_mb': 8,
-        'formats': ['jpg', 'jpeg', 'png']
+        'video': {
+            'aspect_ratio': {
+                'min': 4.0/5.0,
+                'max': 1.91
+            },
+            'resolution': {
+                'min': 500,
+                'recommended': 1080
+            },
+            'duration': {
+                'min': 3,
+                'max': 90
+            },
+            'formats': ['mp4'],
+            'codecs': {
+                'video': ['h264'],
+                'audio': ['aac']
+            }
+        }
     }
 
     async def publish_photo(self, image_path: str, caption: str) -> Tuple[bool, str, Optional[str]]:
@@ -105,7 +122,82 @@ class InstagramMediaService(BaseInstagramService):
         except Exception as e:
             raise MediaError(f"Erro ao publicar: {str(e)}")
 
-    def validate_media(self, file_path: str) -> None:
-        """Valida se um arquivo de mídia está adequado para publicação"""
-        # Implementar validações
-        pass
+    def validate_media(self, file_path: str) -> Tuple[bool, str]:
+        """Validates if a media file meets Instagram requirements"""
+        try:
+            import os
+            from PIL import Image
+            import magic
+
+            mime = magic.Magic(mime=True)
+            file_type = mime.from_file(file_path)
+
+            if file_type.startswith('image/'):
+                return self._validate_image(file_path)
+            elif file_type.startswith('video/'):
+                return self._validate_video(file_path)
+            else:
+                return False, f"Unsupported media type: {file_type}"
+
+        except Exception as e:
+            return False, f"Validation error: {str(e)}"
+
+    def _validate_image(self, image_path: str) -> Tuple[bool, str]:
+        """Validates image dimensions, format, and size"""
+        try:
+            with Image.open(image_path) as img:
+                width, height = img.size
+                aspect_ratio = width / height
+
+                # Check dimensions
+                if width < self.MEDIA_CONFIG['image']['resolution']['min'] or \
+                   height < self.MEDIA_CONFIG['image']['resolution']['min']:
+                    return False, f"Image too small (minimum {self.MEDIA_CONFIG['image']['resolution']['min']}px)"
+
+                # Check aspect ratio
+                if aspect_ratio < self.MEDIA_CONFIG['image']['aspect_ratio']['min'] or \
+                   aspect_ratio > self.MEDIA_CONFIG['image']['aspect_ratio']['max']:
+                    return False, f"Invalid aspect ratio: {aspect_ratio:.2f}"
+
+                # Check file size
+                file_size = os.path.getsize(image_path) / (1024 * 1024)  # Convert to MB
+                if file_size > self.MEDIA_CONFIG['image']['size_limit_mb']:
+                    return False, f"File too large: {file_size:.1f}MB"
+
+                return True, "Image validation successful"
+
+        except Exception as e:
+            return False, f"Image validation error: {str(e)}"
+
+    def _validate_video(self, video_path: str) -> Tuple[bool, str]:
+        """Validates video format, duration, and specifications"""
+        try:
+            import cv2
+            from moviepy.editor import VideoFileClip
+
+            # Check basic file validity
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return False, "Could not open video file"
+
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+
+            # Check resolution
+            if width < self.MEDIA_CONFIG['video']['resolution']['min'] or \
+               height < self.MEDIA_CONFIG['video']['resolution']['min']:
+                return False, f"Video resolution too low (minimum {self.MEDIA_CONFIG['video']['resolution']['min']}px)"
+
+            # Check duration and other specs using moviepy
+            with VideoFileClip(video_path) as clip:
+                duration = clip.duration
+                if duration < self.MEDIA_CONFIG['video']['duration']['min']:
+                    return False, f"Video too short (minimum {self.MEDIA_CONFIG['video']['duration']['min']}s)"
+                if duration > self.MEDIA_CONFIG['video']['duration']['max']:
+                    return False, f"Video too long (maximum {self.MEDIA_CONFIG['video']['duration']['max']}s)"
+
+            return True, "Video validation successful"
+
+        except Exception as e:
+            return False, f"Video validation error: {str(e)}"

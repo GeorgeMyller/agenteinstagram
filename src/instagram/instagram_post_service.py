@@ -20,13 +20,19 @@ logger = logging.getLogger('InstagramPostService')
 class InstagramPostService(BaseInstagramService):
     """Service for posting images to Instagram."""
 
-    # Cache para evitar operações de I/O frequentes
+    # Singleton and cache settings
     _instance = None
     _state_cache = None
     _last_state_save = 0
-    _state_save_interval = 60  # Salvar estado a cada 60 segundos no máximo
+    _state_save_interval = 60  # Save state every 60 seconds max
 
-    # Track published containers to prevent duplicates
+    # Rate limiting settings
+    _rate_limit_cache = {}
+    _rate_limit_window = 3600  # 1 hour window
+    _max_requests_per_window = 200
+    _min_request_interval = 2  # Minimum seconds between requests
+
+    # Published containers tracking
     _published_containers = set()
     _last_verification_time = 0
     _verification_interval = 300  # Verify published posts every 5 minutes
@@ -553,11 +559,21 @@ class InstagramPostService(BaseInstagramService):
             params = {}
         params['access_token'] = self.access_token
 
-        # Respect rate limits with minimum interval between requests
+        # Check rate limits
         current_time = time.time()
+        if not self._check_rate_limits(current_time):
+            retry_after = self._get_rate_limit_reset_time() - current_time
+            raise RateLimitError(
+                "Rate limit exceeded",
+                retry_seconds=retry_after,
+                error_code="API_LIMIT",
+                error_subcode="HOURLY_LIMIT"
+            )
+
+        # Respect minimum interval between requests
         elapsed = current_time - self.last_request_time
-        if elapsed < self.min_request_interval:
-            time.sleep(self.min_request_interval - elapsed)
+        if elapsed < self._min_request_interval:
+            time.sleep(self._min_request_interval - elapsed)
 
         try:
             logger.info(f"Making {method} request to {endpoint}")
@@ -566,41 +582,7 @@ class InstagramPostService(BaseInstagramService):
 
             response = self.session.request(method, url, params=params, data=data, headers=headers)
             self.last_request_time = time.time()
-
-            # Process rate limit headers if present
-            if 'x-business-use-case-usage' in response.headers:
-                self._process_rate_limit_headers(response.headers)
-
-            # Log response status
-            logger.info(f"Response status: {response.status_code}")
-
-            if response.status_code == 403:
-                try:
-                    error_json = response.json()
-                    if 'error' in error_json:
-                        error = error_json['error']
-                        error_code = error.get('code')
-                        error_subcode = error.get('error_subcode')
-                        error_message = error.get('message', '')
-                        fb_trace_id = error.get('fbtrace_id')
-
-                        logger.error(f"{error_code} {error_message} (Subcode: {error_subcode})")
-
-                        # Handle application request limit specifically
-                        if error_subcode == 2207051:
-                            retry_seconds = self._get_retry_after(error)
-                            if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
-                                backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
-                                logger.warning(f"Application request limit reached. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
-                                time.sleep(backoff_time)
-                                return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
-
-                            raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
-
-                        raise PermissionError(error_message, error_code, error_subcode, fb_trace_id)
-
-                except ValueError:
-                    raise InstagramAPIError("Failed to parse error response")
+            self._update_rate_limits(response.headers)
 
             response.raise_for_status()
             result = response.json() if response.content else None
@@ -616,16 +598,14 @@ class InstagramPostService(BaseInstagramService):
                     raise AuthenticationError(error_message, error_code, error_subcode, fb_trace_id)
                 elif error_code in [200, 10, 803]:  # Permission errors
                     raise PermissionError(error_message, error_code, error_subcode, fb_trace_id)
-                elif RateLimitHandler.is_rate_limit_error(error_code, error_subcode):
+                elif self._is_rate_limit_error(error_code, error_subcode):
                     retry_seconds = self._get_retry_after(error)
-                    if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
-                        backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
-                        logger.warning(f"Rate limit hit. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
+                    if retry_attempt < 3:  # Max 3 retries
+                        backoff_time = min(retry_seconds * (2 ** retry_attempt), 3600)
+                        logger.warning(f"Rate limit hit. Backing off for {backoff_time:.2f}s")
                         time.sleep(backoff_time)
                         return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
                     raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
-                elif error_code in [1, 2]:  # Temporary server errors
-                    raise TemporaryServerError(error_message, error_code, error_subcode, fb_trace_id)
                 else:
                     raise InstagramAPIError(error_message, error_code, error_subcode, fb_trace_id)
 
@@ -633,26 +613,66 @@ class InstagramPostService(BaseInstagramService):
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed: {str(e)}")
+            if retry_attempt < 3 and isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+                backoff_time = self._min_request_interval * (2 ** retry_attempt)
+                logger.info(f"Retrying after {backoff_time}s due to connection error")
+                time.sleep(backoff_time)
+                return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
             raise InstagramAPIError(f"Request failed: {str(e)}")
 
-    def _get_retry_after(self, error):
-        """Extract retry after time from error response"""
-        retry_seconds = 300  # Default retry time increased to 5 minutes for application request limit
+    def _check_rate_limits(self, current_time: float) -> bool:
+        """Check if we're within rate limits"""
+        window_start = current_time - self._rate_limit_window
+        # Clean up old entries
+        self._rate_limit_cache = {
+            ts: count for ts, count in self._rate_limit_cache.items()
+            if ts > window_start
+        }
+        # Count requests in current window
+        request_count = sum(self._rate_limit_cache.values())
+        return request_count < self._max_requests_per_window
 
-        # Check for specific error subcodes
-        if error.get('error_subcode') == 2207051:  # Application request limit
-            retry_seconds = 900  # 15 minutes
-
-        # Try to extract time from error message
-        message = error.get('message', '').lower()
-        if 'minutes' in message:
+    def _update_rate_limits(self, headers: dict):
+        """Update rate limit tracking based on response headers"""
+        current_time = time.time()
+        self._rate_limit_cache[current_time] = 1
+        
+        # Process Instagram's rate limit headers if present
+        if 'x-app-usage' in headers:
             try:
-                import re
-                time_match = re.search(r'(\d+)\s*minutes?', message)
-                if time_match:
-                    retry_seconds = int(time_match.group(1)) * 60
+                usage = json.loads(headers['x-app-usage'])
+                if usage.get('call_count', 0) > 95:  # Over 95% of limit
+                    logger.warning("Approaching API rate limit")
             except:
                 pass
 
-        return retry_seconds
+    def _get_rate_limit_reset_time(self) -> float:
+        """Get when the current rate limit window will reset"""
+        if not self._rate_limit_cache:
+            return time.time()
+        oldest_request = min(self._rate_limit_cache.keys())
+        return oldest_request + self._rate_limit_window
+
+    def _is_rate_limit_error(self, error_code: int, error_subcode: int) -> bool:
+        """Check if an error is rate-limit related"""
+        rate_limit_codes = [4, 17, 32, 613]
+        rate_limit_subcodes = [2207001, 2207003]
+        return (error_code in rate_limit_codes or 
+                error_subcode in rate_limit_subcodes or
+                'rate limit' in str(error_code).lower())
+
+    def _get_retry_after(self, error: dict) -> int:
+        """Extract retry after time from error response"""
+        # Try to get from error response
+        retry_after = error.get('retry_after')
+        if retry_after:
+            return int(retry_after)
+        
+        # Default backoff times based on error type
+        error_code = error.get('code')
+        if error_code in [4, 17]:  # Application-level rate limit
+            return 3600  # 1 hour
+        elif error_code in [32, 613]:  # User-level rate limit
+            return 600  # 10 minutes
+        return 60  # Default 1 minute
 

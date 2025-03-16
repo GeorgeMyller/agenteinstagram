@@ -7,6 +7,8 @@ from src.utils.resource_manager import ResourceManager
 import os
 import tempfile
 import base64
+from src.instagram.image_validator import InstagramImageValidator
+from src.utils.image_decode_save import ImageDecodeSaver
 
 # Configure logging with detailed format
 logging.basicConfig(
@@ -33,50 +35,68 @@ def _handle_image_message(message: Message):
     """Processes an image message and posts it to Instagram"""
     logger.info("Handling image message")
     try:
-        # Extract image data
-        image_data = message.data.get("message", {}).get("imageMessage", {})
-        image_base64 = image_data.get("base64")
-        caption = image_data.get("caption", "")
+        # Use the attributes already processed by the Message class
+        image_base64 = message.image_base64
+        caption = message.image_caption or ""
         
         if not image_base64:
             logger.error("No image data found in message")
             return {"type": "image", "status": "error", "message": "No image data found"}
-        
-        # Save image to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-            temp_file.write(base64.b64decode(image_base64))
-            temp_path = temp_file.name
-        
-        try:
-            # Import and use InstagramSend to post the image
-            from src.instagram.instagram_send import InstagramSend
-            result = InstagramSend.send_instagram(temp_path, caption)
             
-            if result and result.get("status") == "success":
-                logger.info(f"Image posted successfully to Instagram with ID: {result.get('id')}")
-                return {
-                    "type": "image", 
-                    "status": "success", 
-                    "message": "Image posted successfully",
-                    "post_id": result.get("id")
-                }
-            else:
-                error_msg = result.get("message") if result else "Unknown error"
-                logger.error(f"Failed to post image: {error_msg}")
-                return {
-                    "type": "image", 
-                    "status": "error", 
-                    "message": f"Failed to post image: {error_msg}"
-                }
+        # Rest of the function remains the same
+        try:
+            # Save base64 image using ImageDecodeSaver
+            temp_path = ImageDecodeSaver.process(image_base64)
+            logger.info(f"Image saved to temporary file: {temp_path}")
+            
+            # Validate and optimize image for Instagram
+            validator = InstagramImageValidator()
+            result = validator.process_single_photo(temp_path)
+            
+            if result['status'] == 'error':
+                logger.error(f"Image validation failed: {result['message']}")
+                return {"type": "image", "status": "error", "message": result['message']}
+            
+            # Use optimized image path for posting
+            optimized_path = result['image_path'] or temp_path
+            
+            try:
+                # Import and use InstagramSend to post the image
+                from src.instagram.instagram_send import InstagramSend
+                post_result = InstagramSend.send_instagram(optimized_path, caption)
+                
+                if post_result and post_result.get("status") == "success":
+                    logger.info(f"Image posted successfully to Instagram with ID: {post_result.get('id')}")
+                    return {
+                        "type": "image", 
+                        "status": "success", 
+                        "message": "Image posted successfully",
+                        "post_id": post_result.get("id")
+                    }
+                else:
+                    error_msg = post_result.get("message") if post_result else "Unknown error"
+                    logger.error(f"Failed to post image: {error_msg}")
+                    return {
+                        "type": "image", 
+                        "status": "error", 
+                        "message": f"Failed to post image: {error_msg}"
+                    }
+            finally:
+                # Clean up temporary files
+                for path in [temp_path, optimized_path]:
+                    if path and os.path.exists(path):
+                        try:
+                            os.unlink(path)
+                            logger.info(f"Cleaned up temporary file: {path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to clean up temporary file {path}: {e}")
+                            
         except Exception as e:
-            logger.error(f"Error posting image to Instagram: {str(e)}")
+            logger.error(f"Error processing image: {str(e)}")
             return {"type": "image", "status": "error", "message": str(e)}
-        finally:
-            # Clean up the temporary file
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
+            
     except Exception as e:
-        logger.error(f"Error processing image message: {str(e)}")
+        logger.error(f"Error handling image message: {str(e)}")
         return {"type": "image", "status": "error", "message": str(e)}
 
 def _handle_video_message(message: Message):
@@ -189,8 +209,21 @@ def storage_status():
 
 if __name__ == '__main__':
     try:
-        # Run the Flask app (WSGI mode)
-        app.run(host='0.0.0.0', port=5001, debug=True)
+        # Get port from environment variable or use default
+        port = int(os.environ.get('PORT', 5001))
+        max_port_attempts = 10
+        
+        # Try ports until we find an available one
+        for port_attempt in range(port, port + max_port_attempts):
+            try:
+                app.run(host='0.0.0.0', port=port_attempt, debug=True)
+                break
+            except OSError as e:
+                if port_attempt < port + max_port_attempts - 1:
+                    logger.warning(f"Port {port_attempt} is in use, trying {port_attempt + 1}")
+                    continue
+                else:
+                    raise e
     finally:
         cleanup_scheduler.stop()
 

@@ -80,7 +80,7 @@ class Message:
         
         # Handle different message formats
         if "data" not in raw_data:
-            enveloped_data = {
+            self.data = {
                 "event": None,
                 "instance": None,
                 "destination": None,
@@ -90,12 +90,11 @@ class Message:
                 "data": raw_data
             }
         else:
-            enveloped_data = raw_data
-        
-        self.data = enveloped_data
+            self.data = raw_data
+            
         self.extract_common_data()
         self.extract_specific_data()
-    
+
     def extract_common_data(self):
         """
         Extract common metadata from the message.
@@ -126,6 +125,7 @@ class Message:
         
         data = self.data.get("data", {})
         key = data.get("key", {})
+        message = data.get("message", {})
         
         # Core message attributes
         self.remote_jid = key.get("remoteJid")
@@ -136,7 +136,21 @@ class Message:
         self.instance_id = data.get("instanceId")
         self.source = data.get("source")
         self.message_timestamp = data.get("messageTimestamp")
-        self.message_type = data.get("messageType")
+        
+        # Determine message type
+        if message.get("imageMessage"):
+            self.message_type = self.TYPE_IMAGE
+        elif message.get("videoMessage"):
+            self.message_type = self.TYPE_VIDEO
+        elif message.get("audioMessage"):
+            self.message_type = self.TYPE_AUDIO
+        elif message.get("documentMessage"):
+            self.message_type = self.TYPE_DOCUMENT
+        elif message.get("conversation"):
+            self.message_type = self.TYPE_TEXT
+        else:
+            self.message_type = None
+            
         self.sender = data.get("sender")
         self.participant = key.get("participant")
 

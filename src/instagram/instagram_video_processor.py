@@ -13,7 +13,7 @@ import subprocess
 import re
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import moviepy.editor as mp
 from moviepy.video.fx.all import resize
 from src.utils.paths import Paths
@@ -34,410 +34,174 @@ def _apply_pillow_patch():
 # Apply the patch immediately
 _apply_pillow_patch()
 class VideoProcessor:
-    """
-    Process and validate videos for Instagram upload requirements.
-    Handles video optimization, format validation, and automatic adjustments.
-    
-    Features:
-        - Video format validation and conversion
-        - Resolution and aspect ratio optimization
-        - Bitrate and codec validation
-        - Duration limits enforcement
-        - File size optimization
-        - Frame rate adjustment
-        
-    Example:
-        >>> processor = VideoProcessor()
-        >>> video_info = processor.get_video_info("input.mp4")
-        >>> if processor.check_duration(video_info['duration'], 'reel'):
-        ...     optimized_path = processor.process_video("input.mp4", post_type='reel')
-    """
-    # Instagram video requirements
-    REELS_LIMITS = {
-        'min_duration': 1,     # seconds
-        'max_duration': 90,    # seconds
-        'min_width': 500,      # pixels
-        'max_width': 1080,     # pixels
-        'min_height': 889,     # pixels
-        'max_height': 1920,    # pixels
-        'max_size': 4096,      # MB
-        'aspect_ratio': {
-            'min': 1.91,       # For horizontal videos
-            'max': 0.01        # For vertical videos (effectively no limit)
-        }
+    """Handles video validation and optimization for Instagram."""
+
+    REELS_CONFIG = {
+        'aspect_ratio': '9:16',     # Default aspect ratio for Reels
+        'min_duration': 3,          # Minimum duration in seconds
+        'max_duration': 90,         # Maximum duration in seconds
+        'recommended_duration': 30,  # Recommended duration
+        'min_width': 500,           # Minimum width in pixels
+        'recommended_width': 1080,  # Recommended width
+        'recommended_height': 1920, # Recommended height
+        'video_formats': ['mp4'],   # Supported formats
+        'video_codecs': ['h264'],   # Recommended video codecs
+        'audio_codecs': ['aac'],    # Recommended audio codecs
+        'max_size_mb': 100         # Maximum file size in MB
     }
-    
-    FEED_VIDEO_LIMITS = {
-        'min_duration': 3,     # seconds
-        'max_duration': 60,    # seconds
-        'min_width': 500,      # pixels
-        'max_width': 1080,     # pixels
-        'min_height': 889,     # pixels
-        'max_height': 1350,    # pixels
-        'max_size': 4096,      # MB
+
+    VIDEO_CONFIG = {
         'aspect_ratio': {
-            'min': 1.91,       # For horizontal videos
-            'max': 0.8         # For vertical videos
-        }
+            'min': 4.0/5.0,  # Instagram minimum (4:5)
+            'max': 1.91      # Instagram maximum (1.91:1)
+        },
+        'min_duration': 3,
+        'max_duration': 60,
+        'min_width': 500,
+        'recommended_width': 1080,
+        'video_formats': ['mp4'],
+        'video_codecs': ['h264'],
+        'audio_codecs': ['aac'],
+        'max_size_mb': 100
     }
-    
-    @staticmethod
-    def force_optimize_for_instagram(video_path: str, post_type: str = 'reel') -> Optional[str]:
+
+    async def optimize_for_instagram(self, video_path: str, target_type: str = 'video') -> Optional[str]:
         """
-        Força otimização do vídeo para Instagram mesmo que já esteja em conformidade.
-        
-        Este método estático garante que o vídeo sempre será processado para 
-        requisitos ótimos do Instagram, sem checar se o vídeo já está otimizado.
-        
-        Args:
-            video_path: Caminho para o vídeo de entrada
-            post_type: Tipo de postagem ('reel' ou 'feed')
-            
-        Returns:
-            str: Caminho para o vídeo otimizado ou None se falhar
-            
-        Example:
-            >>> optimized = VideoProcessor.force_optimize_for_instagram("video.mp4", "reel")
-            >>> print(f"Video optimized and saved to: {optimized}")
+        Optimizes video for Instagram upload based on target type (video/reels).
+        Returns path to optimized video or None if optimization fails.
         """
         try:
-            logger.info(f"Forçando otimização do vídeo: {video_path}")
+            import ffmpeg
+            from moviepy.editor import VideoFileClip
+            import os
+            import tempfile
+
+            config = self.REELS_CONFIG if target_type == 'reels' else self.VIDEO_CONFIG
             
-            # Criar nome de arquivo temporário para saída
-            temp_dir = os.path.join(tempfile.gettempdir(), 'instagram_video')
+            # Create temp directory if needed
+            temp_dir = os.path.join(os.path.dirname(video_path), 'temp_videos')
             os.makedirs(temp_dir, exist_ok=True)
             
-            output_filename = f"optimized_{os.path.basename(video_path)}"
-            output_path = os.path.join(temp_dir, output_filename)
+            # Generate output path
+            output_path = os.path.join(
+                temp_dir,
+                f"optimized_{os.path.basename(video_path)}"
+            )
+
+            # Get video info
+            probe = ffmpeg.probe(video_path)
+            video_info = next(s for s in probe['streams'] if s['codec_type'] == 'video')
+            width = int(video_info['width'])
+            height = int(video_info['height'])
             
-            # Obter informações do vídeo
-            with VideoFileClip(video_path) as clip:
-                # Determinar resolução alvo com base no tipo de postagem
-                target_resolution = (1080, 1920) if post_type == 'reel' else (1080, 1350)
-                
-                # Redimensionar o vídeo mantendo a proporção
-                width, height = clip.size
-                aspect_ratio = width / height
-                
-                if post_type == 'reel':
-                    # Para reels, priorizamos altura
-                    if aspect_ratio >= 9/16:  # Se for mais largo que 9:16
-                        new_width = int(target_resolution[1] * aspect_ratio)
-                        new_height = target_resolution[1]
-                    else:
-                        new_width = target_resolution[0]
-                        new_height = int(new_width / aspect_ratio)
-                else:
-                    # Para feed, garantimos que está dentro dos limites
-                    if aspect_ratio > 1:  # Landscape
-                        new_width = target_resolution[0]
-                        new_height = int(new_width / aspect_ratio)
-                    else:  # Portrait
-                        new_height = target_resolution[1]
-                        new_width = int(new_height * aspect_ratio)
-                
-                # Aplicar redimensionamento
-                resized_clip = clip.resize(width=new_width, height=new_height)
-                
-                # Limitar a duração se necessário
-                max_duration = VideoProcessor.REELS_LIMITS['max_duration'] if post_type == 'reel' else VideoProcessor.FEED_VIDEO_LIMITS['max_duration']
-                if resized_clip.duration > max_duration:
-                    resized_clip = resized_clip.subclip(0, max_duration)
-                
-                # Exportar com configurações otimizadas para Instagram
-                resized_clip.write_videofile(
-                    output_path,
-                    codec='libx264',
-                    audio_codec='aac',
-                    temp_audiofile=os.path.join(temp_dir, 'temp_audio.m4a'),
-                    remove_temp=True,
-                    audio_bitrate='128k',
-                    bitrate='4000k',
-                    fps=30,
-                    preset='medium',  # Balanceamento entre velocidade e qualidade
-                    threads=2,
-                    logger=None  # Silenciar logs do moviepy
-                )
-                
-            logger.info(f"Vídeo otimizado para Instagram: {output_path}")
+            # Calculate target dimensions
+            target_width = config['recommended_width']
+            if target_type == 'reels':
+                target_height = config['recommended_height']
+            else:
+                # Maintain aspect ratio for regular videos
+                target_height = int(target_width * (height / width))
+                # Ensure aspect ratio constraints
+                aspect_ratio = target_width / target_height
+                if aspect_ratio < config['aspect_ratio']['min']:
+                    target_height = int(target_width / config['aspect_ratio']['min'])
+                elif aspect_ratio > config['aspect_ratio']['max']:
+                    target_height = int(target_width / config['aspect_ratio']['max'])
+
+            # Prepare FFmpeg stream
+            stream = ffmpeg.input(video_path)
+            
+            # Apply video optimization
+            stream = ffmpeg.filter(stream, 'scale', target_width, target_height)
+            
+            # Set video codec and quality
+            stream = ffmpeg.output(
+                stream,
+                output_path,
+                acodec='aac',
+                vcodec='libx264',
+                preset='medium',
+                crf=23,  # Balanced quality/size
+                video_bitrate='4000k',
+                audio_bitrate='128k'
+            )
+
+            # Run FFmpeg
+            ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+
+            # Verify output
+            if not os.path.exists(output_path):
+                logger.error("Failed to create optimized video")
+                return None
+
+            # Check if optimization actually helped
+            if os.path.getsize(output_path) >= os.path.getsize(video_path):
+                logger.info("Optimized version is larger than original, using original")
+                return video_path
+
             return output_path
-            
+
         except Exception as e:
-            logger.error(f"Erro ao otimizar vídeo: {str(e)}")
+            logger.error(f"Error optimizing video: {str(e)}")
             return None
-    
-    @staticmethod
-    def validate_video(video_path: str) -> tuple[bool, str]:
-        """
-        Valida se um vídeo atende aos requisitos para upload no Instagram.
-        
-        Args:
-            video_path: Caminho para o vídeo
-            
-        Returns:
-            tuple: (is_valid, message) onde is_valid é um booleano e 
-                   message é uma mensagem de erro ou sucesso
-        """
-        try:
-            processor = VideoProcessor()
-            info = processor.get_video_info(video_path)
-            
-            # Verificar duração
-            if info['duration'] < 1:
-                return False, "Vídeo muito curto (mínimo 1 segundo)"
-            if info['duration'] > 90:
-                return False, f"Vídeo muito longo: {info['duration']:.1f}s (máximo 90 segundos)"
-                
-            # Verificar resolução
-            if info['width'] < 500 or info['height'] < 889:
-                return False, f"Resolução muito baixa: {info['width']}x{info['height']}"
-                
-            # Verificar proporção
-            aspect = info['width'] / info['height']
-            if aspect > 1.91:  # Muito horizontal
-                return False, f"Vídeo muito largo (proporção: {aspect:.2f})"
-                
-            # Verificar tamanho do arquivo
-            if info['size_mb'] > 100:
-                return False, f"Arquivo muito grande: {info['size_mb']:.1f}MB"
-                
-            return True, "Vídeo válido para Instagram"
-            
-        except Exception as e:
-            return False, f"Erro ao validar vídeo: {str(e)}"
 
     @staticmethod
-    def get_video_info(video_path: str) -> Dict[str, Any]:
+    def validate_video(video_path: str) -> Tuple[bool, str]:
         """
-        Get comprehensive video file information using moviepy.
-        
-        Analyzes video properties including:
-        - Duration and frame rate
-        - Resolution and aspect ratio
-        - Codecs and container format
-        - File size and bitrate
-        
-        Args:
-            video_path: Path to the video file
-            
-        Returns:
-            dict: Video information with keys:
-                - duration: Length in seconds
-                - width: Frame width in pixels
-                - height: Frame height in pixels
-                - fps: Frames per second
-                - size_mb: File size in megabytes
-                - aspect_ratio: Width/height ratio
-                - video_codec: Video codec name
-                - audio_codec: Audio codec name if present
-                
-        Example:
-            >>> info = VideoProcessor.get_video_info("my_video.mp4")
-            >>> print(f"Duration: {info['duration']:.1f}s, "
-            ...       f"Resolution: {info['width']}x{info['height']}")
+        Validates video file against Instagram requirements.
+        Returns (is_valid, message).
         """
         try:
+            import ffmpeg
+            from moviepy.editor import VideoFileClip
+            
+            # Check if file exists
+            if not os.path.exists(video_path):
+                return False, "Video file not found"
+                
+            # Check file size
+            file_size = os.path.getsize(video_path) / (1024 * 1024)  # Convert to MB
+            if file_size > VideoProcessor.VIDEO_CONFIG['max_size_mb']:
+                return False, f"Video too large ({file_size:.1f}MB). Maximum allowed: {VideoProcessor.VIDEO_CONFIG['max_size_mb']}MB"
+
+            # Get video info using ffprobe
+            probe = ffmpeg.probe(video_path)
+            video_info = next(s for s in probe['streams'] if s['codec_type'] == 'video')
+            
+            # Check dimensions
+            width = int(video_info['width'])
+            height = int(video_info['height'])
+            if width < VideoProcessor.VIDEO_CONFIG['min_width']:
+                return False, f"Video width too small ({width}px). Minimum: {VideoProcessor.VIDEO_CONFIG['min_width']}px"
+
+            # Check aspect ratio
+            aspect_ratio = width / height
+            if aspect_ratio < VideoProcessor.VIDEO_CONFIG['aspect_ratio']['min']:
+                return False, f"Aspect ratio too narrow: {aspect_ratio:.2f}"
+            if aspect_ratio > VideoProcessor.VIDEO_CONFIG['aspect_ratio']['max']:
+                return False, f"Aspect ratio too wide: {aspect_ratio:.2f}"
+
+            # Check duration using moviepy
             with VideoFileClip(video_path) as clip:
-                file_size = os.path.getsize(video_path) / (1024 * 1024)  # Convert to MB
-                return {
-                    'duration': clip.duration,
-                    'width': clip.w,
-                    'height': clip.h,
-                    'fps': clip.fps,
-                    'size_mb': file_size,
-                    'aspect_ratio': clip.w / clip.h,
-                    'video_codec': clip.codec_name if hasattr(clip, 'codec_name') else None,
-                    'audio_codec': clip.audio.codec_name if clip.audio and hasattr(clip.audio, 'codec_name') else None
-                }
+                duration = clip.duration
+                if duration < VideoProcessor.VIDEO_CONFIG['min_duration']:
+                    return False, f"Video too short ({duration:.1f}s). Minimum: {VideoProcessor.VIDEO_CONFIG['min_duration']}s"
+                if duration > VideoProcessor.VIDEO_CONFIG['max_duration']:
+                    return False, f"Video too long ({duration:.1f}s). Maximum: {VideoProcessor.VIDEO_CONFIG['max_duration']}s"
+
+            # Check codec
+            vcodec = video_info.get('codec_name', '').lower()
+            if vcodec not in VideoProcessor.VIDEO_CONFIG['video_codecs']:
+                return False, f"Unsupported video codec: {vcodec}"
+
+            # Check audio if present
+            audio_stream = next((s for s in probe['streams'] if s['codec_type'] == 'audio'), None)
+            if audio_stream:
+                acodec = audio_stream.get('codec_name', '').lower()
+                if acodec not in VideoProcessor.VIDEO_CONFIG['audio_codecs']:
+                    return False, f"Unsupported audio codec: {acodec}"
+
+            return True, "Video validation successful"
+
         except Exception as e:
-            logger.error(f"Error getting video info: {e}")
-            raise ValueError(f"Failed to analyze video: {e}")
-            
-    @staticmethod
-    def check_duration(duration: float, post_type: str) -> bool:
-        """
-        Verify if video duration meets Instagram's requirements.
-        
-        Args:
-            duration: Video length in seconds
-            post_type: Type of post ('reel' or 'feed')
-            
-        Returns:
-            bool: True if duration is within acceptable range
-            
-        Example:
-            >>> processor = VideoProcessor()
-            >>> info = processor.get_video_info("video.mp4")
-            >>> if not processor.check_duration(info['duration'], 'reel'):
-            ...     print("Video too long for a reel")
-        """
-        limits = VideoProcessor.REELS_LIMITS if post_type == 'reel' else VideoProcessor.FEED_VIDEO_LIMITS
-        if duration < limits['min_duration']:
-            logger.warning(f"Video too short. Minimum duration: {limits['min_duration']}s")
-            return False
-        if duration > limits['max_duration']:
-            logger.warning(f"Video too long. Maximum duration: {limits['max_duration']}s")
-            return False
-        return True
-        
-    @staticmethod
-    def check_resolution(width: int, height: int, post_type: str) -> bool:
-        """
-        Verify if video resolution meets Instagram's requirements.
-        
-        Args:
-            width: Frame width in pixels
-            height: Frame height in pixels
-            post_type: Type of post ('reel' or 'feed')
-            
-        Returns:
-            bool: True if resolution is acceptable
-            
-        Example usage included in docstring for clarity:
-            >>> if not processor.check_resolution(1920, 1080, 'feed'):
-            ...     print("Resolution not suitable for feed video")
-        """
-        limits = VideoProcessor.REELS_LIMITS if post_type == 'reel' else VideoProcessor.FEED_VIDEO_LIMITS
-        
-        if width < limits['min_width'] or height < limits['min_height']:
-            logger.warning(f"Video resolution too low. Minimum: {limits['min_width']}x{limits['min_height']}")
-            return False
-        if width > limits['max_width'] or height > limits['max_height']:
-            logger.warning(f"Video resolution too high. Maximum: {limits['max_width']}x{limits['max_height']}")
-            return False
-        return True
-        
-    @staticmethod
-    def check_aspect_ratio(width: float, height: float, post_type: str) -> bool:
-        """
-        Verify if video aspect ratio is acceptable for Instagram.
-        
-        Instagram accepts different aspect ratios for different post types:
-        - Reels: Primarily vertical (9:16 recommended)
-        - Feed: Both horizontal and vertical with limits
-        
-        Args:
-            width: Frame width
-            height: Frame height
-            post_type: Type of post ('reel' or 'feed')
-            
-        Returns:
-            bool: True if aspect ratio is acceptable
-            
-        Examples:
-            >>> # Check if vertical video is suitable for reels
-            >>> processor.check_aspect_ratio(1080, 1920, 'reel')  # 9:16 ratio
-            True
-            >>> # Check if horizontal video works for feed
-            >>> processor.check_aspect_ratio(1920, 1080, 'feed')  # 16:9 ratio
-            True
-        """
-        limits = VideoProcessor.REELS_LIMITS if post_type == 'reel' else VideoProcessor.FEED_VIDEO_LIMITS
-        ratio = width / height
-        
-        if ratio < limits['aspect_ratio']['min']:
-            logger.warning(f"Video too narrow. Minimum ratio: {limits['aspect_ratio']['min']:.2f}")
-            return False
-        if ratio > limits['aspect_ratio']['max']:
-            logger.warning(f"Video too wide. Maximum ratio: {limits['aspect_ratio']['max']:.2f}")
-            return False
-        return True
-        
-    @staticmethod
-    def check_file_size(file_size: float, post_type: str) -> bool:
-        """
-        Verify if video file size is within Instagram's limits.
-        
-        Args:
-            file_size: Size in megabytes
-            post_type: Type of post ('reel' or 'feed')
-            
-        Returns:
-            bool: True if file size is acceptable
-            
-        Example:
-            >>> info = processor.get_video_info("large_video.mp4")
-            >>> if not processor.check_file_size(info['size_mb'], 'reel'):
-            ...     print(f"File too large ({info['size_mb']:.1f}MB)")
-        """
-        limits = VideoProcessor.REELS_LIMITS if post_type == 'reel' else VideoProcessor.FEED_VIDEO_LIMITS
-        if file_size > limits['max_size']:
-            logger.warning(f"File too large. Maximum size: {limits['max_size']}MB")
-            return False
-        return True
-        
-    def process_video(self, video_path: str, post_type: str = 'reel') -> Optional[str]:
-        """
-        Process and optimize video for Instagram upload.
-        
-        Performs several optimizations:
-        1. Validates video parameters
-        2. Adjusts resolution if needed
-        3. Optimizes bitrate and file size
-        4. Converts to proper format if necessary
-        5. Adjusts frame rate if needed
-        
-        Args:
-            video_path: Path to input video
-            post_type: Type of post ('reel' or 'feed')
-            
-        Returns:
-            str: Path to processed video, or None if processing failed
-            
-        Example:
-            >>> processor = VideoProcessor()
-            >>> optimized = processor.process_video("input.mp4", "reel")
-            >>> if optimized:
-            ...     print(f"Video optimized and saved to: {optimized}")
-            
-        Raises:
-            ValueError: If video doesn't meet Instagram's requirements
-            IOError: If file operations fail
-        """
-        try:
-            info = self.get_video_info(video_path)
-            
-            # Validate video parameters
-            checks = [
-                self.check_duration(info['duration'], post_type),
-                self.check_resolution(info['width'], info['height'], post_type),
-                self.check_aspect_ratio(info['width'], info['height'], post_type),
-                self.check_file_size(info['size_mb'], post_type)
-            ]
-            
-            if not all(checks):
-                logger.warning("Video requires optimization")
-                return self._optimize_video(video_path, post_type)
-                
-            logger.info("Video already meets Instagram requirements")
-            return video_path
-            
-        except Exception as e:
-            logger.error(f"Error processing video: {e}")
-            return None
-            
-    def _optimize_video(self, video_path: str, post_type: str) -> Optional[str]:
-        """
-        Internal method to optimize video for Instagram upload.
-        
-        Optimization steps:
-        1. Adjust resolution while maintaining aspect ratio
-        2. Optimize bitrate based on duration
-        3. Convert to compatible format
-        4. Ensure proper frame rate
-        5. Compress if needed
-        
-        Args:
-            video_path: Path to input video
-            post_type: Type of post ('reel' or 'feed')
-            
-        Returns:
-            str: Path to optimized video
-            
-        Technical notes:
-        - Uses two-pass encoding for better quality
-        - Implements smart bitrate allocation
-        - Preserves important metadata
-        - Handles audio optimization
-        """
-        return VideoProcessor.force_optimize_for_instagram(video_path, post_type)
+            return False, f"Validation error: {str(e)}"
