@@ -12,7 +12,7 @@ from .instagram_post_service import InstagramPostService
 from .carousel_normalizer import CarouselNormalizer
 from .describe_carousel_tool import CarouselDescriber
 from .crew_post_instagram import InstagramPostCrew
-from .exceptions import InstagramError, RateLimitExceeded, ContentPolicyViolation
+from .exceptions import InstagramError, RateLimitError, ContentPolicyViolation
 from .instagram_carousel_service import InstagramCarouselService
 from .instagram_reels_publisher import ReelsPublisher
 from .instagram_video_processor import VideoProcessor

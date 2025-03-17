@@ -43,6 +43,10 @@ class RateLimitError(InstagramError):
         self.retry_after = retry_after
         self.is_retriable = True
 
+class ContentPolicyViolation(InstagramError):
+    """Erro quando o conteúdo viola as políticas do Instagram"""
+    pass
+
 class MediaError(InstagramError):
     """Erro relacionado à mídia (formato, tamanho, falha no upload)"""
     pass
