@@ -4,7 +4,7 @@ import logging
 import psutil
 from pathlib import Path
 from contextlib import contextmanager
-from .config import Config
+from .config import ConfigManager
 from .cleanup_utility import CleanupUtility
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ class ResourceManager:
     
     def __init__(self):
         """Initialize the resource manager with configuration."""
-        self.config = Config.get_instance()
+        self.config = ConfigManager()  # ConfigManager already implements singleton pattern
         self.cleanup_util = CleanupUtility()
         self.temp_dirs = ['temp', 'temp_videos']
         
@@ -86,7 +86,7 @@ class ResourceManager:
             
         finally:
             # Cleanup on exit
-            if temp_dir and temp_dir.exists():
+            if (temp_dir and temp_dir.exists()):
                 try:
                     shutil.rmtree(temp_dir)
                     logger.debug(f"Cleaned up temporary directory: {temp_dir}")

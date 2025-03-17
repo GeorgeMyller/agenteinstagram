@@ -5,35 +5,45 @@ Handles posting videos as Reels to Instagram, including:
 - Video validation and optimization
 - Container creation and management
 - Publishing reels
+
+Updated for Instagram Graph API v22.0
 """
 
 import os
 import time
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import requests
 from moviepy.editor import VideoFileClip
-from ..utils.config import ConfigManager as Config
+from ..utils.config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
 class ReelsPublisher:
-    """Service for publishing Reels to Instagram"""
+    """Service for publishing Reels to Instagram with Graph API v22.0"""
     
-    def __init__(self):
-        """Initialize the Reels publisher service"""
-        self.config = Config()
-        self.access_token = self.config.get_value('instagram.auth.access_token')
-        self.instagram_account_id = self.config.get_value('instagram.auth.business_account_id')
+    def __init__(self, access_token=None, instagram_account_id=None):
+        """
+        Initialize the Reels publisher service
+        
+        Args:
+            access_token: Instagram Graph API access token
+            instagram_account_id: Instagram business account ID
+        """
+        self.config = ConfigManager()
+        
+        # Use parameters if provided, otherwise try config
+        self.access_token = access_token or self.config.get_value('instagram.auth.access_token')
+        self.instagram_account_id = instagram_account_id or self.config.get_value('instagram.auth.business_account_id')
         
         if not self.access_token or not self.instagram_account_id:
             raise ValueError("Instagram API key and account ID must be configured")
             
-        self.api_version = 'v18.0'  # Instagram Graph API version
+        self.api_version = 'v22.0'  # Updated Instagram Graph API version
         self.base_url = f'https://graph.facebook.com/{self.api_version}'
         
         # Video requirements
-        self.min_duration = 1.0  # seconds
+        self.min_duration = 3.0  # seconds (updated for Reels)
         self.max_duration = 90.0  # seconds
         self.min_width = 600  # pixels
         self.min_height = 600  # pixels
@@ -278,3 +288,47 @@ class ReelsPublisher:
         except Exception as e:
             logger.error(f"Error getting Reel permalink: {e}")
             return None
+            
+    def check_token_permissions(self) -> Tuple[bool, list]:
+        """
+        Check if the access token has required permissions
+        
+        Returns:
+            tuple: (is_valid, list of missing permissions)
+        """
+        required_permissions = [
+            'instagram_basic',
+            'instagram_content_publish',
+            'pages_read_engagement'
+        ]
+        
+        try:
+            endpoint = f'{self.base_url}/debug_token'
+            
+            params = {
+                'input_token': self.access_token,
+                'access_token': self.access_token
+            }
+            
+            response = requests.get(endpoint, params=params)
+            response.raise_for_status()
+            
+            result = response.json()
+            if 'data' not in result:
+                return False, required_permissions
+                
+            data = result['data']
+            if 'scopes' not in data:
+                return False, required_permissions
+                
+            current_permissions = data['scopes']
+            missing_permissions = [
+                perm for perm in required_permissions 
+                if perm not in current_permissions
+            ]
+            
+            return len(missing_permissions) == 0, missing_permissions
+            
+        except Exception as e:
+            logger.error(f"Error checking token permissions: {e}")
+            return False, required_permissions

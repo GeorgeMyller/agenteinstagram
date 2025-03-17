@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime
 from src.utils.resource_manager import ResourceManager
-from src.utils.config import Config
+from src.utils.config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class Message:
             }
         """
         self.resource_manager = ResourceManager()
-        self.config = Config.get_instance()
+        self.config = ConfigManager()
         
         # Handle different message formats
         if "data" not in raw_data:

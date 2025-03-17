@@ -5,30 +5,40 @@ Handles posting multiple images as a carousel to Instagram, including:
 - Creating carousel containers
 - Managing child media items
 - Publishing carousels
+
+Updated for Instagram Graph API v22.0
 """
 
 import os
 import time
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import requests
-from ..utils.config import ConfigManager as Config
+from ..utils.config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
 class InstagramCarouselService:
-    """Service for posting carousels (multiple images) to Instagram"""
+    """Service for posting carousels (multiple images) to Instagram with Graph API v22.0"""
     
-    def __init__(self):
-        """Initialize the Instagram carousel service"""
-        self.config = Config()
-        self.access_token = self.config.get_value('instagram.auth.access_token')
-        self.instagram_account_id = self.config.get_value('instagram.auth.business_account_id')
+    def __init__(self, access_token=None, instagram_account_id=None):
+        """
+        Initialize the Instagram carousel service
+        
+        Args:
+            access_token: Instagram Graph API access token
+            instagram_account_id: Instagram business account ID
+        """
+        self.config = ConfigManager()
+        
+        # Use parameters if provided, otherwise try config
+        self.access_token = access_token or self.config.get_value('instagram.auth.access_token')
+        self.instagram_account_id = instagram_account_id or self.config.get_value('instagram.auth.business_account_id')
         
         if not self.access_token or not self.instagram_account_id:
             raise ValueError("Instagram API key and account ID must be configured")
             
-        self.api_version = 'v18.0'  # Instagram Graph API version
+        self.api_version = 'v22.0'  # Updated Instagram Graph API version
         self.base_url = f'https://graph.facebook.com/{self.api_version}'
     
     def create_carousel_container(self, image_urls: List[str], caption: str) -> Optional[str]:
@@ -250,7 +260,7 @@ class InstagramCarouselService:
             logger.error(f"Error getting carousel permalink: {e}")
             return None
     
-    def check_token_permissions(self) -> tuple[bool, list]:
+    def check_token_permissions(self) -> Tuple[bool, list]:
         """
         Check if the access token has required permissions
         
