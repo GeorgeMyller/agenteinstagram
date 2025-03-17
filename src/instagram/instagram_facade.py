@@ -39,7 +39,7 @@ class InstagramFacade:
         # Initialize services
         self.media_service = InstagramMediaService(access_token, ig_user_id, skip_token_validation)
         self.post_service = InstagramPostService(access_token, ig_user_id, skip_token_validation)
-        self.carousel_service = InstagramCarouselService(access_token, ig_user_id, skip_token_validation)
+        self.carousel_service = InstagramCarouselService(access_token, ig_user_id)  # Removed skip_token_validation parameter
         self.reels_service = ReelsPublisher(access_token, ig_user_id, skip_token_validation)
         
         # Initialize utilities
