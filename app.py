@@ -9,7 +9,7 @@ import tempfile
 from src.instagram.image_validator import InstagramImageValidator
 from src.utils.image_decode_save import ImageDecodeSaver
 from src.utils.video_decode_save import VideoDecodeSaver
-from src.services.instagram_send import InstagramSend
+from src.instagram.instagram_send import InstagramSend
 from src.instagram.instagram_reels_publisher import ReelsPublisher
 import subprocess
 import time

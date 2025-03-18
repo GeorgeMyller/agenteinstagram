@@ -60,6 +60,20 @@ class MediaError(InstagramError):
         """Check if error is related to file format"""
         return "format" in self.message.lower()
 
+class MediaValidationError(InstagramError):
+    """Raised when media validation fails"""
+    def __init__(self, message: str, validation_details: Dict[str, Any] = None):
+        self.validation_details = validation_details or {}
+        super().__init__(message)
+        
+    def is_dimension_error(self) -> bool:
+        """Check if error is related to media dimensions"""
+        return "dimension" in self.message.lower()
+        
+    def is_aspect_ratio_error(self) -> bool:
+        """Check if error is related to aspect ratio"""
+        return "aspect ratio" in self.message.lower()
+
 class ContentPolicyViolation(InstagramError):
     """Raised when content violates Instagram policies"""
     def __init__(self, message: str, policy_code: str = None):

@@ -67,15 +67,16 @@ class PostQueue:
     def __init__(self):
         """Inicializa o sistema de filas"""
         self.config = Config.get_instance()
-        self._queue = PriorityQueue()
-        self._jobs: Dict[str, JobStatus] = {}
+        self.job_queue = PriorityQueue()  # Changed from _queue
+        self.jobs = {}  # Changed from _jobs
         self._lock = threading.Lock()
-        self._stats = QueueStats()
+        self.stats = {"total_jobs": 0, "completed_jobs": 0, "failed_jobs": 0, 
+                     "video_processing_jobs": 0, "image_processing_jobs": 0,
+                     "rate_limited_posts": 0, "avg_processing_time": 0}  # Initialize stats dict
+        self.job_history = []  # Add missing job_history list
         self.worker_thread = None
         self.is_running = False
-        self.processing_lock = threading.Lock()  # Lock para operações críticas
-
-        # Iniciar thread de processamento
+        self.processing_lock = threading.Lock()
         self.start_worker()
     
     def start_worker(self):
