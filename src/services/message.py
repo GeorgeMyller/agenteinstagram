@@ -53,19 +53,77 @@ class Message:
     
     def _extract_metadata(self) -> None:
         """Extract message metadata from raw data"""
-        msg_data = self.raw_data.get('data', {}).get('message', {})
+        # Try multiple common webhook payload structures
+        msg_data = None
+        remote_jid = None
+        msg_id = None
+        timestamp = 0
+        from_me = False
+        participant = None
         
+        # Add debug logging
+        logger.info(f"Raw data structure: {self.raw_data.keys()}")
+        
+        # Structure 1: data -> message -> key
+        if 'data' in self.raw_data and 'message' in self.raw_data['data']:
+            msg_data = self.raw_data.get('data', {}).get('message', {})
+            if 'key' in msg_data:
+                remote_jid = msg_data['key'].get('remoteJid', '')
+                msg_id = msg_data['key'].get('id', '')
+                from_me = msg_data['key'].get('fromMe', False)
+                participant = msg_data['key'].get('participant', '')
+            timestamp = msg_data.get('messageTimestamp', 0)
+        
+        # Structure 2: direct key-value at root
+        elif 'key' in self.raw_data:
+            remote_jid = self.raw_data['key'].get('remoteJid', '')
+            msg_id = self.raw_data['key'].get('id', '')
+            from_me = self.raw_data['key'].get('fromMe', False)
+            participant = self.raw_data['key'].get('participant', '')
+            timestamp = self.raw_data.get('messageTimestamp', 0)
+        
+        # Structure 3: message at root
+        elif 'message' in self.raw_data:
+            msg_data = self.raw_data['message']
+            if 'key' in msg_data:
+                remote_jid = msg_data['key'].get('remoteJid', '')
+                msg_id = msg_data['key'].get('id', '')
+                from_me = msg_data['key'].get('fromMe', False)
+                participant = msg_data['key'].get('participant', '')
+            timestamp = msg_data.get('messageTimestamp', 0)
+            
+        # Structure 4: remoteJid directly at root
+        elif 'remoteJid' in self.raw_data:
+            remote_jid = self.raw_data.get('remoteJid', '')
+            msg_id = self.raw_data.get('id', '')
+            from_me = self.raw_data.get('fromMe', False)
+            participant = self.raw_data.get('participant', '')
+            timestamp = self.raw_data.get('timestamp', 0)
+        
+        # Determine group_id
+        group_id = None
+        if remote_jid and '@g.us' in remote_jid:
+            group_id = remote_jid.split('@')[0]
+        
+        # If we have a webhook payload that doesn't match any expected structure,
+        # try to extract group ID from direct keys
+        if not group_id and 'group_id' in self.raw_data:
+            group_id = self.raw_data['group_id']
+            if not remote_jid:
+                remote_jid = f"{group_id}@g.us"
+        
+        # Log what we found
+        logger.info(f"Extracted remote_jid: {remote_jid}")
+        logger.info(f"Extracted group_id: {group_id}")
+        
+        # Create metadata object
         self.metadata = MessageMetadata(
-            remote_jid=msg_data.get('key', {}).get('remoteJid', ''),
-            id=msg_data.get('key', {}).get('id', ''),
-            timestamp=datetime.fromtimestamp(
-                msg_data.get('messageTimestamp', 0)
-            ),
-            from_me=msg_data.get('key', {}).get('fromMe', False),
-            group_id=msg_data.get('key', {}).get('remoteJid', '')
-                if '@g.us' in msg_data.get('key', {}).get('remoteJid', '')
-                else None,
-            user_id=msg_data.get('key', {}).get('participant', '')
+            remote_jid=remote_jid or '',
+            id=msg_id or '',
+            timestamp=datetime.fromtimestamp(timestamp) if timestamp else datetime.now(),
+            from_me=from_me,
+            group_id=group_id,
+            user_id=participant or ''
         )
     
     def _extract_content(self) -> None:

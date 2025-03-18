@@ -27,15 +27,15 @@ cleanup_scheduler = CleanupScheduler.get_instance()
 def _handle_text_message(message: Message):
     """Processes a text message"""
     logger.info("Handling text message")
-    return {"type": "text", "content": message.data.get("message", {}).get("content", "")}
+    return {"type": "text", "content": message.content.text or ""}
 
 def _handle_image_message(message: Message):
     """Processes an image message and posts it to Instagram"""
     logger.info("Handling image message")
     try:
-        # Use the attributes already processed by the Message class
-        image_base64 = message.image_base64
-        caption = message.image_caption or ""
+        # Use the content attributes from the Message class
+        image_base64 = message.content.image_base64
+        caption = message.content.image_caption or ""
         
         if not image_base64:
             logger.error("No image data found in message")
@@ -99,7 +99,20 @@ def _handle_image_message(message: Message):
 def _handle_video_message(message: Message):
     """Processes a video message"""
     logger.info("Handling video message")
-    return {"type": "video", "content": message.data.get("message", {}).get("content", "")}
+    try:
+        video_base64 = message.content.video_base64
+        caption = message.content.video_caption or ""
+        
+        if not video_base64:
+            logger.error("No video data found in message")
+            return {"type": "video", "status": "error", "message": "No video data found"}
+            
+        # Here would go logic for processing and posting video to Instagram
+        # Similar to the image handling code
+        return {"type": "video", "status": "success", "message": "Video received successfully"}
+    except Exception as e:
+        logger.error(f"Error handling video message: {str(e)}")
+        return {"type": "video", "status": "error", "message": str(e)}
 
 def _handle_unsupported_type(message: Message):
     """Handles unsupported message types"""
@@ -148,12 +161,60 @@ def handle_message():
     try:
         data = request.json
         logger.info("Message received:")
+        logger.info(f"Raw message data: {data}")
         
         # Create message object
         message = Message(data)
         
-        # Verify if message is from authorized group
-        if config.AUTHORIZED_GROUP_ID is None or message.remote_jid != config.AUTHORIZED_GROUP_ID:
+        # Debug information about message object
+        logger.info(f"Message type: {message.message_type}")
+        logger.info(f"Remote JID: {message.remote_jid}")
+        logger.info(f"Group ID: {message.group_id}")
+        
+        # Get authorized group ID from config
+        logger.info(f"Authorized Group ID from config: {config.AUTHORIZED_GROUP_ID}")
+        authorized_id = config.AUTHORIZED_GROUP_ID.split('@')[0] if config.AUTHORIZED_GROUP_ID else None
+        logger.info(f"Authorized ID for comparison: {authorized_id}")
+        
+        # Verify if message is from authorized group - with more flexible checking
+        if not message.remote_jid or not message.remote_jid.strip():
+            logger.warning("Empty remote_jid in message")
+            # Try to get group ID from different parts of the payload
+            potential_group_id = None
+            if data and isinstance(data, dict):
+                # Try common locations in different webhook formats
+                if 'key' in data and isinstance(data['key'], dict):
+                    potential_group_id = data['key'].get('remoteJid')
+                elif 'data' in data and isinstance(data['data'], dict):
+                    data_obj = data['data']
+                    if 'key' in data_obj and isinstance(data_obj['key'], dict):
+                        potential_group_id = data_obj['key'].get('remoteJid')
+                    elif 'message' in data_obj and isinstance(data_obj['message'], dict):
+                        message_obj = data_obj['message']
+                        potential_group_id = message_obj.get('key', {}).get('remoteJid')
+            
+            logger.info(f"Found potential group ID: {potential_group_id}")
+            
+            # If we found a group ID that matches, proceed
+            if potential_group_id and (
+                potential_group_id == config.AUTHORIZED_GROUP_ID or 
+                potential_group_id.split('@')[0] == authorized_id
+            ):
+                logger.info(f"Proceeding with manually extracted group ID: {potential_group_id}")
+                # Continue processing with the manually extracted group ID
+            else:
+                logger.info(f"Message ignored - unauthorized source (empty remote_jid)")
+                return jsonify({
+                    "status": "ignored", 
+                    "message": "Message from unauthorized source (empty remote_jid)"
+                }), 403
+        elif not authorized_id:
+            logger.warning("No authorized group ID configured")
+            return jsonify({
+                "status": "ignored", 
+                "message": "No authorized group configured"
+            }), 403
+        elif message.group_id != authorized_id and message.remote_jid.split('@')[0] != authorized_id:
             logger.info(f"Message ignored - unauthorized source: {message.remote_jid}")
             return jsonify({
                 "status": "ignored", 

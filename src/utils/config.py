@@ -91,6 +91,7 @@ class Config:
         env_vars = {
             'INSTAGRAM_API_KEY': lambda x: setattr(self.api['instagram'], 'api_key', x),
             'INSTAGRAM_ACCOUNT_ID': lambda x: setattr(self.api['instagram'], 'account_id', x),
+            'AUTHORIZED_GROUP_ID': lambda x: setattr(self, 'authorized_group_id', x),  # Adding handler for AUTHORIZED_GROUP_ID
             'MAX_RETRIES': lambda x: setattr(self.api['instagram'], 'max_retries', int(x)),
             'REQUEST_TIMEOUT': lambda x: setattr(self.api['instagram'], 'request_timeout', int(x)),
             'CLEANUP_INTERVAL': lambda x: setattr(self.storage, 'cleanup_interval_minutes', int(x)),
@@ -107,6 +108,8 @@ class Config:
                     setter(value)
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Failed to set {var}: {e}")
+            elif var in self.REQUIRED_VARS:
+                logger.error(f"Required environment variable {var} is not set")
 
     def get_api_config(self) -> InstagramApiConfig:
         return self.api['instagram']
@@ -151,7 +154,8 @@ class Config:
     # Required environment variables
     REQUIRED_VARS = [
         "INSTAGRAM_API_KEY",
-        "INSTAGRAM_ACCOUNT_ID"
+        "INSTAGRAM_ACCOUNT_ID",
+        "AUTHORIZED_GROUP_ID"  # Adding AUTHORIZED_GROUP_ID as required
     ]
     
     # Optional environment variables with defaults
