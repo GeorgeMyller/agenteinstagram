@@ -5,6 +5,11 @@ import threading
 import logging
 from queue import Queue, Empty
 from threading import Thread
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+from queue import PriorityQueue
+from ..utils.config import Config
 
 # Configurar logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -26,6 +31,34 @@ class PostStatus:
     RATE_LIMITED = "rate_limited"
     POLICY_VIOLATION = "policy_violation"
 
+@dataclass
+class JobMetadata:
+    created_at: datetime
+    media_type: str
+    caption: Optional[str] = None
+    priority: int = 0
+    retries: int = 0
+    max_retries: int = 3
+
+@dataclass
+class JobStatus:
+    id: str
+    status: str
+    progress: int
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    error: Optional[str] = None
+    post_url: Optional[str] = None
+
+@dataclass
+class QueueStats:
+    pending_jobs: int = 0
+    processing_jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    avg_processing_time: float = 0.0
+    error_rate: float = 0.0
+
 class PostQueue:
     """
     Sistema de filas para processamento assíncrono de posts e reels
@@ -33,18 +66,11 @@ class PostQueue:
     
     def __init__(self):
         """Inicializa o sistema de filas"""
-        self.job_queue = Queue()
-        self.jobs = {}  # Armazena informações sobre os trabalhos
-        self.job_history = []  # Histórico de trabalhos
-        self.stats = {
-            "total_jobs": 0,
-            "completed_jobs": 0,
-            "failed_jobs": 0,
-            "rate_limited_posts": 0,
-            "video_processing_jobs": 0,
-            "image_processing_jobs": 0,
-            "avg_processing_time": 0
-        }
+        self.config = Config.get_instance()
+        self._queue = PriorityQueue()
+        self._jobs: Dict[str, JobStatus] = {}
+        self._lock = threading.Lock()
+        self._stats = QueueStats()
         self.worker_thread = None
         self.is_running = False
         self.processing_lock = threading.Lock()  # Lock para operações críticas

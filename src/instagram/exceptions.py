@@ -3,64 +3,91 @@ Este módulo contém todas as exceções personalizadas usadas na integração c
 Todas as exceções herdam da classe base InstagramError.
 """
 
-class InstagramError(Exception):
-    """Classe base para todas as exceções relacionadas ao Instagram"""
-    def __init__(self, message: str, error_code: str = None, 
-                 error_subcode: str = None, fb_trace_id: str = None,
-                 is_retriable: bool = False):
-        self.error_code = error_code
-        self.error_subcode = error_subcode
-        self.fb_trace_id = fb_trace_id
-        self.is_retriable = is_retriable
-        super().__init__(message)
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+from datetime import datetime
 
-    def __str__(self):
-        details = []
-        if self.error_code:
-            details.append(f"Code: {self.error_code}")
-        if self.error_subcode:
-            details.append(f"Subcode: {self.error_subcode}")
-        if self.fb_trace_id:
-            details.append(f"FB Trace ID: {self.fb_trace_id}")
-        
-        base_message = super().__str__()
-        if details:
-            return f"{base_message} ({', '.join(details)})"
-        return base_message
+@dataclass
+class ErrorDetails:
+    code: Optional[int] = None
+    subcode: Optional[int] = None
+    type: Optional[str] = None
+    message: str = "Unknown error"
+    fbtrace_id: Optional[str] = None
+    timestamp: datetime = datetime.now()
+
+class InstagramError(Exception):
+    """Base exception for Instagram API errors"""
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(self.message)
 
 class AuthenticationError(InstagramError):
-    """Erro de autenticação (token expirado, inválido, etc)"""
-    pass
-
-class PermissionError(InstagramError):
-    """Erro de permissões (escopos faltando, etc)"""
-    pass
+    """Raised when there are authentication issues"""
+    def __init__(self, message: str, code: int = None):
+        self.code = code
+        super().__init__(message)
+        
+    def is_expired_token(self) -> bool:
+        """Check if error is due to expired token"""
+        return self.code == 190
+        
+    def is_permission_error(self) -> bool:
+        """Check if error is due to insufficient permissions"""
+        return self.code == 200
 
 class RateLimitError(InstagramError):
-    """Erro quando os limites de taxa são excedidos"""
-    def __init__(self, *args, retry_after: int = None, **kwargs):
-        super().__init__(*args, **kwargs)
+    """Raised when Instagram API rate limit is exceeded"""
+    def __init__(self, message: str, retry_after: int = None):
         self.retry_after = retry_after
-        self.is_retriable = True
-
-class ContentPolicyViolation(InstagramError):
-    """Erro quando o conteúdo viola as políticas do Instagram"""
-    pass
+        super().__init__(message)
+        
+    def is_temporary(self) -> bool:
+        """Check if rate limit is temporary"""
+        return self.retry_after is not None and self.retry_after < 3600
 
 class MediaError(InstagramError):
-    """Erro relacionado à mídia (formato, tamanho, falha no upload)"""
-    pass
+    """Raised when there are issues with media files"""
+    def __init__(self, message: str, media_type: str = None):
+        self.media_type = media_type
+        super().__init__(message)
+        
+    def is_size_error(self) -> bool:
+        """Check if error is related to file size"""
+        return "size" in self.message.lower()
+        
+    def is_format_error(self) -> bool:
+        """Check if error is related to file format"""
+        return "format" in self.message.lower()
 
-class ValidationError(InstagramError):
-    """Erro quando a validação de mídia ou dados falha"""
-    pass
+class ContentPolicyViolation(InstagramError):
+    """Raised when content violates Instagram policies"""
+    def __init__(self, message: str, policy_code: str = None):
+        self.policy_code = policy_code
+        super().__init__(message)
 
-class ConfigurationError(InstagramError):
-    """Erro relacionado à configuração (credenciais faltando, etc)"""
-    pass
+class BusinessValidationError(InstagramError):
+    """Raised when business validation fails"""
+    def __init__(self, message: str, validation_code: str = None):
+        self.validation_code = validation_code
+        super().__init__(message)
+        
+    def requires_business_account(self) -> bool:
+        """Check if error requires business account"""
+        return self.validation_code == "NOT_BUSINESS_ACCOUNT"
+        
+    def is_policy_violation(self) -> bool:
+        """Check if error is policy violation"""
+        return self.validation_code == "POLICY_VIOLATION"
 
-class TemporaryError(InstagramError):
-    """Erro temporário que pode ser tentado novamente"""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.is_retriable = True
+class CarouselError(InstagramError):
+    """Raised when there are issues with carousel posts"""
+    def __init__(self, message: str, carousel_id: str = None):
+        self.carousel_id = carousel_id
+        super().__init__(message)
+
+class VideoError(InstagramError):
+    """Raised when there are issues with video posts"""
+    def __init__(self, message: str, video_id: str = None):
+        self.video_id = video_id
+        super().__init__(message)

@@ -16,180 +16,165 @@ from .monitor import ApiMonitor
 
 logger = logging.getLogger(__name__)
 
-class InstagramApiError(Exception):
-    """Base class for Instagram API errors"""
-    def __init__(self, message: str, error_code: int = None):
-        self.message = message
-        self.error_code = error_code
-        super().__init__(self.message)
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Callable, Type
+import functools
+import logging
+import traceback
+from datetime import datetime
+from flask import Flask, request, jsonify
 
-class AuthenticationError(InstagramApiError):
-    """Authentication or permission error"""
-    pass
+logger = logging.getLogger(__name__)
 
-class RateLimitError(InstagramApiError):
-    """Rate limit exceeded error"""
-    pass
+@dataclass
+class ErrorInfo:
+    """Information about an error occurrence"""
+    timestamp: datetime
+    error_type: str
+    message: str
+    endpoint: Optional[str] = None
+    request_data: Optional[dict] = None
+    traceback: Optional[str] = None
 
-class MediaError(InstagramApiError):
-    """Media processing or validation error"""
-    pass
+@dataclass
+class ErrorStats:
+    """Error occurrence statistics"""
+    error_count: int = 0
+    errors_by_type: Dict[str, int] = field(default_factory=dict)
+    recent_errors: List[ErrorInfo] = field(default_factory=list)
+    max_recent_errors: int = 50
 
-class BusinessValidationError(InstagramApiError):
-    """Business validation error"""
-    pass
-
-def error_handler(f: Callable) -> Callable:
+def error_handler(func):
     """
-    Decorator for consistent error handling
+    Decorator for API route functions to handle exceptions gracefully
     
     Args:
-        f: Function to wrap
+        func: The route function to decorate
         
     Returns:
-        Wrapped function with error handling
+        Decorated function that catches and handles exceptions
     """
-    @functools.wraps(f)
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         try:
-            return f(*args, **kwargs)
-            
-        except AuthenticationError as e:
-            logger.error(f"Authentication error: {e.message}")
-            return jsonify({
-                'status': 'error',
-                'error': 'authentication_error',
-                'message': e.message,
-                'error_code': e.error_code
-            }), 401
-            
-        except RateLimitError as e:
-            logger.warning(f"Rate limit error: {e.message}")
-            return jsonify({
-                'status': 'error',
-                'error': 'rate_limit_error',
-                'message': e.message,
-                'error_code': e.error_code,
-                'retry_after': get_retry_after()
-            }), 429
-            
-        except MediaError as e:
-            logger.error(f"Media error: {e.message}")
-            return jsonify({
-                'status': 'error',
-                'error': 'media_error',
-                'message': e.message,
-                'error_code': e.error_code
-            }), 400
-            
-        except BusinessValidationError as e:
-            logger.error(f"Business validation error: {e.message}")
-            return jsonify({
-                'status': 'error',
-                'error': 'business_validation_error',
-                'message': e.message,
-                'error_code': e.error_code
-            }), 422
-            
+            return func(*args, **kwargs)
         except Exception as e:
-            logger.exception("Unexpected error")
+            # Log the error
+            logger.exception(f"Error in {func.__name__}: {str(e)}")
             
-            # Track error in monitoring
-            monitor = ApiMonitor()
-            endpoint = request.endpoint or 'unknown'
-            monitor.track_error(endpoint, str(e))
+            # Get request data if available
+            req_data = None
+            if request:
+                if request.is_json:
+                    req_data = request.get_json()
+                elif request.form:
+                    req_data = dict(request.form)
+                    
+            # Create error info
+            error_info = ErrorInfo(
+                timestamp=datetime.now(),
+                error_type=type(e).__name__,
+                message=str(e),
+                endpoint=request.endpoint if request else None,
+                request_data=req_data,
+                traceback=traceback.format_exc()
+            )
             
+            # Track error stats
+            _track_error(error_info)
+            
+            # Return JSON error response
             return jsonify({
-                'status': 'error',
-                'error': 'internal_error',
-                'message': 'An unexpected error occurred',
-                'request_id': generate_request_id()
+                "status": "error",
+                "error": {
+                    "type": error_info.error_type,
+                    "message": error_info.message
+                }
             }), 500
-    
+            
     return wrapper
 
-def init_error_handlers(app: Flask):
+def _track_error(error_info: ErrorInfo) -> None:
+    """Track error for statistics"""
+    global _error_stats
+    
+    # Initialize stats if needed
+    if not hasattr(error_handler, "_error_stats"):
+        error_handler._error_stats = ErrorStats()
+    
+    stats = error_handler._error_stats
+    
+    # Update counts
+    stats.error_count += 1
+    error_type = error_info.error_type
+    stats.errors_by_type[error_type] = stats.errors_by_type.get(error_type, 0) + 1
+    
+    # Add to recent errors
+    stats.recent_errors.append(error_info)
+    
+    # Trim if needed
+    if len(stats.recent_errors) > stats.max_recent_errors:
+        stats.recent_errors = stats.recent_errors[-stats.max_recent_errors:]
+
+def get_error_stats() -> Dict[str, Any]:
+    """Get current error statistics"""
+    if not hasattr(error_handler, "_error_stats"):
+        error_handler._error_stats = ErrorStats()
+        
+    stats = error_handler._error_stats
+    
+    # Convert to serializable dict
+    return {
+        "total_errors": stats.error_count,
+        "errors_by_type": stats.errors_by_type,
+        "recent_errors": [
+            {
+                "timestamp": err.timestamp.isoformat(),
+                "type": err.error_type,
+                "message": err.message,
+                "endpoint": err.endpoint
+            }
+            for err in stats.recent_errors
+        ]
+    }
+
+def init_error_handlers(app: Flask) -> None:
     """
-    Initialize Flask error handlers
+    Initialize error handlers for Flask app
     
     Args:
         app: Flask application instance
     """
+    # Handle 404 errors
     @app.errorhandler(404)
-    def not_found(error):
+    def not_found_error(e):
         return jsonify({
-            'status': 'error',
-            'error': 'not_found',
-            'message': 'The requested resource was not found'
+            "status": "error",
+            "error": {
+                "type": "NotFoundError",
+                "message": "The requested resource was not found"
+            }
         }), 404
     
+    # Handle 405 errors
     @app.errorhandler(405)
-    def method_not_allowed(error):
+    def method_not_allowed(e):
         return jsonify({
-            'status': 'error',
-            'error': 'method_not_allowed',
-            'message': f'Method {request.method} not allowed for {request.path}'
+            "status": "error",
+            "error": {
+                "type": "MethodNotAllowedError",
+                "message": "The method is not allowed for the requested URL"
+            }
         }), 405
     
-    @app.errorhandler(400)
-    def bad_request(error):
+    # Handle 500 errors
+    @app.errorhandler(500)
+    def server_error(e):
+        logger.error(f"Server error: {str(e)}")
         return jsonify({
-            'status': 'error',
-            'error': 'bad_request',
-            'message': 'Invalid request parameters'
-        }), 400
-
-def get_retry_after() -> int:
-    """
-    Get retry after time in seconds
-    
-    Returns:
-        int: Seconds to wait before retry
-    """
-    # Default to 60 seconds
-    return 60
-
-def generate_request_id() -> str:
-    """
-    Generate unique request ID for error tracking
-    
-    Returns:
-        str: Unique request ID
-    """
-    from uuid import uuid4
-    return str(uuid4())
-
-def parse_instagram_error(response: Dict[str, Any]) -> Optional[InstagramApiError]:
-    """
-    Parse Instagram API error response
-    
-    Args:
-        response: API error response
-        
-    Returns:
-        InstagramApiError if error recognized, None otherwise
-    """
-    if not response or 'error' not in response:
-        return None
-        
-    error = response['error']
-    message = error.get('message', 'Unknown error')
-    code = error.get('code')
-    
-    # Authentication errors
-    if code in [190, 10, 200]:
-        return AuthenticationError(message, code)
-    
-    # Rate limit errors
-    if code in [4, 613, 17, 32]:
-        return RateLimitError(message, code)
-    
-    # Media errors
-    if code in [24, 25, 26, 27, 28]:
-        return MediaError(message, code)
-    
-    # Business validation
-    if code in [100, 110, 190]:
-        return BusinessValidationError(message, code)
-    
-    return InstagramApiError(message, code)
+            "status": "error",
+            "error": {
+                "type": "ServerError",
+                "message": "An internal server error occurred"
+            }
+        }), 500

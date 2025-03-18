@@ -9,190 +9,146 @@ import time
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from datetime import datetime, timedelta
-from .config import ConfigManager
+from .config import Config
 
 logger = logging.getLogger(__name__)
 
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+import time
+import threading
+from collections import deque
+import logging
+from .config import Config
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class RateLimitWindow:
+    window_start: float
+    request_count: int = 0
+    
+@dataclass
+class RateLimitState:
+    windows: Dict[str, RateLimitWindow] = field(default_factory=dict)
+    last_request_time: Dict[str, float] = field(default_factory=dict)
+
 class RateLimiter:
-    """Handles API rate limiting"""
+    """
+    Thread-safe rate limiter for Instagram API calls
+    Uses a sliding window algorithm to track request rates
+    """
+    
+    def __init__(self, window_size: int = 3600, max_requests: int = 200):
+        self.window_size = window_size  # Window size in seconds
+        self.max_requests = max_requests  # Maximum requests per window
+        self.requests = deque()  # Queue of request timestamps
+        self._lock = threading.Lock()
+        
+    def _cleanup_old_requests(self):
+        """Remove requests outside the current window"""
+        now = time.time()
+        window_start = now - self.window_size
+        
+        while self.requests and self.requests[0] < window_start:
+            self.requests.popleft()
+            
+    def check_rate_limit(self) -> tuple[bool, Optional[float]]:
+        """
+        Check if we can make a new request
+        
+        Returns:
+            tuple[bool, Optional[float]]: (can_request, wait_time)
+        """
+        with self._lock:
+            self._cleanup_old_requests()
+            
+            if len(self.requests) < self.max_requests:
+                return True, None
+                
+            # Calculate time until oldest request expires
+            now = time.time()
+            wait_time = self.requests[0] + self.window_size - now
+            return False, max(0, wait_time)
+            
+    def add_request(self):
+        """Record a new request"""
+        with self._lock:
+            now = time.time()
+            self.requests.append(now)
+            self._cleanup_old_requests()
+            
+    def get_remaining_requests(self) -> int:
+        """Get number of remaining requests in current window"""
+        with self._lock:
+            self._cleanup_old_requests()
+            return max(0, self.max_requests - len(self.requests))
+            
+    def get_reset_time(self) -> Optional[float]:
+        """Get time until rate limit resets"""
+        with self._lock:
+            self._cleanup_old_requests()
+            
+            if not self.requests:
+                return None
+                
+            oldest_request = self.requests[0]
+            return max(0, oldest_request + self.window_size - time.time())
+            
+class EndpointRateLimiter:
+    """
+    Rate limiter that tracks limits per endpoint
+    """
     
     def __init__(self):
-        self.config = ConfigManager()
-        self.state_file = Path(
-            self.config.get_value(
-                'rate_limiting.state_file',
-                'rate_limit_state.json'
-            )
-        )
-        self.buckets: Dict[str, Dict] = {}
-        self.load_state()
-    
-    def load_state(self):
-        """Load rate limit state from file"""
-        try:
-            if self.state_file.exists():
-                with open(self.state_file) as f:
-                    saved_state = json.load(f)
-                    
-                # Convert saved timestamps back to float
-                for bucket in saved_state.values():
-                    bucket['last_update'] = float(
-                        bucket['last_update']
-                    )
-                
-                self.buckets = saved_state
-                
-        except (json.JSONDecodeError, IOError) as e:
-            logger.warning(
-                f"Failed to load rate limit state: {e}"
-            )
-            self.buckets = {}
-    
-    def save_state(self):
-        """Save current rate limit state to file"""
-        try:
-            with open(self.state_file, 'w') as f:
-                json.dump(self.buckets, f)
-        except IOError as e:
-            logger.error(
-                f"Failed to save rate limit state: {e}"
-            )
-    
-    def get_bucket(
-        self,
-        key: str,
-        max_tokens: int,
-        refill_rate: float
-    ) -> Dict:
-        """
-        Get or create rate limit bucket
+        self.limiters: Dict[str, RateLimiter] = {}
+        self._lock = threading.Lock()
         
-        Args:
-            key: Bucket identifier
-            max_tokens: Maximum tokens allowed
-            refill_rate: Token refill rate per second
+        # Default limits for different endpoints
+        self.default_limits = {
+            "post_image": (3600, 25),      # 25 requests per hour
+            "post_carousel": (3600, 25),    # 25 requests per hour
+            "post_video": (3600, 25),       # 25 requests per hour
+            "post_reel": (3600, 25),        # 25 requests per hour
+            "query": (60, 200)              # 200 requests per minute
+        }
+        
+    def _get_limiter(self, endpoint: str) -> RateLimiter:
+        """Get or create rate limiter for endpoint"""
+        with self._lock:
+            if endpoint not in self.limiters:
+                window_size, max_requests = self.default_limits.get(
+                    endpoint, (3600, 200)  # Default: 200 requests per hour
+                )
+                self.limiters[endpoint] = RateLimiter(window_size, max_requests)
+            return self.limiters[endpoint]
             
-        Returns:
-            Dict with bucket state
-        """
-        if key not in self.buckets:
-            self.buckets[key] = {
-                'tokens': max_tokens,
-                'max_tokens': max_tokens,
-                'refill_rate': refill_rate,
-                'last_update': time.time()
-            }
-        return self.buckets[key]
-    
-    def update_bucket(self, bucket: Dict):
-        """
-        Update bucket token count based on elapsed time
+    def check_rate_limit(self, endpoint: str) -> tuple[bool, Optional[float]]:
+        """Check rate limit for specific endpoint"""
+        return self._get_limiter(endpoint).check_rate_limit()
         
-        Args:
-            bucket: Bucket to update
-        """
-        now = time.time()
-        elapsed = now - bucket['last_update']
+    def add_request(self, endpoint: str):
+        """Record request for specific endpoint"""
+        self._get_limiter(endpoint).add_request()
         
-        new_tokens = elapsed * bucket['refill_rate']
-        bucket['tokens'] = min(
-            bucket['tokens'] + new_tokens,
-            bucket['max_tokens']
-        )
-        bucket['last_update'] = now
-    
-    def check_rate_limit(
-        self,
-        key: str,
-        max_tokens: int,
-        refill_rate: float,
-        cost: float = 1.0
-    ) -> Optional[float]:
-        """
-        Check if action is allowed by rate limit
+    def get_remaining_requests(self, endpoint: str) -> int:
+        """Get remaining requests for endpoint"""
+        return self._get_limiter(endpoint).get_remaining_requests()
         
-        Args:
-            key: Rate limit bucket identifier
-            max_tokens: Maximum tokens allowed
-            refill_rate: Token refill rate per second
-            cost: Token cost for this action
-            
-        Returns:
-            Seconds to wait if rate limited, None if allowed
-        """
-        bucket = self.get_bucket(key, max_tokens, refill_rate)
-        self.update_bucket(bucket)
+    def get_reset_time(self, endpoint: str) -> Optional[float]:
+        """Get reset time for endpoint"""
+        return self._get_limiter(endpoint).get_reset_time()
         
-        if bucket['tokens'] >= cost:
-            bucket['tokens'] -= cost
-            self.save_state()
-            return None
-            
-        # Calculate wait time
-        needed = cost - bucket['tokens']
-        wait_time = needed / bucket['refill_rate']
-        
-        return wait_time
-    
-    def apply_backoff(
-        self,
-        wait_time: float,
-        retries: int
-    ) -> float:
-        """
-        Apply exponential backoff to wait time
-        
-        Args:
-            wait_time: Base wait time
-            retries: Number of retries so far
-            
-        Returns:
-            Updated wait time with backoff
-        """
-        multiplier = self.config.get_value(
-            'rate_limiting.backoff_multiplier',
-            2.0
-        )
-        max_backoff = self.config.get_value(
-            'rate_limiting.max_backoff',
-            3600
-        )
-        
-        backoff = wait_time * (multiplier ** retries)
-        return min(backoff, max_backoff)
-    
-    def wait_if_needed(
-        self,
-        key: str,
-        max_tokens: int,
-        refill_rate: float,
-        cost: float = 1.0
-    ) -> None:
-        """
-        Wait if rate limited
-        
-        Args:
-            key: Rate limit bucket identifier
-            max_tokens: Maximum tokens allowed 
-            refill_rate: Token refill rate per second
-            cost: Token cost for this action
-        """
-        retries = 0
-        while True:
-            wait_time = self.check_rate_limit(
-                key, max_tokens, refill_rate, cost
-            )
-            
-            if wait_time is None:
-                break
-                
-            wait_time = self.apply_backoff(wait_time, retries)
-            logger.info(
-                f"Rate limited on {key}, "
-                f"waiting {wait_time:.1f}s"
-            )
-            
-            time.sleep(wait_time)
-            retries += 1
+    def get_status(self) -> Dict:
+        """Get current rate limit status for all endpoints"""
+        status = {}
+        with self._lock:
+            for endpoint, limiter in self.limiters.items():
+                status[endpoint] = {
+                    "remaining": limiter.get_remaining_requests(),
+                    "reset_in": limiter.get_reset_time()
+                }
+        return status

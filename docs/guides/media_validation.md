@@ -1,57 +1,22 @@
 # Media Validation Tool
 
-The `validate_media.py` script helps you verify that your media files meet Instagram's requirements before attempting to upload them.
+## Overview
+This guide explains how to use the media validation tools to ensure your content meets Instagram requirements.
 
-## Usage
+## Image Requirements
+- Format: JPEG/PNG
+- Aspect ratio: 4:5 to 1.91:1
+- Minimum resolution: 320x320 pixels
+- Maximum file size: 8MB
 
-```bash
-./scripts/validate_media.py [--type {image,video,auto}] FILES...
-```
-
-### Examples
-
-Validate a single image:
-```bash
-./scripts/validate_media.py path/to/image.jpg
-```
-
-Validate multiple videos:
-```bash
-./scripts/validate_media.py video1.mp4 video2.mp4 --type video
-```
-
-Validate mixed media:
-```bash
-./scripts/validate_media.py *.jpg *.mp4
-```
-
-## Requirements Checked
-
-### Images
-- Format: JPEG or PNG only
-- Size: Maximum 8MB
-- Dimensions: Minimum 320x320 pixels
-- Aspect Ratio: Between 0.8 and 1.91 (4:5 to 1.91:1)
-
-### Videos
-- Format: MP4 or MOV
-- Codec: H.264 video, AAC audio
-- Duration: 3-90 seconds
-- Resolution: Minimum 600x600 pixels
-- Aspect Ratio: Between 0.8 and 1.91
-- Size: Maximum 100MB
-
-## Error Messages
-
-The tool provides detailed feedback about any issues found:
-
-```
-Validating: example.jpg
-==================================================
-❌ File has the following issues:
-  • File too large: 12.5MB (max 8MB)
-  • Invalid aspect ratio: 2.5 (must be between 0.8 and 1.91)
-```
+## Video Requirements
+- Format: MP4 (H.264 codec)
+- Aspect ratio: 4:5 to 1.91:1 (feed videos)
+- Aspect ratio: 9:16 (reels)
+- Resolution: Minimum 500 pixels wide
+- Duration: 3-60 seconds (feed videos)
+- Duration: 3-90 seconds (reels)
+- Maximum file size: 100MB
 
 ## Common Issues and Solutions
 
@@ -68,69 +33,112 @@ Validating: example.jpg
 
 ### Video Issues
 
-1. **Incorrect codec**
-   - Convert using FFmpeg:
-     ```bash
-     ffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4
-     ```
+1. **Incorrect format**
+   - Use the built-in video converter to convert to MP4 format
+   - The converter handles codec and format requirements automatically
 
 2. **Duration issues**
    - Trim video if too long
-   - Loop or extend if too shor
-   - Use our video editor tool
+   - Loop or extend if too short
+   - Use the video editor tool
 
 3. **Resolution too low**
    - Upscale with quality preservation
    - Re-record in higher quality
    - Use better camera settings
 
-## Integration with Workflow
+## Using the Validation Tools
 
-The validation tool is integrated into our main workflow:
-- Pre-upload validation
-- Batch processing
-- Automated optimization
+### Image Validation
+```python
+from src.instagram import InstagramMediaService
 
-### Automated Usage
+media_service = InstagramMediaService()
+is_valid, message = media_service.validate_media("image.jpg")
+if not is_valid:
+    print(f"Validation failed: {message}")
+```
+
+### Video Validation
+```python
+from src.instagram import InstagramVideoProcessor
+
+processor = InstagramVideoProcessor()
+is_valid, message = processor.validate_video("video.mp4")
+if not is_valid:
+    print(f"Validation failed: {message}")
+```
+
+## Video Processing Options
+
+### Optimizing Videos
+The video processor can automatically optimize videos for Instagram:
+- Correct aspect ratio
+- Proper resolution
+- Optimal bitrate
+- Compatible codecs
 
 ```python
-from scripts.validate_media import validate_image, validate_video
+from src.instagram import InstagramVideoProcessor
 
-# In your code
-def process_media(file_path: str):
-    if file_path.endswith(('.jpg', '.jpeg', '.png')):
-        is_valid, issues = validate_image(file_path)
-    elif file_path.endswith(('.mp4', '.mov')):
-        is_valid, issues = validate_video(file_path)
-
-    if not is_valid:
-        # Handle issues or optimize automatically
-        pass
+processor = InstagramVideoProcessor()
+optimized_path = processor.optimize_video("input.mp4", target_type="reels")
 ```
+
+### Custom Processing
+You can customize video processing with these options:
+- Target width/height
+- Remove audio
+- Custom bitrate
+- Quality settings
+
+## Handling Different Media Types
+
+### Regular Feed Videos
+- Use `target_type="video"` 
+- Aspect ratio between 4:5 and 1.91:1
+- Duration 3-60 seconds
+
+### Reels
+- Use `target_type="reels"`
+- Fixed 9:16 aspect ratio
+- Duration 3-90 seconds
 
 ## Best Practices
 
-1. **Always validate before upload**
-   - Saves time and API calls
-   - Prevents failed uploads
-   - Better user experience
+1. **Always validate before posting**
+   ```python
+   if processor.validate_video(video_path)[0]:
+       # Safe to proceed with posting
+   ```
 
-2. **Use appropriate tools**
-   - Image editing for aspect ratio
-   - Video compression for size
-   - Format conversion when needed
+2. **Use optimized videos**
+   ```python
+   optimized = processor.optimize_video(video_path)
+   if optimized:
+       # Use optimized version for posting
+   ```
 
-3. **Monitor changes**
-   - Instagram requirements may change
-   - Keep tool updated
-   - Check official documentation
+3. **Handle validation failures**
+   ```python
+   is_valid, message = processor.validate_video(video_path)
+   if not is_valid:
+       # Show error message to user
+       # Suggest fixes based on message
+   ```
 
-## Suppor
+## Troubleshooting
 
-If you encounter issues:
-1. Check the troubleshooting guide
-2. Review Instagram's current requirements
-3. Open an issue on GitHub
-4. Contact support team
+Common validation errors and solutions:
 
-Remember to always test media files before attempting to upload them to Instagram to ensure the best possible success rate for your posts.
+1. **"Video too large"**
+   - Use the optimize_video method
+   - Reduce resolution or duration
+
+2. **"Invalid aspect ratio"**
+   - The optimizer will automatically adjust aspect ratio
+   - Or manually crop video to correct ratio
+
+3. **"Duration out of range"**
+   - Trim video to acceptable length
+   - Check target_type requirements

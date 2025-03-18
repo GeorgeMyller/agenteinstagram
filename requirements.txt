@@ -24,8 +24,7 @@ numpy>=1.24.0
 opencv-python-headless>=4.8.0
 
 # Media handling
-moviepy
-ffmpeg-python>=0.2.0
+moviepy>=1.0.3
 opencv-python>=4.8.0
 
 # Async support

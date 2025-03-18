@@ -35,8 +35,7 @@ import os
 import logging
 from typing import Optional, Tuple, Dict, Any
 from pathlib import Path
-import subprocess
-import json
+from moviepy.editor import VideoFileClip, ColorClip, CompositeVideoClip
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +73,7 @@ class VideoProcessor:
         self.min_width = min_width
         self.min_height = min_height
         self.allowed_formats = allowed_formats or ["mp4"]
-        
-        # Verify ffmpeg installation
-        self._check_ffmpeg()
-        
+
     def validate_video(self, video_path: str) -> bool:
         """
         Validate video meets Instagram requirements.
@@ -106,60 +102,33 @@ class VideoProcessor:
             ...     )
         """
         try:
-            # Get video metadata
-            info = self.get_video_info(video_path)
-            
-            # Check format
-            if info["format"]["format_name"] not in self.allowed_formats:
-                logger.error(
-                    f"Invalid format: {info['format']['format_name']}"
-                )
-                return False
+            with VideoFileClip(video_path) as clip:
+                # Check duration
+                if clip.duration > self.max_duration:
+                    logger.error(
+                        f"Video too long: {clip.duration}s > {self.max_duration}s"
+                    )
+                    return False
                 
-            # Check duration
-            duration = float(info["format"]["duration"])
-            if duration > self.max_duration:
-                logger.error(
-                    f"Video too long: {duration}s > {self.max_duration}s"
-                )
-                return False
+                # Check dimensions
+                width, height = clip.size
+                if width < self.min_width or height < self.min_height:
+                    logger.error(
+                        f"Video too small: {width}x{height} < "
+                        f"{self.min_width}x{self.min_height}"
+                    )
+                    return False
                 
-            # Check dimensions
-            stream = self._get_video_stream(info)
-            width = int(stream["width"])
-            height = int(stream["height"])
-            
-            if width < self.min_width or height < self.min_height:
-                logger.error(
-                    f"Video too small: {width}x{height} < "
-                    f"{self.min_width}x{self.min_height}"
-                )
-                return False
+                # Check aspect ratio
+                aspect = width / height
+                if aspect < 0.8 or aspect > 1.91:
+                    logger.error(
+                        f"Invalid aspect ratio: {aspect:.2f}"
+                    )
+                    return False
                 
-            # Check aspect ratio
-            aspect = width / height
-            if aspect < 0.8 or aspect > 1.91:
-                logger.error(
-                    f"Invalid aspect ratio: {aspect:.2f}"
-                )
-                return False
+                return True
                 
-            # Check codecs
-            if stream["codec_name"] != "h264":
-                logger.error(
-                    f"Invalid video codec: {stream['codec_name']}"
-                )
-                return False
-                
-            audio = self._get_audio_stream(info)
-            if audio and audio["codec_name"] != "aac":
-                logger.error(
-                    f"Invalid audio codec: {audio['codec_name']}"
-                )
-                return False
-                
-            return True
-            
         except Exception as e:
             logger.error(f"Video validation failed: {str(e)}")
             return False
@@ -194,53 +163,32 @@ class VideoProcessor:
             ...     quality=23
             ... )
         """
-        # Build ffmpeg command
-        cmd = [
-            "ffmpeg",
-            "-i", input_path,
-            "-c:v", "libx264",  # H.264 video codec
-            "-preset", "medium",
-            "-b:v", self.target_bitrate,
-        ]
-        
-        # Add output size if specified
-        if "target_width" in kwargs and "target_height" in kwargs:
-            cmd.extend([
-                "-vf",
-                f"scale={kwargs['target_width']}:{kwargs['target_height']}"
-            ])
-            
-        # Handle audio
-        if kwargs.get("remove_audio"):
-            cmd.extend(["-an"])
-        else:
-            cmd.extend([
-                "-c:a", "aac",  # AAC audio codec
-                "-b:a", "128k"
-            ])
-            
-        # Add quality
-        if "quality" in kwargs:
-            cmd.extend(["-crf", str(kwargs["quality"])])
-            
-        # Output format
-        cmd.extend([
-            "-f", target_format,
-            "-y",  # Overwrite output
-            output_path
-        ])
-        
-        # Run conversion
         try:
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                f"Video conversion failed: {e.stderr.decode()}"
-            )
+            with VideoFileClip(input_path) as clip:
+                # Handle resize if needed
+                if "target_width" in kwargs and "target_height" in kwargs:
+                    clip = clip.resize(
+                        width=kwargs["target_width"],
+                        height=kwargs["target_height"]
+                    )
+                
+                # Handle audio removal if requested
+                if kwargs.get("remove_audio"):
+                    clip = clip.without_audio()
+                
+                # Write the processed video
+                clip.write_videofile(
+                    output_path,
+                    codec="libx264",
+                    audio_codec="aac" if clip.audio else None,
+                    bitrate=self.target_bitrate,
+                    preset="medium",
+                    threads=4,
+                    fps=clip.fps
+                )
+                
+        except Exception as e:
+            logger.error(f"Video conversion failed: {str(e)}")
             raise
             
     def generate_thumbnail(
@@ -271,32 +219,24 @@ class VideoProcessor:
             ... )
         """
         try:
-            cmd = [
-                "ffmpeg",
-                "-ss", str(time),
-                "-i", video_path,
-                "-vframes", "1",
-                "-q:v", "2",
-                "-y",
-                output_path
-            ]
-            
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True
-            )
-            return True
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                f"Thumbnail generation failed: {e.stderr.decode()}"
-            )
+            with VideoFileClip(video_path) as clip:
+                # Get frame at specified time
+                frame = clip.get_frame(time)
+                
+                # Save frame as image
+                from PIL import Image
+                import numpy as np
+                img = Image.fromarray(np.uint8(frame))
+                img.save(output_path, quality=95)
+                return True
+                
+        except Exception as e:
+            logger.error(f"Thumbnail generation failed: {str(e)}")
             return False
             
     def get_video_info(self, video_path: str) -> Dict[str, Any]:
         """
-        Get detailed video metadata using ffprobe.
+        Get detailed video metadata using moviepy.
         
         Args:
             video_path: Path to video file
@@ -314,57 +254,19 @@ class VideoProcessor:
             >>> stream = processor._get_video_stream(info)
             >>> print(f"Resolution: {stream['width']}x{stream['height']}")
         """
-        cmd = [
-            "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            "-show_streams",
-            video_path
-        ]
-        
         try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True
-            )
-            return json.loads(result.stdout)
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                f"Failed to get video info: {e.stderr.decode()}"
-            )
+            with VideoFileClip(video_path) as clip:
+                info = {
+                    "width": clip.size[0],
+                    "height": clip.size[1],
+                    "duration": clip.duration,
+                    "fps": clip.fps,
+                    "has_audio": clip.audio is not None,
+                    "format": os.path.splitext(video_path)[1][1:],
+                    "size_bytes": os.path.getsize(video_path)
+                }
+                return info
+                
+        except Exception as e:
+            logger.error(f"Failed to get video info: {str(e)}")
             raise
-            
-    def _check_ffmpeg(self):
-        """Verify ffmpeg and ffprobe are installed."""
-        try:
-            subprocess.run(
-                ["ffmpeg", "-version"],
-                capture_output=True,
-                check=True
-            )
-            subprocess.run(
-                ["ffprobe", "-version"],
-                capture_output=True,
-                check=True
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            raise RuntimeError(
-                "ffmpeg and ffprobe are required but not installed"
-            )
-            
-    def _get_video_stream(self, info: Dict) -> Dict:
-        """Get primary video stream info."""
-        for stream in info["streams"]:
-            if stream["codec_type"] == "video":
-                return stream
-        raise ValueError("No video stream found")
-        
-    def _get_audio_stream(self, info: Dict) -> Optional[Dict]:
-        """Get primary audio stream info if present."""
-        for stream in info["streams"]:
-            if stream["codec_type"] == "audio":
-                return stream
-        return None

@@ -1,83 +1,170 @@
 <!DOCTYPE html>
+<!-- jinja2 template -->
 <html>
 <head>
-    <title>Instagram Posting Monitor</title>
+    <title>Instagram Agent Monitor</title>
     <meta http-equiv="refresh" content="30">
     <style>
-        body { 
-            font-family: Arial, sans-serif; 
-            margin: 20px;
-            background: #f0f2f5;
+        body {
+            font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f6fa;
         }
-        h1, h2 { color: #3b5998; }
-        .stats-container { 
-            display: flex; 
-            flex-wrap: wrap;
-            gap: 20px;
-            margin: 20px 0;
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
         }
-        .stat-box { 
-            background-color: white;
+        .card {
+            background: white;
             border-radius: 8px;
             padding: 20px;
+            margin-bottom: 20px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            flex: 1;
-            min-width: 200px;
         }
-        .stat-value { 
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stat-value {
             font-size: 24px;
             font-weight: bold;
-            color: #1877f2;
-            display: block;
-            margin: 10px 0;
+            color: #2d3436;
         }
         .stat-label {
-            color: #65676b;
             font-size: 14px;
+            color: #636e72;
         }
-        .status-success { color: #42b72a; }
-        .status-error { color: #fa383e; }
-        .status-warning { color: #f7b928; }
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+        .status-good { background: #00b894; }
+        .status-warning { background: #fdcb6e; }
+        .status-error { background: #d63031; }
+        .usage-bar {
+            width: 100%;
+            height: 8px;
+            background: #dfe6e9;
+            border-radius: 4px;
+            margin-top: 5px;
+        }
+        .usage-fill {
+            height: 100%;
+            border-radius: 4px;
+            background: #00b894;
+            transition: width 0.3s ease;
+        }
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .table th, .table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #dfe6e9;
+        }
+        .table th {
+            background: #f8f9fa;
+            font-weight: 600;
+        }
     </style>
 </head>
 <body>
-    <h1>Instagram Posting Monitor</h1>
-    <div class="stats-container">
-        <div class="stat-box">
-            <h3>Posts Status</h3>
-            <div>
-                <span class="stat-label">Successful Posts</span>
-                <span class="stat-value status-success">{{system.successful_posts}}</span>
+    <div class="container">
+        <h1>Instagram Agent Monitor</h1>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">API Status</div>
+                <div class="stat-value">
+                    <span class="status-indicator {{ 'status-good' if system.api_status == 'ok' else 'status-error' }}"></span>
+                    {{ system.api_status|upper }}
+                </div>
             </div>
-            <div>
-                <span class="stat-label">Failed Posts</span>
-                <span class="stat-value status-error">{{system.failed_posts}}</span>
+            
+            <div class="stat-card">
+                <div class="stat-label">Posts Today</div>
+                <div class="stat-value">{{ system.posts_today }}</div>
+                <div class="usage-bar">
+                    <div class="usage-fill" style="width: {{ (system.posts_today / system.daily_limit * 100)|round }}%;"></div>
+                </div>
             </div>
-            <div>
-                <span class="stat-label">Rate Limited</span>
-                <span class="stat-value status-warning">{{system.rate_limited_posts}}</span>
+            
+            <div class="stat-card">
+                <div class="stat-label">Storage Usage</div>
+                <div class="stat-value">{{ system.storage.used_mb|round(1) }}MB</div>
+                <div class="usage-bar">
+                    <div class="usage-fill" style="width: {{ (system.storage.used_mb / system.storage.total_mb * 100)|round }}%;"></div>
+                </div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-label">Success Rate</div>
+                <div class="stat-value">{{ (system.success_rate * 100)|round(1) }}%</div>
             </div>
         </div>
-        
-        <div class="stat-box">
-            <h3>System Status</h3>
-            <div>
-                <span class="stat-label">CPU Usage</span>
-                <span class="stat-value">{{system.cpu_percent}}%</span>
-            </div>
-            <div>
-                <span class="stat-label">Memory Usage</span>
-                <span class="stat-value">{{system.memory_percent|round(1)}}%</span>
-            </div>
-            <div>
-                <span class="stat-label">Uptime</span>
-                <span class="stat-value" style="font-size: 16px;">{{system.uptime}}</span>
-            </div>
+
+        <div class="card">
+            <h2>Recent Posts</h2>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>ID</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for post in system.recent_posts %}
+                    <tr>
+                        <td>{{ post.time }}</td>
+                        <td>{{ post.type }}</td>
+                        <td>
+                            <span class="status-indicator {{ 'status-good' if post.status == 'success' else 'status-error' }}"></span>
+                            {{ post.status }}
+                        </td>
+                        <td>{{ post.id }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>System Statistics</h2>
+            <table class="table">
+                <tr>
+                    <td>Uptime</td>
+                    <td>{{ system.uptime }}</td>
+                </tr>
+                <tr>
+                    <td>Rate Limit Reset</td>
+                    <td>{{ system.rate_limit_reset }}</td>
+                </tr>
+                <tr>
+                    <td>API Calls Remaining</td>
+                    <td>{{ system.api_calls_remaining }}</td>
+                </tr>
+                <tr>
+                    <td>Last Error</td>
+                    <td>{{ system.last_error or 'None' }}</td>
+                </tr>
+            </table>
         </div>
     </div>
-
-    <footer style="margin-top: 30px; text-align: center; color: #65676b;">
-        <p>Last updated: {{current_time}}</p>
-    </footer>
 </body>
 </html>

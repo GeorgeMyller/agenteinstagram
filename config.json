@@ -1,0 +1,46 @@
+{
+    "api": {
+        "instagram": {
+            "version": "v22.0",
+            "max_retries": 3,
+            "retry_delay": 1.0,
+            "request_timeout": 30
+        }
+    },
+    "storage": {
+        "max_storage_mb": 1000,
+        "cleanup_interval_minutes": 30,
+        "max_temp_file_age_hours": 24,
+        "aggressive_cleanup_threshold_mb": 800
+    },
+    "cleanup_patterns": {
+        "temp_patterns": ["temp-*", "*.tmp"],
+        "video_patterns": ["*.mp4", "*.mov", "*.avi"],
+        "image_patterns": ["*.jpg", "*.png", "*.jpeg"]
+    },
+    "paths": {
+        "temp_dir": "temp",
+        "temp_videos_dir": "temp_videos",
+        "assets_dir": "assets"
+    },
+    "monitoring": {
+        "enabled": true,
+        "stats_interval": 300,
+        "port": 5002
+    },
+    "rate_limits": {
+        "window": 3600,
+        "max_requests": 200,
+        "min_interval": 1.0
+    },
+    "features": {
+        "carousel": {
+            "enabled": true,
+            "max_images": 10
+        },
+        "video": {
+            "enabled": true,
+            "max_size_mb": 100
+        }
+    }
+}

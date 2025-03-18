@@ -1,292 +1,306 @@
-from typing import Optional, Union, List, Generator, Any, Dict
 import os
 import logging
-import psutil
+import tempfile
+import shutil
+import time
+import glob
+from typing import Dict, List, Any, Generator, Optional, Tuple
 from pathlib import Path
+from datetime import datetime, timedelta
 from contextlib import contextmanager
-from .config import ConfigManager
-from .cleanup_utility import CleanupUtility
+from .config import Config
+import json  # Added missing import for json module
 
 logger = logging.getLogger(__name__)
 
 class ResourceManager:
     """
-    Resource manager for handling temporary files and cleanup operations.
-    Provides context managers for automatic resource cleanup.
-    Manages and monitors system resources like disk space and memory.
+    ResourceManager handles temporary files, resource tracking,
+    and storage management.
     """
+    _instance = None
     
-    def __init__(self):
-        """Initialize the resource manager with configuration."""
-        self.config = ConfigManager()  # ConfigManager already implements singleton pattern
-        self.cleanup_util = CleanupUtility()
-        self.temp_dirs = ['temp', 'temp_videos']
-        
-    @contextmanager
-    def temp_file(self, prefix: str = "temp-", suffix: str = "") -> Generator[Path, None, None]:
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+    
+    def __init__(self, temp_dir: Optional[str] = None):
         """
-        Context manager for temporary file handling.
-        Automatically removes the file after use.
+        Initialize resource manager
         
         Args:
-            prefix: Prefix for temporary file name
-            suffix: Suffix for temporary file name (e.g., '.jpg')
+            temp_dir: Directory to use for temporary files, defaults to system temp
+        """
+        # Use provided temp directory or system default
+        self.temp_dir = temp_dir or os.path.join(os.getcwd(), "temp")
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # Track resources with their creation time and expiration
+        self.tracked_resources = {}
+        
+        # Load tracked resources from storage if available
+        self._load_tracked_resources()
+        
+        logger.info(f"ResourceManager initialized with temp directory: {self.temp_dir}")
+        
+    @contextmanager
+    def temp_file(self, prefix: str = "", suffix: str = "", delete: bool = True) -> Generator[str, None, None]:
+        """
+        Create a temporary file and clean up after use
+        
+        Args:
+            prefix: Prefix for the temporary file name
+            suffix: Suffix for the temporary file name (e.g., '.jpg')
+            delete: Whether to delete the file after use
             
         Yields:
-            Path: Path object for the temporary file
-            
-        Example:
-            with resource_manager.temp_file(suffix='.jpg') as temp_path:
-                # Use temp_path...
-            # File is automatically cleaned up after the block
+            Path to the temporary file
         """
-        import tempfile
+        fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix=prefix, dir=self.temp_dir)
+        os.close(fd)
         
         try:
-            # Create temporary file
-            temp_fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=self.get_temp_dir())
-            os.close(temp_fd)
-            temp_path = Path(temp_path)
-            
+            logger.debug(f"Created temporary file: {temp_path}")
             yield temp_path
-            
         finally:
-            # Cleanup on exit
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-                    logger.debug(f"Cleaned up temporary file: {temp_path}")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup temporary file {temp_path}: {e}")
-    
+            if delete and os.path.exists(temp_path):
+                os.unlink(temp_path)
+                logger.debug(f"Deleted temporary file: {temp_path}")
+                
     @contextmanager
-    def temp_directory(self, prefix: str = "temp-") -> Generator[Path, None, None]:
+    def temp_directory(self, prefix: str = "", delete: bool = True) -> Generator[str, None, None]:
         """
-        Context manager for temporary directory handling.
-        Automatically removes the directory and its contents after use.
+        Create a temporary directory and clean up after use
         
         Args:
-            prefix: Prefix for temporary directory name
+            prefix: Prefix for the temporary directory name
+            delete: Whether to delete the directory after use
             
         Yields:
-            Path: Path object for the temporary directory
-            
-        Example:
-            with resource_manager.temp_directory() as temp_dir:
-                # Use temp_dir...
-            # Directory and contents are automatically cleaned up
+            Path to the temporary directory
         """
-        import tempfile
-        import shutil
+        temp_dir = tempfile.mkdtemp(prefix=prefix, dir=self.temp_dir)
         
-        temp_dir = None
         try:
-            temp_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=self.get_temp_dir()))
+            logger.debug(f"Created temporary directory: {temp_dir}")
             yield temp_dir
-            
         finally:
-            # Cleanup on exit
-            if (temp_dir and temp_dir.exists()):
-                try:
-                    shutil.rmtree(temp_dir)
-                    logger.debug(f"Cleaned up temporary directory: {temp_dir}")
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup temporary directory {temp_dir}: {e}")
+            if delete and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.debug(f"Deleted temporary directory: {temp_dir}")
     
-    def get_temp_dir(self) -> Path:
-        """Get the application's temporary directory, creating if needed."""
-        temp_dir = Path(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))) / "temp"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        return temp_dir
-    
-    def cleanup(self, aggressive: bool = True) -> None:
+    def register_resource(self, path: str, lifetime_hours: float = 24.0) -> bool:
         """
-        Perform cleanup of temporary resources.
-        
-        Args:
-            aggressive: If True, uses more aggressive cleanup parameters
-        """
-        config = self.config.get_cleanup_config()
-        temp_dir = self.get_temp_dir()
-        
-        # Adjust cleanup parameters based on aggressive mode
-        max_age = config['max_file_age_hours'] // 2 if aggressive else config['max_file_age_hours']
-        
-        # Clean temporary files
-        for pattern in config['patterns']['temp_patterns']:
-            self.cleanup_util.cleanup_temp_files(str(temp_dir), pattern, max_age)
-            
-        # Clean empty directories
-        self.cleanup_util.cleanup_empty_dirs(str(temp_dir), max_age)
-        
-        # Enforce storage limits
-        self.cleanup_util.enforce_storage_limit(
-            str(temp_dir), 
-            max_size_mb=config['max_storage_mb'],
-            remove_oldest=True
-        )
-    
-    def register_resource(self, path: Union[str, Path], lifetime_hours: Optional[float] = None) -> None:
-        """
-        Register a resource for tracking and automatic cleanup.
+        Register a resource for tracking and automatic cleanup
         
         Args:
             path: Path to the resource
-            lifetime_hours: Optional maximum lifetime in hours
+            lifetime_hours: Number of hours before the resource can be deleted
+            
+        Returns:
+            True if registered successfully, False otherwise
         """
-        path = Path(path)
-        if not path.exists():
-            return
+        if not os.path.exists(path):
+            logger.warning(f"Cannot register non-existent resource: {path}")
+            return False
             
-        # Set cleanup timestamp if lifetime specified
-        if lifetime_hours is not None:
-            cleanup_time = Path(str(path) + '.cleanup')
-            import time
-            cleanup_time.write_text(str(time.time() + lifetime_hours * 3600))
+        now = datetime.now()
+        expiration = now + timedelta(hours=lifetime_hours)
+        
+        self.tracked_resources[path] = {
+            'created': now.timestamp(),
+            'expires': expiration.timestamp(),
+        }
+        
+        # Save tracked resources to storage
+        self._save_tracked_resources()
+        
+        logger.debug(f"Registered resource: {path}, expires: {expiration.isoformat()}")
+        return True
+    
+    def unregister_resource(self, path: str) -> bool:
+        """
+        Remove a resource from tracking
+        
+        Args:
+            path: Path to the resource
             
-        logger.debug(f"Registered resource for cleanup: {path}")
+        Returns:
+            True if unregistered successfully, False otherwise
+        """
+        if path in self.tracked_resources:
+            del self.tracked_resources[path]
+            self._save_tracked_resources()
+            logger.debug(f"Unregistered resource: {path}")
+            return True
+            
+        return False
+    
+    def cleanup_expired_resources(self, force: bool = False) -> Tuple[int, int]:
+        """
+        Delete expired resources
+        
+        Args:
+            force: If True, delete all tracked resources regardless of expiration
+            
+        Returns:
+            Tuple of (deleted count, failed count)
+        """
+        now = datetime.now().timestamp()
+        to_delete = []
+        
+        # Find expired resources
+        for path, metadata in self.tracked_resources.items():
+            if force or metadata['expires'] < now:
+                to_delete.append(path)
+        
+        # Delete expired resources
+        deleted = 0
+        failed = 0
+        
+        for path in to_delete:
+            try:
+                if os.path.isdir(path):
+                    if os.path.exists(path):
+                        shutil.rmtree(path)
+                else:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                        
+                del self.tracked_resources[path]
+                deleted += 1
+                logger.debug(f"Deleted expired resource: {path}")
+            except Exception as e:
+                failed += 1
+                logger.warning(f"Failed to delete resource {path}: {str(e)}")
+        
+        # Save updated tracking data
+        if deleted > 0 or failed > 0:
+            self._save_tracked_resources()
+            
+        if deleted > 0:
+            logger.info(f"Cleaned up {deleted} expired resources ({failed} failed)")
+            
+        return deleted, failed
     
     def monitor_disk_usage(self) -> Dict[str, Any]:
         """
-        Monitor disk usage in temporary directories
+        Monitor disk usage of temp directory and tracked resources
         
         Returns:
-            Dict containing:
-            - total_size_mb: Total size of all files in MB
-            - file_count: Total number of files
-            - details: Per-directory breakdown
+            Dictionary with usage statistics
         """
-        try:
-            total_size = 0
-            total_files = 0
-            details = {}
-            
-            for temp_dir in self.temp_dirs:
-                if not os.path.exists(temp_dir):
-                    continue
-                    
-                dir_size = 0
-                file_count = 0
-                
-                for root, _, files in os.walk(temp_dir):
-                    for file in files:
-                        try:
-                            file_path = os.path.join(root, file)
-                            file_size = os.path.getsize(file_path)
-                            dir_size += file_size
-                            file_count += 1
-                        except OSError as e:
-                            logger.warning(f"Error getting size for {file}: {e}")
-                
-                total_size += dir_size
-                total_files += file_count
-                details[temp_dir] = {
-                    'size_mb': dir_size / (1024 * 1024),
-                    'file_count': file_count
-                }
-            
-            return {
-                'total_size_mb': total_size / (1024 * 1024),
-                'file_count': total_files,
-                'details': details
-            }
-            
-        except Exception as e:
-            logger.error(f"Error monitoring disk usage: {e}")
-            return {
-                'total_size_mb': 0,
-                'file_count': 0,
-                'details': {},
-                'error': str(e)
-            }
-            
-    def check_system_health(self) -> Dict[str, Any]:
-        """
-        Check overall system health including memory and CPU usage
+        # Get total size of temp directory
+        temp_size = self._get_directory_size(self.temp_dir)
         
-        Returns:
-            Dict containing system health metrics
-        """
-        try:
-            memory = psutil.virtual_memory()
-            cpu_percent = psutil.cpu_percent(interval=1)
-            disk = psutil.disk_usage('/')
+        # Count files by type
+        file_counts = {
+            "images": 0,
+            "videos": 0,
+            "other": 0
+        }
+        
+        # Get information about tracked resources
+        tracked_info = {
+            "count": len(self.tracked_resources),
+            "oldest_resource": None,
+            "newest_resource": None,
+            "expiring_soon": 0,
+        }
+        
+        # Scan temp directory for files
+        for root, dirs, files in os.walk(self.temp_dir):
+            for file in files:
+                path = os.path.join(root, file)
+                ext = os.path.splitext(file)[1].lower()
+                
+                if ext in ('.jpg', '.jpeg', '.png', '.gif'):
+                    file_counts["images"] += 1
+                elif ext in ('.mp4', '.mov', '.avi'):
+                    file_counts["videos"] += 1
+                else:
+                    file_counts["other"] += 1
+        
+        # Process tracked resources
+        now = datetime.now().timestamp()
+        oldest = now
+        newest = 0
+        
+        for path, metadata in self.tracked_resources.items():
+            created = metadata['created']
+            expires = metadata['expires']
             
-            return {
-                'memory': {
-                    'total_gb': memory.total / (1024**3),
-                    'available_gb': memory.available / (1024**3),
-                    'percent': memory.percent
-                },
-                'cpu': {
-                    'percent': cpu_percent
-                },
-                'disk': {
-                    'total_gb': disk.total / (1024**3),
-                    'free_gb': disk.free / (1024**3),
-                    'percent': disk.percent
-                }
-            }
-        except Exception as e:
-            logger.error(f"Error checking system health: {e}")
-            return {'error': str(e)}
+            # Track oldest and newest
+            if created < oldest:
+                oldest = created
+                tracked_info["oldest_resource"] = path
             
-    def cleanup_old_files(self, max_age_hours: int = 24) -> Dict[str, Any]:
+            if created > newest:
+                newest = created
+                tracked_info["newest_resource"] = path
+            
+            # Count resources expiring in next hour
+            if expires - now < 3600:
+                tracked_info["expiring_soon"] += 1
+        
+        # Convert timestamps to human-readable format
+        if tracked_info["oldest_resource"]:
+            tracked_info["oldest_age_hours"] = (now - oldest) / 3600
+        
+        if tracked_info["newest_resource"]:
+            tracked_info["newest_age_hours"] = (now - newest) / 3600
+        
+        # Build full result
+        return {
+            "total_size_mb": temp_size / (1024 * 1024),
+            "file_counts": file_counts,
+            "tracked_resources": tracked_info,
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    def _get_directory_size(self, path: str) -> int:
         """
-        Clean up files older than specified age
+        Calculate total size of a directory in bytes
         
         Args:
-            max_age_hours: Maximum age of files in hours
+            path: Directory path
             
         Returns:
-            Dict containing cleanup results
+            Size in bytes
         """
-        try:
-            import time
-            
-            now = time.time()
-            max_age_seconds = max_age_hours * 3600
-            removed_files = []
-            errors = []
-            
-            for temp_dir in self.temp_dirs:
-                if not os.path.exists(temp_dir):
-                    continue
-                    
-                for root, _, files in os.walk(temp_dir):
-                    for file in files:
-                        try:
-                            file_path = os.path.join(root, file)
-                            if now - os.path.getmtime(file_path) > max_age_seconds:
-                                os.remove(file_path)
-                                removed_files.append(file_path)
-                        except OSError as e:
-                            errors.append(f"Error removing {file}: {e}")
-            
-            return {
-                'files_removed': len(removed_files),
-                'removed_files': removed_files,
-                'errors': errors
-            }
-            
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-            return {
-                'files_removed': 0,
-                'removed_files': [],
-                'errors': [str(e)]
-            }
-    
-    def get_resource_limits(self) -> Dict[str, Any]:
-        """
-        Get resource limits and thresholds
+        total_size = 0
         
-        Returns:
-            Dict containing resource limits
-        """
-        return {
-            'max_file_size_mb': 100,  # Maximum size for any single file
-            'max_total_size_gb': 10,  # Maximum total storage
-            'max_files': 1000,        # Maximum number of files
-            'cleanup_age_hours': 24   # Age at which files are cleaned up
-        }
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                if os.path.exists(file_path):
+                    total_size += os.path.getsize(file_path)
+        
+        return total_size
+    
+    def _save_tracked_resources(self) -> None:
+        """Save tracked resources to storage file"""
+        storage_path = os.path.join(self.temp_dir, '.resource_tracking.json')
+        
+        try:
+            with open(storage_path, 'w') as f:
+                json.dump(self.tracked_resources, f)
+        except Exception as e:
+            logger.warning(f"Failed to save resource tracking data: {str(e)}")
+    
+    def _load_tracked_resources(self) -> None:
+        """Load tracked resources from storage file"""
+        storage_path = os.path.join(self.temp_dir, '.resource_tracking.json')
+        
+        if os.path.exists(storage_path):
+            try:
+                with open(storage_path, 'r') as f:
+                    self.tracked_resources = json.load(f)
+                logger.debug(f"Loaded {len(self.tracked_resources)} tracked resources")
+            except Exception as e:
+                logger.warning(f"Failed to load resource tracking data: {str(e)}")
+                self.tracked_resources = {}
+        else:
+            self.tracked_resources = {}

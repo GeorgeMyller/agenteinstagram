@@ -1,77 +1,176 @@
-# src/utils/video_decode_save.py
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Tuple
+from pathlib import Path
 import os
-import base64
-import time
 import logging
-from src.utils.paths import Paths
+import base64
+from datetime import datetime
+import uuid
+from io import BytesIO
+from moviepy.editor import VideoFileClip
+
+from .paths import Paths
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class VideoMetadata:
+    width: int
+    height: int
+    duration: float
+    format: str
+    codec: str
+    bitrate: Optional[int] = None
+    fps: Optional[float] = None
+
+@dataclass
+class DecodedVideo:
+    file_path: Path
+    metadata: VideoMetadata
+    size_bytes: int
+    processing_time: float
+    mime_type: str
+    created_at: datetime = field(default_factory=datetime.now)
 
 class VideoDecodeSaver:
     """
-    Classe para decodificar e salvar vídeos em base64 recebidos via webhook
+    Handles decoding and saving base64-encoded videos
+    
+    Methods:
+        process: Decode and save a base64 video
+        decode: Convert base64 string to video data
+        save_video: Save video data to a file
+        get_metadata: Extract metadata from video file
     """
     
-    @staticmethod
-    def process(video_base64):
+    @classmethod
+    def process(
+        cls,
+        base64_data: Optional[str],
+        prefix: str = "video_",
+        output_dir: Optional[str] = None
+    ) -> str:
         """
-        Processa um vídeo em formato base64, salvando-o como um arquivo MP4
+        Process a base64-encoded video string
         
         Args:
-            video_base64 (str): String base64 do vídeo
+            base64_data: Base64-encoded video data
+            prefix: Filename prefix
+            output_dir: Directory to save to (default: temp_videos)
             
         Returns:
-            str: Caminho do arquivo salvo
+            File path of saved video
         """
+        start_time = datetime.now()
+        
         try:
-            # Remover cabeçalho do base64 se existir
-            if "base64," in video_base64:
-                video_base64 = video_base64.split("base64,")[1]
+            if not base64_data:
+                raise ValueError("No video data provided")
             
-            # Decodificar base64
-            video_data = base64.b64decode(video_base64)
+            # Decode video
+            video_data, mime_type = cls.decode(base64_data)
             
-            # Criar diretório de vídeos temporários se não existir
-            temp_dir = os.path.join(Paths.ROOT_DIR, "temp_videos")
-            os.makedirs(temp_dir, exist_ok=True)
+            # Determine output path
+            if output_dir:
+                output_path = Path(output_dir)
+            else:
+                output_path = Paths.temp_videos_dir
             
-            # Gerar nome de arquivo único
-            filename = f"temp-{int(time.time() * 1000)}.mp4"
-            filepath = os.path.join(temp_dir, filename)
+            # Ensure directory exists
+            output_path.mkdir(exist_ok=True, parents=True)
             
-            # Salvar o vídeo
-            with open(filepath, "wb") as f:
-                f.write(video_data)
+            # Generate unique filename with proper extension
+            extension = cls._get_extension_from_mime(mime_type)
+            filename = f"{prefix}{uuid.uuid4()}.{extension}"
+            file_path = output_path / filename
             
-            logging.info(f"Vídeo base64 salvo em: {filepath}")
-            return filepath
+            # Save the video
+            cls.save_video(video_data, file_path)
+            
+            # Get video metadata using moviepy
+            with VideoFileClip(str(file_path)) as clip:
+                metadata = VideoMetadata(
+                    width=clip.size[0],
+                    height=clip.size[1],
+                    duration=clip.duration,
+                    format=extension,
+                    codec="h264",  # Assuming h264 as it's standard for web videos
+                    fps=clip.fps
+                )
+            
+            # Calculate processing time
+            processing_time = (datetime.now() - start_time).total_seconds()
+            
+            result = DecodedVideo(
+                file_path=file_path,
+                metadata=metadata,
+                size_bytes=file_path.stat().st_size,
+                processing_time=processing_time,
+                mime_type=mime_type
+            )
+            
+            logger.debug(
+                f"Video processed: {file_path} ({metadata.width}x{metadata.height}, "
+                f"{result.size_bytes/1024/1024:.1f}MB, {metadata.duration:.1f}s)"
+            )
+            
+            return str(file_path)
             
         except Exception as e:
-            logging.error(f"Erro ao processar vídeo base64: {str(e)}")
-            raise Exception(f"Falha ao processar vídeo: {str(e)}")
+            logger.error(f"Failed to process video: {str(e)}")
+            raise
     
     @staticmethod
-    def cleanup_old_videos(max_age_hours=24):
+    def decode(
+        base64_data: str
+    ) -> Tuple[BytesIO, str]:
         """
-        Remove vídeos temporários antigos para gerenciar espaço em disco
+        Decode base64 video data
         
         Args:
-            max_age_hours (int): Idade máxima em horas antes da remoção
+            base64_data: Base64-encoded video data
+            
+        Returns:
+            Tuple of (video_data, mime_type)
         """
         try:
-            temp_dir = os.path.join(Paths.ROOT_DIR, "temp_videos")
-            if not os.path.exists(temp_dir):
-                return
+            # Handle data URI format
+            if "," in base64_data:
+                header, encoded = base64_data.split(",", 1)
+                mime_type = header.split(":")[1].split(";")[0] if ":" in header else "video/mp4"
+            else:
+                encoded = base64_data
+                mime_type = "video/mp4"  # Default
             
-            current_time = time.time()
-            max_age_seconds = max_age_hours * 3600
+            # Decode the video
+            video_data = BytesIO(base64.b64decode(encoded))
+            return video_data, mime_type
             
-            for file in os.listdir(temp_dir):
-                if file.startswith("temp-") and file.endswith(".mp4"):
-                    file_path = os.path.join(temp_dir, file)
-                    file_age = current_time - os.path.getmtime(file_path)
-                    
-                    if file_age > max_age_seconds:
-                        os.remove(file_path)
-                        logging.info(f"Removido vídeo antigo: {file_path}")
-                        
         except Exception as e:
-            logging.error(f"Erro ao limpar vídeos antigos: {str(e)}")
+            logger.error(f"Failed to decode video: {e}")
+            raise ValueError(f"Invalid video data: {str(e)}")
+    
+    @staticmethod
+    def save_video(
+        video_data: BytesIO,
+        file_path: Path
+    ) -> None:
+        """Save video data to a file"""
+        try:
+            with open(file_path, "wb") as f:
+                f.write(video_data.getvalue())
+        except Exception as e:
+            logger.error(f"Failed to save video: {e}")
+            raise
+    
+    @staticmethod
+    def _get_extension_from_mime(mime_type: str) -> str:
+        """Get file extension from MIME type"""
+        mime_map = {
+            "video/mp4": "mp4",
+            "video/mpeg": "mp4",
+            "video/quicktime": "mov",
+            "video/x-msvideo": "avi",
+            "video/webm": "webm"
+        }
+        return mime_map.get(mime_type, "mp4")

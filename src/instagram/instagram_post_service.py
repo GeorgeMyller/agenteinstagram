@@ -13,12 +13,122 @@ from src.instagram.base_instagram_service import (
     RateLimitError, MediaError, TemporaryServerError, InstagramAPIError
 )
 from src.instagram.base_instagram_service import RateLimitHandler
+from typing import Dict, Optional, Any
+from pathlib import Path
+from .image_validator import InstagramImageValidator
+from .exceptions import InstagramError, RateLimitError
 
 
 logger = logging.getLogger('InstagramPostService')
 
 class InstagramPostService(BaseInstagramService):
-    """Service for posting images to Instagram."""
+    """Service for posting single images to Instagram"""
+    
+    def __init__(self):
+        super().__init__()
+        self.validator = InstagramImageValidator()
+        
+    async def post_image(
+        self,
+        image_path: str,
+        caption: str,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Post a single image to Instagram
+        
+        Args:
+            image_path: Path to image file
+            caption: Caption for the image
+            **kwargs: Additional options (location, user tags, etc)
+            
+        Returns:
+            Dict containing post result or error details
+        """
+        try:
+            # Validate and process image
+            validation = self.validator.process_single_photo(image_path)
+            if validation["status"] == "error":
+                raise InstagramError(validation["message"])
+                
+            processed_path = validation["image_path"]
+            
+            # Upload the image
+            container = await self._upload_photo(processed_path)
+            if not container or "id" not in container:
+                raise InstagramError("Failed to upload image")
+                
+            # Update the container with caption and other metadata
+            container = await self._update_container(
+                container["id"],
+                caption,
+                **kwargs
+            )
+            
+            if not container or "id" not in container:
+                raise InstagramError("Failed to update media container")
+                
+            # Publish the post
+            result = await self._publish_post(container["id"])
+            if not result or "id" not in result:
+                raise InstagramError("Failed to publish post")
+                
+            return {
+                "status": "success",
+                "id": result["id"],
+                "media_type": "IMAGE",
+                "permalink": result.get("permalink")
+            }
+            
+        except RateLimitError:
+            raise  # Re-raise rate limit errors
+        except Exception as e:
+            logger.error(f"Error posting image: {e}")
+            raise InstagramError(f"Failed to post image: {str(e)}")
+            
+    async def _update_container(
+        self,
+        container_id: str,
+        caption: str,
+        **kwargs
+    ) -> Optional[Dict]:
+        """Update a media container with metadata"""
+        try:
+            endpoint = f"/{container_id}"
+            
+            params = {
+                "caption": caption
+            }
+            
+            # Add optional parameters
+            if "location_id" in kwargs:
+                params["location_id"] = kwargs["location_id"]
+                
+            if "user_tags" in kwargs:
+                params["user_tags"] = kwargs["user_tags"]
+                
+            result = await self._make_request("POST", endpoint, params=params)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error updating container: {e}")
+            return None
+            
+    async def _publish_post(self, container_id: str) -> Optional[Dict]:
+        """Publish a prepared media container"""
+        try:
+            endpoint = f"/{self.instagram_account_id}/media_publish"
+            
+            params = {
+                "creation_id": container_id
+            }
+            
+            result = await self._make_request("POST", endpoint, params=params)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error publishing post: {e}")
+            return None
 
     # Singleton and cache settings
     _instance = None

@@ -1,324 +1,235 @@
-from typing import List, Optional, Dict, Any, Tuple
-from PIL import Image
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 import os
 import logging
+from PIL import Image
+from datetime import datetime
+import tempfile
 
-# Configure logger
+from ..utils.config import Config
+
 logger = logging.getLogger(__name__)
 
+@dataclass
+class ImageMetadata:
+    width: int
+    height: int
+    aspect_ratio: float
+    file_path: Path
+    format: str
+    orientation: str  # 'portrait', 'landscape', or 'square'
+    size_bytes: int
+
+@dataclass
+class NormalizedImage:
+    original_path: Path
+    normalized_path: Path
+    width: int
+    height: int
+    processing_time: float
+    created_at: datetime = field(default_factory=datetime.now)
+
+@dataclass
+class NormalizationOptions:
+    target_aspect_ratio: float = 1.0  # Square
+    max_width: int = 1080
+    max_height: int = 1080
+    padding_color: Tuple[int, int, int] = (255, 255, 255)  # White
+    quality: int = 95
+    format: str = "JPEG"
 
 class CarouselNormalizer:
-    """
-    Handles validation and normalization of images for Instagram carousels.
-
-    This class ensures all images in a carousel meet Instagram's requirements:
-    - Consistent aspect ratios across all images
-    - Proper resolution and dimensions
-    - Size and format validation
-    - Automatic image optimization
-
-    Features:
-        - Aspect ratio normalization
-        - Resolution standardization
-        - Format conversion
-        - Size optimization
-        - EXIF data handling
-
-    Technical Details:
-        - Target resolutions: 1080x1080 (square), 1080x1350 (portrait), 1080x608 (landscape)
-        - Supported formats: JPEG, PNG
-        - Max file size: 8MB per image
-        - Aspect ratio tolerance: ±0.01
-
-    Example:
-        >>> normalizer = CarouselNormalizer()
-        >>> images = [
-        ...     "path/to/image1.jpg",
-        ...     "path/to/image2.png",
-        ...     "path/to/image3.jpg"
-        ... ]
-        >>> normalized = normalizer.normalize_carousel_images(images)
-        >>> if normalized:
-        ...     print(f"Successfully normalized {len(normalized)} images")
-    """
-
-    # Class constants
-    MAX_SIZE_MB = 8
-    CAROUSEL_RATIO_TOLERANCE = 0.01
-    TARGET_RESOLUTIONS = {
-        'square': (1080, 1080),
-        'portrait': (1080, 1350),
-        'landscape': (1080, 608)
-    }
-    ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
-
+    """Normalizes images for Instagram carousel posts to ensure consistent display"""
+    
     def __init__(self):
-        """Initialize the normalizer with default settings."""
-        self.temp_files = []  # Track temporary files for cleanup
-
-    def normalize_carousel_images(self, image_paths: List[str]) -> List[str]:
+        self.config = Config.get_instance()
+        
+    def normalize_carousel_images(
+        self,
+        image_paths: List[str],
+        options: Optional[NormalizationOptions] = None
+    ) -> List[str]:
         """
-        Process multiple images for carousel upload, ensuring consistent ratios.
-
-        Workflow:
-        1. Validate input images
-        2. Determine target aspect ratio
-        3. Process each image to match target
-        4. Optimize file sizes
-        5. Clean up temporary files
-
+        Normalizes a list of images for carousel posts
+        
         Args:
-            image_paths: List of paths to images to process
-
+            image_paths: List of image file paths
+            options: Normalization options
+            
         Returns:
-            List of paths to normalized images
-
-        Examples:
-            Basic usage:
-            >>> normalizer = CarouselNormalizer()
-            >>> result = normalizer.normalize_carousel_images([
-            ...     "image1.jpg",
-            ...     "image2.png"
-            ... ])
-
-            With error handling:
-            >>> try:
-            ...     normalized = normalizer.normalize_carousel_images(images)
-            ...     if not normalized:
-            ...         print("No valid images to process")
-            ... except Exception as e:
-            ...     print(f"Error normalizing images: {e}")
-        """
-        if not image_paths or len(image_paths) < 2:
-            logger.warning("At least 2 images required for carousel")
-            return []
-
-        valid_image_data = []
-
-        # First pass: collect valid images and their properties
-        for path in image_paths:
-            try:
-                with Image.open(path) as img:
-                    # Check format and basic validity
-                    if img.format not in ('JPEG', 'PNG'):
-                        logger.warning(f"Unsupported format {img.format} for {path}")
-                        continue
-
-                    width, height = img.size
-                    ratio = width / height
-                    valid_image_data.append((path, width, height, ratio))
-
-            except Exception as e:
-                logger.error(f"Error processing image {path}: {e}")
-                continue
-
-        if not valid_image_data:
-            return []
-
-        # Find optimal target ratio (use first image's ratio as base)
-        target_ratio = self._determine_target_ratio(valid_image_data)
-
-        # Second pass: normalize images to target ratio
-        normalized_paths = []
-        for path, width, height, ratio in valid_image_data:
-            try:
-                normalized = self._normalize_image(
-                    path,
-                    target_ratio,
-                    self.CAROUSEL_RATIO_TOLERANCE
-                )
-                if normalized:
-                    normalized_paths.append(normalized)
-
-            except Exception as e:
-                logger.error(f"Error normalizing {path}: {e}")
-                continue
-
-        return normalized_paths
-
-    def _determine_target_ratio(self, image_data: List[Tuple]) -> float:
-        """
-        Calculate optimal target ratio for a set of images.
-
-        Strategy:
-        1. Group images by similar ratios
-        2. Find most common ratio group
-        3. Use median ratio from largest group
-
-        Args:
-            image_data: List of tuples (path, width, height, ratio)
-
-        Returns:
-            float: Target aspect ratio
-
-        Technical Details:
-            - Groups ratios within tolerance of each other
-            - Handles both portrait and landscape orientations
-            - Considers Instagram's ratio limits
-        """
-        if not image_data:
-            return 1.0  # Default to square
-
-        ratios = [ratio for _, _, _, ratio in image_data]
-
-        # Group similar ratios
-        ratio_groups = {}
-        for ratio in ratios:
-            matched = False
-            for group_ratio in ratio_groups:
-                if abs(ratio - group_ratio) <= self.CAROUSEL_RATIO_TOLERANCE:
-                    ratio_groups[group_ratio].append(ratio)
-                    matched = True
-                    break
-            if not matched:
-                ratio_groups[ratio] = [ratio]
-
-        # Find largest group
-        largest_group = max(ratio_groups.values(), key=len)
-        return sum(largest_group) / len(largest_group)
-
-    def _normalize_image(
-            self,
-            path: str,
-            target_ratio: float,
-            tolerance: float = 0.01) -> Optional[str]:
-        """
-        Normalize a single image to match target ratio and requirements.
-
-        Process:
-        1. Load and validate image
-        2. Adjust aspect ratio if needed
-        3. Resize to target resolution
-        4. Optimize file size
-        5. Save with proper format
-
-        Args:
-            path: Path to source image
-            target_ratio: Desired width/height ratio
-            tolerance: Acceptable ratio difference
-
-        Returns:
-            str: Path to normalized image, or None if failed
-
-        Technical Details:
-            Resolution Selection:
-            - Square (1:1): 1080x1080
-            - Portrait (4:5): 1080x1350
-            - Landscape (1.91:1): 1080x608
-
-            Size Optimization:
-            - JPEG quality adjustment
-            - PNG compression
-            - Metadata stripping
+            List of normalized image file paths
         """
         try:
-            with Image.open(path) as img:
-                # Convert to RGB if needed
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-
-                width, height = img.size
-                current_ratio = width / height
-
-                # Check if ratio adjustment needed
-                if abs(current_ratio - target_ratio) > tolerance:
-                    # Calculate new dimensions
-                    if current_ratio > target_ratio:
-                        # Too wide - crop width
-                        new_width = int(height * target_ratio)
-                        left = (width - new_width) // 2
-                        img = img.crop((left, 0, left + new_width, height))
-                    else:
-                        # Too tall - crop height
-                        new_height = int(width / target_ratio)
-                        top = (height - new_height) // 2
-                        img = img.crop((0, top, width, top + new_height))
-
-                # Determine target resolution
-                target_size = self._get_target_resolution(target_ratio)
-                img = img.resize(target_size, Image.LANCZOS)
-
-                # Save with optimization
-                output_path = self._get_temp_path(path)
-                img.save(
-                    output_path,
-                    'JPEG',
-                    quality=85,
-                    optimize=True,
-                    progressive=True
-                )
-
-                # Verify final size
-                if os.path.getsize(output_path) > self.MAX_SIZE_MB * 1024 * 1024:
-                    logger.warning(f"Image {path} too large after normalization")
-                    return None
-
-                return output_path
-
+            if not image_paths:
+                return []
+                
+            if options is None:
+                options = NormalizationOptions()
+                
+            # Create temp directory for normalized images
+            temp_dir = Path(tempfile.mkdtemp(prefix="carousel_norm_"))
+                
+            # Process each image
+            normalized_paths = []
+            for i, path in enumerate(image_paths):
+                try:
+                    original_path = Path(path)
+                    if not original_path.exists():
+                        logger.warning(f"Image not found: {path}")
+                        continue
+                        
+                    # Get image metadata
+                    metadata = self._get_image_metadata(original_path)
+                    
+                    # Create output path
+                    output_name = f"norm_{i}_{original_path.name}"
+                    output_path = temp_dir / output_name
+                    
+                    # Normalize image
+                    normalized = self._normalize_image(
+                        metadata, 
+                        output_path, 
+                        options
+                    )
+                    
+                    normalized_paths.append(str(normalized.normalized_path))
+                    
+                except Exception as e:
+                    logger.error(f"Error normalizing image {path}: {e}")
+                    # If we fail to normalize, use the original
+                    normalized_paths.append(path)
+                    
+            return normalized_paths
+            
         except Exception as e:
-            logger.error(f"Error normalizing {path}: {e}")
-            return None
-
-    def _get_target_resolution(self, ratio: float) -> Tuple[int, int]:
-        """
-        Determine target resolution based on aspect ratio.
-
-        Args:
-            ratio: Width/height ratio
-
-        Returns:
-            tuple: Target (width, height)
-
-        Examples:
-            >>> normalizer._get_target_resolution(1.0)
-            (1080, 1080)  # Square
-            >>> normalizer._get_target_resolution(0.8)
-            (1080, 1350)  # Portrait
-            >>> normalizer._get_target_resolution(1.91)
-            (1080, 608)   # Landscape
-        """
-        if abs(ratio - 1) <= 0.1:
-            return self.TARGET_RESOLUTIONS['square']
-        elif ratio < 1:
-            return self.TARGET_RESOLUTIONS['portrait']
+            logger.error(f"Error in carousel normalization: {e}")
+            # If normalization fails, return original paths
+            return image_paths
+            
+    def _get_image_metadata(self, file_path: Path) -> ImageMetadata:
+        """Extract metadata from an image file"""
+        with Image.open(file_path) as img:
+            width, height = img.size
+            aspect_ratio = width / height
+            
+            # Determine orientation
+            if abs(aspect_ratio - 1.0) < 0.01:  # Within 1% of square
+                orientation = "square"
+            elif aspect_ratio > 1.0:
+                orientation = "landscape"
+            else:
+                orientation = "portrait"
+                
+            return ImageMetadata(
+                width=width,
+                height=height,
+                aspect_ratio=aspect_ratio,
+                file_path=file_path,
+                format=img.format,
+                orientation=orientation,
+                size_bytes=file_path.stat().st_size
+            )
+            
+    def _normalize_image(
+        self,
+        metadata: ImageMetadata,
+        output_path: Path,
+        options: NormalizationOptions
+    ) -> NormalizedImage:
+        """Normalize a single image"""
+        start_time = datetime.now()
+        
+        with Image.open(metadata.file_path) as img:
+            # Resize if needed
+            if (metadata.width > options.max_width or 
+                metadata.height > options.max_height):
+                img = self._resize_image(
+                    img, 
+                    options.max_width, 
+                    options.max_height
+                )
+                width, height = img.size
+            else:
+                width, height = metadata.width, metadata.height
+                
+            # Create canvas with target aspect ratio
+            if abs(metadata.aspect_ratio - options.target_aspect_ratio) > 0.01:
+                img = self._pad_to_aspect_ratio(
+                    img, 
+                    options.target_aspect_ratio,
+                    options.padding_color
+                )
+                
+            # Save normalized image
+            img.save(
+                output_path, 
+                format=options.format, 
+                quality=options.quality
+            )
+            
+        processing_time = (datetime.now() - start_time).total_seconds()
+        
+        return NormalizedImage(
+            original_path=metadata.file_path,
+            normalized_path=output_path,
+            width=width,
+            height=height,
+            processing_time=processing_time
+        )
+        
+    def _resize_image(
+        self,
+        img: Image.Image,
+        max_width: int,
+        max_height: int
+    ) -> Image.Image:
+        """Resize image to fit within specified dimensions"""
+        width, height = img.size
+        aspect_ratio = width / height
+        
+        if width > max_width:
+            width = max_width
+            height = int(width / aspect_ratio)
+            
+        if height > max_height:
+            height = max_height
+            width = int(height * aspect_ratio)
+            
+        return img.resize((width, height), Image.LANCZOS)
+        
+    def _pad_to_aspect_ratio(
+        self,
+        img: Image.Image,
+        target_ratio: float,
+        padding_color: Tuple[int, int, int]
+    ) -> Image.Image:
+        """Pad image to achieve target aspect ratio"""
+        width, height = img.size
+        current_ratio = width / height
+        
+        if abs(current_ratio - target_ratio) < 0.01:
+            return img
+            
+        if current_ratio > target_ratio:
+            # Image is wider than target, add vertical padding
+            new_height = int(width / target_ratio)
+            padded = Image.new(
+                "RGB", 
+                (width, new_height), 
+                padding_color
+            )
+            paste_y = (new_height - height) // 2
+            padded.paste(img, (0, paste_y))
+            return padded
         else:
-            return self.TARGET_RESOLUTIONS['landscape']
-
-    def _get_temp_path(self, original_path: str) -> str:
-        """
-        Generate temporary path for normalized image.
-
-        Args:
-            original_path: Source image path
-
-        Returns:
-            str: Path for normalized image
-
-        Note:
-            Adds path to self.temp_files for later cleanup
-        """
-        temp_dir = os.path.join(os.path.dirname(original_path), 'normalized')
-        os.makedirs(temp_dir, exist_ok=True)
-
-        filename = os.path.basename(original_path)
-        name, _ = os.path.splitext(filename)
-        temp_path = os.path.join(temp_dir, f"{name}_normalized.jpg")
-
-        self.temp_files.append(temp_path)
-        return temp_path
-
-    def cleanup(self):
-        """
-        Remove temporary files created during normalization.
-
-        Call this after carousel upload is complete to free space.
-        Safe to call multiple times.
-        """
-        for path in self.temp_files:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception as e:
-                logger.warning(f"Error removing temp file {path}: {e}")
-
-        self.temp_files.clear()
+            # Image is taller than target, add horizontal padding
+            new_width = int(height * target_ratio)
+            padded = Image.new(
+                "RGB", 
+                (new_width, height), 
+                padding_color
+            )
+            paste_x = (new_width - width) // 2
+            padded.paste(img, (paste_x, 0))
+            return padded

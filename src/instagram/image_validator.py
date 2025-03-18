@@ -4,237 +4,220 @@ Instagram Image Validator
 Validates images meet Instagram requirements before upload.
 """
 
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple, Set, Union
+from pathlib import Path
 import os
 import logging
-from typing import Dict, Any, List, Optional
-from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
+from ..utils.config import Config
+from ..utils.resource_manager import ResourceManager
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class ValidationResult:
+    is_valid: bool
+    message: str
+    validation_time: float
+    details: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class ImageValidationRules:
+    min_width: int = 320
+    min_height: int = 320
+    max_width: int = 1080
+    max_height: int = 1350
+    max_aspect_ratio: float = 1.91  # Height can be up to 1.91 times the width
+    min_aspect_ratio: float = 0.8  # Width can be up to 1.25 times the height
+    allowed_formats: Set[str] = field(default_factory=lambda: {"JPEG", "PNG"})
+    max_file_size_mb: float = 8.0
+
 class InstagramImageValidator:
-    """Validates images for Instagram compliance"""
+    """Validates and optimizes images for Instagram requirements"""
+    
+    # Instagram image requirements
+    MAX_SIZE_MB = 8
+    MIN_WIDTH = 320
+    MAX_WIDTH = 1440
+    MIN_HEIGHT = 320
+    MAX_HEIGHT = 1440
+    ASPECT_RATIO_TOLERANCE = 0.01
+    ALLOWED_FORMATS = [".jpg", ".jpeg", ".png"]  # Removed .heic from allowed formats
     
     def __init__(self):
-        """Initialize validator with Instagram requirements"""
-        # Image size requirements
-        self.min_width = 320
-        self.min_height = 320
-        self.max_width = 1440
-        self.max_height = 1440
+        self.config = Config.get_instance()
+        self.resource_manager = ResourceManager.get_instance()
         
-        # Aspect ratio requirements
-        self.min_aspect_ratio = 4.0/5.0  # 0.8
-        self.max_aspect_ratio = 1.91
-        
-        # File requirements
-        self.allowed_formats = {'JPEG', 'PNG'}
-        self.max_file_size_mb = 8
-    
-    def process_single_photo(self, image_path: str) -> Dict[str, Any]:
+    def process_single_photo(self, image_path: Union[str, Path]) -> Dict:
         """
-        Validate a single photo
+        Process a single photo for Instagram posting
         
         Args:
-            image_path: Path to image file
+            image_path: Path to the image file
             
         Returns:
-            Dict with validation results
+            Dict containing processed image info or error details
         """
         try:
-            # Basic file checks
-            if not os.path.exists(image_path):
-                return {
-                    'status': 'error',
-                    'message': 'File not found',
-                    'file': image_path
-                }
+            image_path = Path(image_path)
+            
+            # Validate file existence and format
+            if not image_path.exists():
+                return {"status": "error", "message": "Image file does not exist"}
                 
-            file_size_mb = os.path.getsize(image_path) / (1024 * 1024)
-            if file_size_mb > self.max_file_size_mb:
+            if image_path.suffix.lower() not in self.ALLOWED_FORMATS:
                 return {
-                    'status': 'error',
-                    'message': f'File too large ({file_size_mb:.1f}MB > {self.max_file_size_mb}MB)',
-                    'file': image_path
+                    "status": "error",
+                    "message": f"Invalid image format. Must be one of: {', '.join(self.ALLOWED_FORMATS)}"
                 }
             
-            # Image validation
-            with Image.open(image_path) as img:
-                # Check format
-                if img.format not in self.allowed_formats:
-                    return {
-                        'status': 'error',
-                        'message': f'Invalid format: {img.format}. Must be JPEG or PNG',
-                        'file': image_path
-                    }
-                
-                # Check dimensions
-                width, height = img.size
-                aspect_ratio = width / height
-                
-                if width < self.min_width or height < self.min_height:
-                    return {
-                        'status': 'error',
-                        'message': f'Image too small: {width}x{height}. Minimum {self.min_width}x{self.min_height}',
-                        'file': image_path
-                    }
-                
-                if width > self.max_width or height > self.max_height:
-                    return {
-                        'status': 'error',
-                        'message': f'Image too large: {width}x{height}. Maximum {self.max_width}x{self.max_height}',
-                        'file': image_path
-                    }
-                
-                if aspect_ratio < self.min_aspect_ratio:
-                    return {
-                        'status': 'error',
-                        'message': f'Image too narrow. Aspect ratio {aspect_ratio:.2f} < {self.min_aspect_ratio}',
-                        'file': image_path
-                    }
-                
-                if aspect_ratio > self.max_aspect_ratio:
-                    return {
-                        'status': 'error',
-                        'message': f'Image too wide. Aspect ratio {aspect_ratio:.2f} > {self.max_aspect_ratio}',
-                        'file': image_path
-                    }
-                
-                # Check color mode
-                if img.mode not in ['RGB', 'RGBA']:
-                    return {
-                        'status': 'error',
-                        'message': f'Invalid color mode: {img.mode}. Must be RGB or RGBA',
-                        'file': image_path
-                    }
+            # Open and validate image
+            try:
+                image = Image.open(image_path)
+            except Exception as e:
+                return {"status": "error", "message": f"Failed to open image: {e}"}
             
+            # Check dimensions
+            width, height = image.size
+            if width < self.MIN_WIDTH or height < self.MIN_HEIGHT:
+                return {
+                    "status": "error",
+                    "message": f"Image too small. Minimum dimensions: {self.MIN_WIDTH}x{self.MIN_HEIGHT}"
+                }
+                
+            if width > self.MAX_WIDTH or height > self.MAX_HEIGHT:
+                # Resize image
+                try:
+                    resized_path = self._resize_image(image, image_path)
+                    if not resized_path:
+                        return {"status": "error", "message": "Failed to resize image"}
+                    return {
+                        "status": "success",
+                        "message": "Image resized successfully",
+                        "image_path": str(resized_path)
+                    }
+                except Exception as e:
+                    return {"status": "error", "message": f"Failed to resize image: {e}"}
+            
+            # Check file size
+            file_size = os.path.getsize(image_path) / (1024 * 1024)  # Convert to MB
+            if file_size > self.MAX_SIZE_MB:
+                try:
+                    optimized_path = self._optimize_image(image, image_path)
+                    if not optimized_path:
+                        return {"status": "error", "message": "Failed to optimize image"}
+                    return {
+                        "status": "success",
+                        "message": "Image optimized successfully",
+                        "image_path": str(optimized_path)
+                    }
+                except Exception as e:
+                    return {"status": "error", "message": f"Failed to optimize image: {e}"}
+            
+            # Image meets requirements
             return {
-                'status': 'success',
-                'message': 'Image valid',
-                'file': image_path,
-                'dimensions': f'{width}x{height}',
-                'aspect_ratio': aspect_ratio,
-                'size_mb': file_size_mb
+                "status": "success",
+                "message": "Image meets requirements",
+                "image_path": str(image_path)
             }
             
         except Exception as e:
-            logger.error(f"Error validating image {image_path}: {e}")
-            return {
-                'status': 'error',
-                'message': str(e),
-                'file': image_path
-            }
-    
-    def process_carousel(self, image_paths: List[str]) -> Dict[str, Any]:
-        """
-        Validate multiple photos for a carousel
-        
-        Args:
-            image_paths: List of image file paths
+            logger.error(f"Error processing image: {e}")
+            return {"status": "error", "message": str(e)}
             
-        Returns:
-            Dict with validation results for all images
-        """
-        if len(image_paths) < 2:
-            return {
-                'status': 'error',
-                'message': 'Carousel requires at least 2 images',
-                'images': []
-            }
-        
-        if len(image_paths) > 10:
-            return {
-                'status': 'error',
-                'message': 'Carousel limited to 10 images maximum',
-                'images': image_paths[:10]
-            }
-        
-        results = []
-        for path in image_paths:
-            result = self.process_single_photo(path)
-            results.append(result)
-        
-        # Check if all images are valid
-        if all(r['status'] == 'success' for r in results):
-            return {
-                'status': 'success',
-                'message': 'All images valid',
-                'images': results
-            }
-        else:
-            return {
-                'status': 'error',
-                'message': 'One or more images invalid',
-                'images': results
-            }
-    
-    def normalize_image(self, image_path: str, output_path: Optional[str] = None) -> Optional[str]:
-        """
-        Normalize image to meet Instagram requirements
-        
-        Args:
-            image_path: Path to input image
-            output_path: Optional path for normalized image
-            
-        Returns:
-            str: Path to normalized image if successful, None otherwise
-        """
+    def validate_carousel(self, image_paths: List[Union[str, Path]]) -> Dict:
+        """Validate a set of images for carousel posting"""
         try:
-            if not output_path:
-                filename = os.path.splitext(os.path.basename(image_path))[0]
-                output_path = os.path.join(
-                    os.path.dirname(image_path),
-                    f"{filename}_normalized.jpg"
-                )
+            results = []
+            first_aspect_ratio = None
             
-            with Image.open(image_path) as img:
-                # Convert to RGB if needed
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                
-                # Resize if needed
-                width, height = img.size
+            for i, path in enumerate(image_paths):
+                # Process each image
+                result = self.process_single_photo(path)
+                if result["status"] == "error":
+                    return {
+                        "status": "error",
+                        "message": f"Image {i+1}: {result['message']}"
+                    }
+                    
+                # Get aspect ratio
+                image = Image.open(result["image_path"])
+                width, height = image.size
                 aspect_ratio = width / height
                 
-                if aspect_ratio < self.min_aspect_ratio:
-                    # Image too narrow, add padding
-                    new_width = int(height * self.min_aspect_ratio)
-                    new_img = Image.new('RGB', (new_width, height), 'white')
-                    paste_x = (new_width - width) // 2
-                    new_img.paste(img, (paste_x, 0))
-                    img = new_img
+                # Check if aspect ratios match
+                if first_aspect_ratio is None:
+                    first_aspect_ratio = aspect_ratio
+                elif abs(aspect_ratio - first_aspect_ratio) > self.ASPECT_RATIO_TOLERANCE:
+                    return {
+                        "status": "error",
+                        "message": f"Image {i+1} has different aspect ratio"
+                    }
+                    
+                results.append({
+                    "original_path": str(path),
+                    "processed_path": result["image_path"],
+                    "width": width,
+                    "height": height
+                })
                 
-                elif aspect_ratio > self.max_aspect_ratio:
-                    # Image too wide, add padding
-                    new_height = int(width / self.max_aspect_ratio)
-                    new_img = Image.new('RGB', (width, new_height), 'white')
-                    paste_y = (new_height - height) // 2
-                    new_img.paste(img, (0, paste_y))
-                    img = new_img
+            return {
+                "status": "success",
+                "message": "All images validated successfully",
+                "images": results
+            }
+            
+        except Exception as e:
+            logger.error(f"Error validating carousel: {e}")
+            return {"status": "error", "message": str(e)}
+            
+    def _convert_heic(self, image_path: Path) -> Optional[Path]:
+        """This method is deprecated as HEIC support has been removed"""
+        logger.warning("HEIC format is no longer supported")
+        return None
+            
+    def _resize_image(self, image: Image.Image, original_path: Path) -> Optional[Path]:
+        """Resize image to meet Instagram requirements"""
+        try:
+            width, height = image.size
+            aspect_ratio = width / height
+            
+            if width > self.MAX_WIDTH:
+                width = self.MAX_WIDTH
+                height = int(width / aspect_ratio)
+            
+            if height > self.MAX_HEIGHT:
+                height = self.MAX_HEIGHT
+                width = int(height * aspect_ratio)
                 
-                # Scale down if too large
-                width, height = img.size
-                if width > self.max_width or height > self.max_height:
-                    scale = min(
-                        self.max_width / width,
-                        self.max_height / height
-                    )
-                    new_size = (
-                        int(width * scale),
-                        int(height * scale)
-                    )
-                    img = img.resize(new_size, Image.LANCZOS)
-                
-                # Save with optimal quality
-                img.save(
-                    output_path,
-                    'JPEG',
-                    quality=95,
-                    optimize=True
-                )
-                
-                return output_path
+            resized = image.resize((width, height), Image.LANCZOS)
+            
+            with self.resource_manager.temp_file(suffix='.jpg') as temp_path:
+                resized.save(temp_path, format='JPEG', quality=95)
+                return Path(temp_path)
                 
         except Exception as e:
-            logger.error(f"Error normalizing image {image_path}: {e}")
+            logger.error(f"Error resizing image: {e}")
+            return None
+            
+    def _optimize_image(self, image: Image.Image, original_path: Path) -> Optional[Path]:
+        """Optimize image to meet size requirements"""
+        try:
+            quality = 95
+            min_quality = 70
+            
+            while quality >= min_quality:
+                with self.resource_manager.temp_file(suffix='.jpg') as temp_path:
+                    image.save(temp_path, format='JPEG', quality=quality)
+                    
+                    if os.path.getsize(temp_path) / (1024 * 1024) <= self.MAX_SIZE_MB:
+                        return Path(temp_path)
+                        
+                quality -= 5
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error optimizing image: {e}")
             return None

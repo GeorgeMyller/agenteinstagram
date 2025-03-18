@@ -7,7 +7,7 @@ sys.path.insert(0, project_root)
 
 from flask import Flask, request, jsonify
 from src.services.message import Message
-from src.services.instagram_send import InstagramSend
+from src.instagram.instagram_send import InstagramSend  # Updated import path
 from src.utils.image_decode_save import ImageDecodeSaver
 from src.utils.video_decode_save import VideoDecodeSaver
 import logging
@@ -16,7 +16,80 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List
+from datetime import datetime
+from flask import Flask, request, jsonify
+import logging
+
+from ..services.message import Message
+from ..instagram.instagram_facade import InstagramFacade
+from ..utils.config import Config
+from ..utils.monitor import ApiMonitor
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class WebhookResponse:
+    status: str
+    message: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> Dict[str, Any]:
+        response = {
+            "status": self.status,
+            "timestamp": self.timestamp.isoformat()
+        }
+        if self.message:
+            response["message"] = self.message
+        if self.data:
+            response["data"] = self.data
+        return response
+
+@dataclass
+class ErrorResponse(WebhookResponse):
+    error_code: Optional[str] = None
+    error_details: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        response = super().to_dict()
+        if self.error_code or self.error_details:
+            response["error"] = {}
+            if self.error_code:
+                response["error"]["code"] = self.error_code
+            if self.error_details:
+                response["error"].update(self.error_details)
+        return response
+
 app = Flask(__name__)
+config = Config.get_instance()
+instagram = InstagramFacade()
+monitor = ApiMonitor()
+
+def success_response(message: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> tuple:
+    """Create a success response"""
+    response = WebhookResponse(
+        status="success",
+        message=message,
+        data=data
+    )
+    return jsonify(response.to_dict()), 200
+
+def error_response(
+    message: str,
+    code: int = 400,
+    error_code: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None
+) -> tuple:
+    """Create an error response"""
+    response = ErrorResponse(
+        status="error",
+        message=message,
+        error_code=error_code,
+        error_details=details
+    )
+    return jsonify(response.to_dict()), code
 
 @app.route("/", methods=['GET'])
 def index():
@@ -34,233 +107,74 @@ def index():
     return "Agent Social Media API is running!", 200
 
 @app.route("/health", methods=['GET'])
-def health():
-    """
-    Health check endpoint for monitoring.
-    
-    Returns JSON with basic service health information:
-    - API status
-    - Database connectivity
-    - Resource availability
-    - Rate limit status
-    
-    Returns:
-        dict: Service health information
-        int: HTTP status code
+def health_check():
+    """Health check endpoint"""
+    try:
+        api_health = monitor.check_health()
+        queue_stats = instagram.get_queue_stats()
         
-    Example Response:
-        {
-            "status": "ok",
-            "details": {
-                "api_status": "operational",
-                "rate_limits": {
-                    "remaining": 95,
-                    "reset": "2024-03-12T23:00:00Z"
-                }
-            }
-        }
-    """
-    return jsonify({"status": "ok"}), 200
+        return success_response(data={
+            "status": "healthy",
+            "api_health": api_health,
+            "queue_stats": queue_stats,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return error_response(
+            message="Health check failed",
+            code=500,
+            error_code="HEALTH_CHECK_FAILED",
+            details={"error": str(e)}
+        )
 
 @app.route("/messages-upsert", methods=['POST'])
-def webhook():
-    """
-    Primary webhook endpoint for message processing.
-    
-    Handles incoming messages from messaging platforms:
-    - Text messages and commands
-    - Image uploads with captions
-    - Video/reels content
-    - Document attachments
-    
-    Request Format:
-        {
-            "data": {
-                "message": {
-                    "type": "text|image|video|document",
-                    "content": "message content",
-                    "caption": "optional caption",
-                    "metadata": {}
-                },
-                "sender": {
-                    "id": "sender_id",
-                    "name": "sender_name"
-                }
-            }
-        }
-    
-    Response Format:
-        {
-            "status": "success|error",
-            "message": "Status description",
-            "data": {
-                "processed": true|false,
-                "post_id": "instagram_post_id",
-                "media_type": "image|video|carousel"
-            }
-        }
-    
-    Error Responses:
-        400: Invalid request format
-        401: Authentication failed
-        403: Unauthorized source
-        415: Unsupported media type
-        429: Rate limit exceeded
-        500: Processing error
-        
-    Examples:
-        1. Post a single image:
-        POST /messages-upsert
-        {
-            "data": {
-                "message": {
-                    "type": "image",
-                    "content": "base64_encoded_image",
-                    "caption": "My test post"
-                }
-            }
-        }
-        
-        2. Post a carousel:
-        POST /messages-upsert
-        {
-            "data": {
-                "message": {
-                    "type": "carousel",
-                    "images": ["base64_1", "base64_2"],
-                    "caption": "My carousel post"
-                }
-            }
-        }
-        
-        3. Post a video:
-        POST /messages-upsert
-        {
-            "data": {
-                "message": {
-                    "type": "video",
-                    "content": "base64_encoded_video",
-                    "caption": "My video post"
-                }
-            }
-        }
-    """
+def handle_webhook():
+    """Handle incoming webhook messages"""
     try:
-        data = request.get_json()  
-        
-        logger.info("Message received")
-                
+        data = request.get_json()
+        if not data:
+            return error_response("No data provided", 400)
+
+        # Create message object
         msg = Message(data)
-        texto = msg.get_text()
         
-        if msg.scope == Message.SCOPE_GROUP:    
-            logger.info(f"Group message: {msg.group_id}")
-            
-            if str(msg.group_id) == "120363383673368986":
-                 
-                if msg.message_type == msg.TYPE_IMAGE:
-                    image_path = ImageDecodeSaver.process(msg.image_base64)
-                    
-                    try:
-                        result = InstagramSend.send_instagram(image_path, texto)
-                        if result:
-                            logger.info("Post processed and sent to Instagram")
-                            return jsonify({
-                                "status": "success",
-                                "message": "Post processed successfully",
-                                "data": {
-                                    "processed": True,
-                                    "post_id": result.get("id"),
-                                    "media_type": "image"
-                                }
-                            }), 200
-                        else:
-                            logger.warning("Could not confirm post status")
-                            return jsonify({
-                                "status": "error", 
-                                "message": "Could not confirm post status"
-                            }), 500
-                            
-                    except Exception as e:
-                        logger.error(f"Error sending to Instagram: {str(e)}")
-                        return jsonify({
-                            "status": "error",
-                            "message": f"Instagram posting error: {str(e)}"
-                        }), 500
-                        
-                    finally:
-                        # Cleanup temp file
-                        if os.path.exists(image_path):
-                            try:
-                                os.remove(image_path)
-                                logger.info(f"Temp file {image_path} deleted")
-                            except Exception as e:
-                                logger.error(f"Error deleting temp file: {str(e)}")
-                                
-                elif msg.message_type == msg.TYPE_VIDEO:
-                    video_path = VideoDecodeSaver.process(msg.video_base64)
-                    
-                    try:
-                        result = InstagramSend.send_instagram_video(video_path, texto)
-                        if result:
-                            logger.info("Video processed and sent to Instagram")
-                            return jsonify({
-                                "status": "success",
-                                "message": "Video processed successfully",
-                                "data": {
-                                    "processed": True,
-                                    "post_id": result.get("id"),
-                                    "media_type": "video"
-                                }
-                            }), 200
-                        else:
-                            logger.warning("Could not confirm video post status")
-                            return jsonify({
-                                "status": "error",
-                                "message": "Could not confirm video post status"
-                            }), 500
-                            
-                    except Exception as e:
-                        logger.error(f"Error sending video to Instagram: {str(e)}")
-                        return jsonify({
-                            "status": "error",
-                            "message": f"Instagram video posting error: {str(e)}"
-                        }), 500
-                        
-                    finally:
-                        # Cleanup temp file
-                        if os.path.exists(video_path):
-                            try:
-                                os.remove(video_path)
-                                logger.info(f"Temp video file {video_path} deleted")
-                            except Exception as e:
-                                logger.error(f"Error deleting temp video: {str(e)}")
-                                
-                else:
-                    logger.info(f"Unsupported message type: {msg.message_type}")
-                    return jsonify({
-                        "status": "error",
-                        "message": f"Unsupported message type: {msg.message_type}"
-                    }), 415
-                    
-            else:
-                logger.info("Message from unauthorized group")
-                return jsonify({
-                    "status": "error",
-                    "message": "Unauthorized group"
-                }), 403
-                
-        return jsonify({
-            "status": "success",
-            "message": "Message processed"
-        }), 200
-        
+        # Verify authorized group
+        if msg.scope == Message.SCOPE_GROUP:
+            if str(msg.group_id) != config.get_webhook_config().authorized_group_id:
+                return success_response("Message processed but ignored (unauthorized group)")
+
+        # Process message
+        if msg.message_type == Message.TYPE_TEXT:
+            result = instagram.process_text_message(msg)
+        elif msg.message_type == Message.TYPE_IMAGE:
+            result = instagram.process_image_message(msg)
+        elif msg.message_type == Message.TYPE_VIDEO:
+            result = instagram.process_video_message(msg)
+        else:
+            return error_response(f"Unsupported message type: {msg.message_type}", 400)
+
+        # Handle processing result
+        if result.get("success"):
+            return success_response(
+                message=result.get("message"),
+                data=result.get("data")
+            )
+        else:
+            return error_response(
+                message=result.get("error"),
+                code=result.get("code", 400),
+                error_code=result.get("error_code"),
+                details=result.get("details")
+            )
+
     except Exception as e:
-        logger.error(f"Error processing message: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "message": f"Processing error: {str(e)}"
-        }), 500
+        logger.error(f"Error processing webhook: {str(e)}")
+        return error_response(
+            message="Internal server error",
+            code=500,
+            error_code="INTERNAL_ERROR",
+            details={"error": str(e)}
+        )
 
 @app.route("/queue-stats", methods=['GET'])
 def queue_stats():
@@ -361,3 +275,10 @@ def job_history():
         return jsonify(history), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    monitor.start()
+    try:
+        app.run(host='0.0.0.0', port=5001)
+    finally:
+        monitor.stop()

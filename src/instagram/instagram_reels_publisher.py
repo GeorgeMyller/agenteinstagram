@@ -15,7 +15,7 @@ import logging
 from typing import Optional, Dict, Any, Tuple
 import requests
 from moviepy.editor import VideoFileClip
-from ..utils.config import ConfigManager
+from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class ReelsPublisher:
             access_token: Instagram Graph API access token
             instagram_account_id: Instagram business account ID
         """
-        self.config = ConfigManager()
+        self.config = Config.get_instance()
         
         # Use parameters if provided, otherwise try config
         self.access_token = access_token or self.config.get_value('instagram.auth.access_token')

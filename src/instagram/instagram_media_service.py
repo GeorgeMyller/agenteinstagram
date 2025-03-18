@@ -1,203 +1,249 @@
-from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any
+import os
+import logging
+from pathlib import Path
+import aiohttp
+import asyncio
+from datetime import datetime
+
 from .base_instagram_service import BaseInstagramService
-from .exceptions import InstagramError, MediaError, ValidationError
+from .image_validator import InstagramImageValidator
+from .exceptions import InstagramError, MediaValidationError
+from ..utils.config import Config
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class MediaMetadata:
+    file_path: Path
+    media_type: str
+    size_bytes: int
+    dimensions: Tuple[int, int]
+    format: str
+    creation_time: datetime
+
+@dataclass
+class PublishResult:
+    success: bool
+    media_id: Optional[str] = None
+    error_message: Optional[str] = None
+    permalink: Optional[str] = None
 
 class InstagramMediaService(BaseInstagramService):
-    """Service for managing media uploads and validation for Instagram."""
-
-    MEDIA_CONFIG = {
-        'image': {
-            'aspect_ratio': {
-                'min': 4.0/5.0,  # Instagram minimum (4:5)
-                'max': 1.91      # Instagram maximum (1.91:1)
-            },
-            'resolution': {
-                'min': 320,
-                'max': 1440
-            },
-            'size_limit_mb': 8,
-            'formats': ['jpg', 'jpeg', 'png']
-        },
-        'video': {
-            'aspect_ratio': {
-                'min': 4.0/5.0,
-                'max': 1.91
-            },
-            'resolution': {
-                'min': 500,
-                'recommended': 1080
-            },
-            'duration': {
-                'min': 3,
-                'max': 90
-            },
-            'formats': ['mp4'],
-            'codecs': {
-                'video': ['h264'],
-                'audio': ['aac']
-            }
-        }
-    }
-
-    async def publish_photo(self, image_path: str, caption: str) -> Tuple[bool, str, Optional[str]]:
-        """Publica uma única foto no Instagram"""
-        try:
-            # Criar container
-            container_id = await self._create_media_container(image_path, caption)
-            if not container_id:
-                raise MediaError("Falha ao criar container de mídia")
-
-            # Publicar
-            result = await self._publish_container(container_id)
-            return True, "Publicado com sucesso", result.get("id")
-        except InstagramError as e:
-            return False, str(e), None
-
-    async def publish_carousel(self, image_paths: List[str], caption: str) -> Tuple[bool, str, Optional[str]]:
-        """Publica um carrossel de fotos no Instagram"""
-        try:
-            # Criar containers para cada imagem
-            containers = []
-            for image in image_paths:
-                container = await self._create_media_container(image)
-                if not container:
-                    raise MediaError(f"Falha ao criar container para {image}")
-                containers.append(container)
-
-            # Criar carrossel
-            carousel_id = await self._create_carousel_container(containers, caption)
-            if not carousel_id:
-                raise MediaError("Falha ao criar container do carrossel")
-
-            # Publicar
-            result = await self._publish_container(carousel_id)
-            return True, "Carrossel publicado com sucesso", result.get("id")
-        except InstagramError as e:
-            return False, str(e), None
-
-    async def _create_media_container(self, image_path: str, caption: str = None) -> Optional[str]:
-        """Cria um container para uma única mídia"""
-        try:
-            response = await self._make_request(
-                'POST',
-                f'{self.ig_user_id}/media',
-                data={
-                    'image_url': image_path,
-                    'caption': caption,
-                    'access_token': self.access_token
-                }
-            )
-            return response.get('id')
-        except Exception as e:
-            raise MediaError(f"Erro ao criar container: {str(e)}")
-
-    async def _create_carousel_container(self, media_ids: List[str], caption: str) -> Optional[str]:
-        """Cria um container para carrossel"""
-        try:
-            response = await self._make_request(
-                'POST',
-                f'{self.ig_user_id}/media',
-                data={
-                    'media_type': 'CAROUSEL',
-                    'children': media_ids,
-                    'caption': caption,
-                    'access_token': self.access_token
-                }
-            )
-            return response.get('id')
-        except Exception as e:
-            raise MediaError(f"Erro ao criar container do carrossel: {str(e)}")
-
-    async def _publish_container(self, container_id: str) -> Dict:
-        """Publica um container de mídia"""
-        try:
-            return await self._make_request(
-                'POST',
-                f'{self.ig_user_id}/media_publish',
-                data={
-                    'creation_id': container_id,
-                    'access_token': self.access_token
-                }
-            )
-        except Exception as e:
-            raise MediaError(f"Erro ao publicar: {str(e)}")
+    def __init__(self, access_token: str, account_id: str, skip_validation: bool = False):
+        super().__init__(access_token, account_id)
+        self.config = Config.get_instance()
+        self.validator = InstagramImageValidator()
+        self.skip_validation = skip_validation
 
     def validate_media(self, file_path: str) -> Tuple[bool, str]:
-        """Validates if a media file meets Instagram requirements"""
+        """Validate media file for Instagram requirements"""
         try:
-            import os
-            from PIL import Image
-            import magic
+            if self.skip_validation:
+                return True, "Validation skipped"
 
-            mime = magic.Magic(mime=True)
-            file_type = mime.from_file(file_path)
+            path = Path(file_path)
+            if not path.exists():
+                return False, f"File not found: {file_path}"
 
-            if file_type.startswith('image/'):
-                return self._validate_image(file_path)
-            elif file_type.startswith('video/'):
-                return self._validate_video(file_path)
+            metadata = self._get_media_metadata(path)
+            
+            # Check file size
+            max_size = self.config.get_api_config().max_file_size_mb * 1024 * 1024
+            if metadata.size_bytes > max_size:
+                return False, f"File size exceeds {max_size/1024/1024}MB limit"
+
+            # Validate based on media type
+            if metadata.media_type == "image":
+                return self.validator.validate_image(
+                    file_path,
+                    metadata.dimensions,
+                    metadata.format
+                )
+            elif metadata.media_type == "video":
+                return self.validator.validate_video(file_path)
             else:
-                return False, f"Unsupported media type: {file_type}"
+                return False, f"Unsupported media type: {metadata.media_type}"
 
         except Exception as e:
-            return False, f"Validation error: {str(e)}"
+            logger.error(f"Media validation error: {e}")
+            return False, str(e)
 
-    def _validate_image(self, image_path: str) -> Tuple[bool, str]:
-        """Validates image dimensions, format, and size"""
+    def _get_media_metadata(self, file_path: Path) -> MediaMetadata:
+        """Extract metadata from media file"""
+        from PIL import Image
+        import magic
+
+        mime = magic.Magic(mime=True)
+        mime_type = mime.from_file(str(file_path))
+        
+        media_type = mime_type.split('/')[0]
+        size_bytes = file_path.stat().st_size
+        
+        # Get dimensions and format for images
+        dimensions = (0, 0)
+        format_name = ""
+        if media_type == "image":
+            with Image.open(file_path) as img:
+                dimensions = img.size
+                format_name = img.format
+
+        return MediaMetadata(
+            file_path=file_path,
+            media_type=media_type,
+            size_bytes=size_bytes,
+            dimensions=dimensions,
+            format=format_name,
+            creation_time=datetime.fromtimestamp(file_path.stat().st_ctime)
+        )
+
+    async def publish_photo(
+        self,
+        image_path: str,
+        caption: Optional[str] = None
+    ) -> PublishResult:
+        """Publish a photo to Instagram"""
         try:
-            with Image.open(image_path) as img:
-                width, height = img.size
-                aspect_ratio = width / height
+            # Validate image
+            is_valid, message = self.validate_media(image_path)
+            if not is_valid:
+                return PublishResult(
+                    success=False,
+                    error_message=f"Invalid image: {message}"
+                )
 
-                # Check dimensions
-                if width < self.MEDIA_CONFIG['image']['resolution']['min'] or \
-                   height < self.MEDIA_CONFIG['image']['resolution']['min']:
-                    return False, f"Image too small (minimum {self.MEDIA_CONFIG['image']['resolution']['min']}px)"
+            # Create container for media
+            container = await self._create_media_container(
+                image_path,
+                media_type="IMAGE",
+                caption=caption
+            )
 
-                # Check aspect ratio
-                if aspect_ratio < self.MEDIA_CONFIG['image']['aspect_ratio']['min'] or \
-                   aspect_ratio > self.MEDIA_CONFIG['image']['aspect_ratio']['max']:
-                    return False, f"Invalid aspect ratio: {aspect_ratio:.2f}"
+            if not container.get('id'):
+                return PublishResult(
+                    success=False,
+                    error_message="Failed to create media container"
+                )
 
-                # Check file size
-                file_size = os.path.getsize(image_path) / (1024 * 1024)  # Convert to MB
-                if file_size > self.MEDIA_CONFIG['image']['size_limit_mb']:
-                    return False, f"File too large: {file_size:.1f}MB"
-
-                return True, "Image validation successful"
+            # Publish the container
+            result = await self._publish_container(container['id'])
+            
+            if result.get('id'):
+                return PublishResult(
+                    success=True,
+                    media_id=result['id'],
+                    permalink=result.get('permalink')
+                )
+            else:
+                return PublishResult(
+                    success=False,
+                    error_message="Failed to publish media"
+                )
 
         except Exception as e:
-            return False, f"Image validation error: {str(e)}"
+            logger.error(f"Error publishing photo: {e}")
+            return PublishResult(success=False, error_message=str(e))
 
-    def _validate_video(self, video_path: str) -> Tuple[bool, str]:
-        """Validates video format, duration, and specifications"""
+    async def publish_carousel(
+        self,
+        image_paths: List[str],
+        caption: Optional[str] = None
+    ) -> PublishResult:
+        """Publish a carousel to Instagram"""
         try:
-            import cv2
-            from moviepy.editor import VideoFileClip
+            # Validate all images
+            for path in image_paths:
+                is_valid, message = self.validate_media(path)
+                if not is_valid:
+                    return PublishResult(
+                        success=False,
+                        error_message=f"Invalid image {path}: {message}"
+                    )
 
-            # Check basic file validity
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                return False, "Could not open video file"
+            # Create container for carousel
+            container = await self._create_carousel_container(
+                image_paths,
+                caption=caption
+            )
 
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            cap.release()
+            if not container.get('id'):
+                return PublishResult(
+                    success=False,
+                    error_message="Failed to create carousel container"
+                )
 
-            # Check resolution
-            if width < self.MEDIA_CONFIG['video']['resolution']['min'] or \
-               height < self.MEDIA_CONFIG['video']['resolution']['min']:
-                return False, f"Video resolution too low (minimum {self.MEDIA_CONFIG['video']['resolution']['min']}px)"
-
-            # Check duration and other specs using moviepy
-            with VideoFileClip(video_path) as clip:
-                duration = clip.duration
-                if duration < self.MEDIA_CONFIG['video']['duration']['min']:
-                    return False, f"Video too short (minimum {self.MEDIA_CONFIG['video']['duration']['min']}s)"
-                if duration > self.MEDIA_CONFIG['video']['duration']['max']:
-                    return False, f"Video too long (maximum {self.MEDIA_CONFIG['video']['duration']['max']}s)"
-
-            return True, "Video validation successful"
+            # Publish the container
+            result = await self._publish_container(container['id'])
+            
+            if result.get('id'):
+                return PublishResult(
+                    success=True,
+                    media_id=result['id'],
+                    permalink=result.get('permalink')
+                )
+            else:
+                return PublishResult(
+                    success=False,
+                    error_message="Failed to publish carousel"
+                )
 
         except Exception as e:
-            return False, f"Video validation error: {str(e)}"
+            logger.error(f"Error publishing carousel: {e}")
+            return PublishResult(success=False, error_message=str(e))
+
+    async def _create_media_container(
+        self,
+        media_path: str,
+        media_type: str,
+        caption: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a container for media upload"""
+        params = {
+            'media_type': media_type,
+            'image_url': await self._upload_to_cdn(media_path)
+        }
+        
+        if caption:
+            params['caption'] = caption
+
+        endpoint = f'/{self.api_version}/{self.account_id}/media'
+        return await self._make_request('POST', endpoint, params)
+
+    async def _create_carousel_container(
+        self,
+        media_paths: List[str],
+        caption: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a container for carousel upload"""
+        # Upload all media to CDN first
+        children = []
+        for path in media_paths:
+            upload_url = await self._upload_to_cdn(path)
+            children.append({
+                'media_type': 'IMAGE',
+                'image_url': upload_url
+            })
+
+        params = {
+            'media_type': 'CAROUSEL',
+            'children': children
+        }
+        
+        if caption:
+            params['caption'] = caption
+
+        endpoint = f'/{self.api_version}/{self.account_id}/media'
+        return await self._make_request('POST', endpoint, params)
+
+    async def _publish_container(self, container_id: str) -> Dict[str, Any]:
+        """Publish a created media container"""
+        endpoint = f'/{self.api_version}/{self.account_id}/media_publish'
+        params = {'creation_id': container_id}
+        return await self._make_request('POST', endpoint, params)
+
+    async def _upload_to_cdn(self, file_path: str) -> str:
+        """Upload media to Facebook's CDN"""
+        # Implementation of CDN upload
+        # This is a placeholder - actual implementation would depend on your CDN setup
+        return f"https://your-cdn.com/media/{Path(file_path).name}"
