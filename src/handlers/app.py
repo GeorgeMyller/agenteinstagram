@@ -147,7 +147,10 @@ def handle_webhook():
         if msg.message_type == Message.TYPE_TEXT:
             result = instagram.process_text_message(msg)
         elif msg.message_type == Message.TYPE_IMAGE:
-            result = instagram.process_image_message(msg)
+            # Process image message using InstagramFacade
+            image_path = ImageDecodeSaver.process(msg.content.image_base64)
+            caption = msg.content.image_caption or ""
+            result = asyncio.run(instagram.post_image(image_path, caption))
         elif msg.message_type == Message.TYPE_VIDEO:
             result = instagram.process_video_message(msg)
         else:
