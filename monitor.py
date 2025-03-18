@@ -25,7 +25,7 @@ app = Flask(__name__, template_folder="monitoring_templates")
 # Inicializar o facade do Instagram
 instagram = InstagramFacade(
     access_token=os.getenv('INSTAGRAM_API_KEY'),
-    ig_user_id=os.getenv('INSTAGRAM_USER_ID')
+    ig_user_id=os.getenv('INSTAGRAM_ACCOUNT_ID')  # Changed from INSTAGRAM_USER_ID to match the service
 )
 
 # Variáveis globais para armazenar estatísticas
@@ -77,10 +77,18 @@ def clear_carousel():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-if __name__ == '__main__':
+def start_monitoring_server(port=5002):
+    """
+    Starts the monitoring server on the specified port
+    Args:
+        port (int): Port number to run the server on. Defaults to 5002.
+    """
     # Inicia a thread de atualização de estatísticas
     stats_thread = threading.Thread(target=update_system_stats, daemon=True)
     stats_thread.start()
     
     # Inicia o servidor web
-    app.run(port=5002)
+    app.run(port=port)
+
+if __name__ == '__main__':
+    start_monitoring_server()

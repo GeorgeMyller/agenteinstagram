@@ -7,7 +7,6 @@ import requests
 import traceback
 from datetime import datetime
 from dotenv import load_dotenv
-from imgurpython import ImgurClient
 from src.instagram.base_instagram_service import (
     BaseInstagramService, AuthenticationError, PermissionError,
     RateLimitError, MediaError, TemporaryServerError, InstagramAPIError
@@ -17,6 +16,7 @@ from typing import Dict, Optional, Any
 from pathlib import Path
 from .image_validator import InstagramImageValidator
 from .exceptions import InstagramError, RateLimitError
+from ..utils.config import Config  # Added missing import
 
 
 logger = logging.getLogger('InstagramPostService')
@@ -160,6 +160,7 @@ class InstagramPostService(BaseInstagramService):
             return
 
         load_dotenv()
+        # Store these values to update Config before calling super().__init__()
         access_token = access_token or (
             os.getenv('INSTAGRAM_API_KEY') or
             os.getenv('INSTAGRAM_ACCESS_TOKEN') or
@@ -173,7 +174,14 @@ class InstagramPostService(BaseInstagramService):
                 "INSTAGRAM_ACCOUNT_ID nas variáveis de ambiente ou forneça-os diretamente."
             )
 
-        super().__init__(access_token, ig_user_id)
+        # Update Config with provided credentials
+        config = Config.get_instance()
+        config.INSTAGRAM_ACCESS_TOKEN = access_token
+        config.INSTAGRAM_ACCOUNT_ID = ig_user_id
+
+        # Now call super().__init__() which will use the updated Config
+        super().__init__()
+        
         self.state_file = 'api_state.json'
         self.pending_containers = {}
         self.published_containers_file = 'published_containers.json'
@@ -185,10 +193,6 @@ class InstagramPostService(BaseInstagramService):
         self.skip_token_validation = skip_token_validation
         self._load_state()
         self._load_published_containers()
-
-        # Processamento de containers pendentes sob demanda em vez de automático
-        # (será chamado explicitamente quando necessário)
-        # self._process_pending_containers()
 
         self._initialized = True
 

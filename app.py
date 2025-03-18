@@ -43,11 +43,11 @@ resource_manager = ResourceManager()
 cleanup_scheduler = CleanupScheduler.get_instance()
 
 # Initialize required directories
-os.makedirs(os.path.join(Paths.ROOT_DIR, "temp_videos"), exist_ok=True)
-os.makedirs(os.path.join(Paths.ROOT_DIR, "temp"), exist_ok=True)
+os.makedirs(os.path.join(Paths.base_dir, "temp_videos"), exist_ok=True)
+os.makedirs(os.path.join(Paths.base_dir, "temp"), exist_ok=True)
 
 # Create assets directory if it doesn't exist
-assets_dir = os.path.join(Paths.ROOT_DIR, "assets")
+assets_dir = os.path.join(Paths.base_dir, "assets")
 os.makedirs(assets_dir, exist_ok=True)
 
 # Define border image with full path
@@ -746,7 +746,7 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Warning: Could not create border image: {str(e)}")
     
-    temp_dir = Paths.TEMP
+    temp_dir = os.path.join(Paths.base_dir, "temp")
     start_periodic_cleanup(temp_dir)
 
     if not os.environ.get('WERKZEUG_RUN_MAIN'):

@@ -31,9 +31,15 @@ class PublishResult:
     permalink: Optional[str] = None
 
 class InstagramMediaService(BaseInstagramService):
-    def __init__(self, access_token: str, account_id: str, skip_validation: bool = False):
-        super().__init__(access_token, account_id)
-        self.config = Config.get_instance()
+    def __init__(self, access_token: str = None, account_id: str = None, skip_validation: bool = False):
+        # Update Config with credentials if provided
+        if access_token and account_id:
+            config = Config.get_instance()
+            config.INSTAGRAM_ACCESS_TOKEN = access_token
+            config.INSTAGRAM_ACCOUNT_ID = account_id
+            
+        # Now call super().__init__() which will use the updated Config
+        super().__init__()
         self.validator = InstagramImageValidator()
         self.skip_validation = skip_validation
 
