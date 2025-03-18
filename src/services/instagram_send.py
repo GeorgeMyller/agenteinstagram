@@ -2,20 +2,33 @@ import os
 import time
 import requests
 import logging
+from PIL import Image
 from src.instagram.crew_post_instagram import InstagramPostCrew
 from src.instagram.describe_image_tool import ImageDescriber
+from src.instagram.describe_video_tool import VideoDescriber
 from src.instagram.instagram_post_service import InstagramPostService
+from src.instagram.instagram_carousel_service import InstagramCarouselService
 from src.instagram.border import ImageWithBorder
-from src.instagram.filter import FilterImage
+from src.instagram.filter import FilterImage, FilterVideo
 from src.utils.paths import Paths
 from src.instagram.image_uploader import ImageUploader
-from PIL import Image
+from src.instagram.video_uploader import VideoUploader
 
 # Import new queue system
 from src.services.post_queue import post_queue, RateLimitExceeded
 from src.instagram.instagram_post_publisher import PostPublisher
 # Import the new carousel normalizer
 from src.instagram.carousel_normalizer import CarouselNormalizer
+
+try:
+    import requests
+except ImportError:
+    pass  # Will be handled during runtime if needed
+
+try:
+    from PIL import Image
+except ImportError:
+    pass  # Will be handled during runtime if needed
 
 # Set up logging
 logger = logging.getLogger('InstagramSend')
@@ -637,15 +650,12 @@ class InstagramSend:
     @staticmethod
     def send_carousel(media_paths, caption, inputs):
         """
-        Envia um carrossel de imagens para o Instagram
+        Send a carousel post to Instagram
         
         Args:
-            media_paths (list): Lista de caminhos dos arquivos de mídia (imagens)
-            caption (str): Legenda do post
-            inputs (dict): Configurações adicionais
-            
-        Returns:
-            dict: Resultado do envio
+            media_paths (list): List of paths to the media files
+            caption (str): Caption text
+            inputs (dict): Optional configuration for post generation
         """
         try:
             logger.info(f"[CAROUSEL] Iniciando processamento do carrossel com {len(media_paths)} imagens")
@@ -657,7 +667,7 @@ class InstagramSend:
             # Verificar se os arquivos existem antes de prosseguir
             valid_paths = []
             for path in media_paths:
-                if os.path.exists(path):  # Fixed extra parenthesis here
+                if os.path.exists(path):
                     valid_paths.append(path)
                 else:
                     logger.error(f"[CAROUSEL] ERRO: Arquivo não encontrado: {path}")
@@ -667,10 +677,11 @@ class InstagramSend:
             
             logger.info(f"[CAROUSEL] {len(valid_paths)} imagens válidas encontradas, iniciando verificação de proporções")
             
-            # Normalize images to have the same aspect ratio (new step)
+            # Normalize images to have the same aspect ratio
             try:
                 logger.info("[CAROUSEL] Normalizando imagens para mesma proporção...")
-                normalized_paths = CarouselNormalizer.normalize_carousel_images(valid_paths)
+                normalizer = CarouselNormalizer()
+                normalized_paths = normalizer.normalize_carousel_images(valid_paths)
                 
                 if len(normalized_paths) < 2:
                     logger.error("[CAROUSEL] Falha ao normalizar imagens do carrossel")
@@ -682,20 +693,14 @@ class InstagramSend:
                 valid_paths = normalized_paths
             except Exception as e:
                 logger.warning(f"[CAROUSEL] Erro ao normalizar imagens: {str(e)}. Tentando prosseguir com as originais.")
-                # Continue with original images if normalization fails
-            
-            # Instanciar o serviço de carrossel do Instagram
-            from src.instagram.instagram_carousel_service import InstagramCarouselService
-            from src.instagram.carousel_poster import upload_carousel_images
             
             # Clear any existing carousel cache first
             try:
-                # Try to call the clear API endpoint
                 requests.post("http://localhost:5001/debug/carousel/clear", timeout=2)
             except:
-                pass  # Ignore if the endpoint isn't available
+                pass  # Ignore if endpoint isn't available
             
-            # Certificar-se de que temos as dependências necessárias
+            # Instanciar o serviço de carrossel do Instagram
             service = InstagramCarouselService()
             
             # Verificar explicitamente as permissões do token
@@ -705,7 +710,7 @@ class InstagramSend:
                 raise Exception(f"O token do Instagram não possui as permissões necessárias: {', '.join(missing_permissions)}")
             
             # Verificar credenciais
-            if not service.instagram_account_id or not service.access_token:
+            if not service.ig_user_id or not service.access_token:
                 raise Exception("Credenciais do Instagram não configuradas corretamente")
             
             logger.info(f"[CAROUSEL] Credenciais verificadas, iniciando upload das imagens")
@@ -714,65 +719,59 @@ class InstagramSend:
             def progress_update(current, total):
                 logger.info(f"[CAROUSEL] Upload de imagens: {current}/{total}")
                 
-            success, uploaded_images, image_urls = upload_carousel_images(valid_paths, progress_callback=progress_update)
+            uploader = ImageUploader()
+            image_urls = []
+            uploaded_images = []
             
-            logger.info(f"[CAROUSEL] Resultado do upload: success={success}, {len(image_urls)} URLs obtidas")
-            
-            if not success:
-                raise Exception("Falha no upload de uma ou mais imagens do carrossel")
+            try:
+                for path in valid_paths:
+                    uploaded = uploader.upload_from_path(path)
+                    if uploaded and 'url' in uploaded:
+                        image_urls.append(uploaded['url'])
+                        uploaded_images.append(uploaded)
+                    else:
+                        logger.error(f"Failed to upload image: {path}")
+                    time.sleep(2)  # Rate limiting between uploads
+            except Exception as e:
+                logger.error(f"Error during image upload: {e}")
+                raise
             
             if len(image_urls) < 2:
-                raise Exception(f"Número insuficiente de URLs para criar um carrossel: {len(image_urls)}")
-            
-            logger.info(f"[CAROUSEL] URLs das imagens: {image_urls}")
-            
-            # Postar o carrossel no Instagram, com retentativas 
-            max_attempts = 3
-            retry_delay = 15  # seconds
-            
-            for attempt in range(max_attempts):
-                logger.info(f"[CAROUSEL] Tentativa {attempt+1}/{max_attempts} de publicação do carrossel no Instagram")
+                raise Exception(f"Insufficient images uploaded successfully: {len(image_urls)}")
                 
+            logger.info(f"[CAROUSEL] {len(image_urls)} imagens enviadas com sucesso")
+            
+            # Post the carousel to Instagram
+            try:
+                post_id = service.post_carousel(image_urls, caption)
+                
+                if post_id:
+                    logger.info(f"[CAROUSEL] Carrossel publicado com sucesso! ID: {post_id}")
+                    return {"status": "success", "post_id": post_id}
+                else:
+                    raise Exception("Failed to post carousel")
+                    
+            finally:
+                # Cleanup uploaded images
                 try:
-                    post_id = service.post_carousel(image_urls, caption)
+                    for img in uploaded_images:
+                        if img.get("deletehash"):
+                            logger.info(f"Removing temporary image from host...")
+                            uploader.delete_image(img["deletehash"])
+                except Exception as cleanup_error:
+                    logger.warning(f"Error during cleanup: {cleanup_error}")
+                
+                # Cleanup temporary normalized images
+                try:
+                    for path in valid_paths:
+                        if "tmp" in path and os.path.exists(path):
+                            os.unlink(path)
+                            logger.info(f"[CAROUSEL] Removed temporary file: {path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Error cleaning up temporary files: {cleanup_error}")
                     
-                    if post_id:
-                        logger.info(f"[CAROUSEL] Carrossel publicado com sucesso! ID: {post_id}")
-                        return {"status": "success", "post_id": post_id}
-                    else:
-                        logger.error(f"[CAROUSEL] post_carousel retornou None na tentativa {attempt+1}")
-                        
-                        if attempt < max_attempts - 1:
-                            logger.info(f"[CAROUSEL] Aguardando {retry_delay}s antes da próxima tentativa...")
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Double delay for next attempt
-                        else:
-                            raise Exception("Falha ao publicar o carrossel após múltiplas tentativas")
-                except Exception as e:
-                    logger.error(f"[CAROUSEL] Erro na tentativa {attempt+1}: {str(e)}")
-                    
-                    if attempt < max_attempts - 1:
-                        logger.info(f"[CAROUSEL] Aguardando {retry_delay}s antes da próxima tentativa...")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # Double delay for next attempt
-                    else:
-                        raise
-            
-            # If we reach here, all attempts failed
-            raise Exception("Falha ao publicar o carrossel no Instagram após todas as tentativas")
-            
         except Exception as e:
             logger.error(f"[CAROUSEL] ERRO: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            
-            # Clean up any temporary normalized images
-            try:
-                for path in valid_paths:
-                    if "NamedTemporaryFile" in path and os.path.exists(path):
-                        os.unlink(path)
-                        logger.info(f"[CAROUSEL] Arquivo temporário removido: {path}")
-            except Exception as cleanup_error:
-                logger.error(f"[CAROUSEL] Erro ao limpar arquivos temporários: {str(cleanup_error)}")
-                
             raise Exception(f"Erro ao enviar carrossel: {e}")

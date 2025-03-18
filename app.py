@@ -171,31 +171,45 @@ def webhook():
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"🔄 Processando carrossel com {len(carousel_images)} imagens...")
                     
-                    # Aplicar bordas às imagens do carrossel (apenas se a imagem de borda existir)
-                    bordered_images = []
-                    for image_path in carousel_images:
+                    # Processar e normalizar todas as imagens do carrossel
+                    processed_images = []
+                    for idx, image_path in enumerate(carousel_images, 1):
                         try:
-                            # Primeiro verificar e redimensionar se necessário
-                            resized_image = InstagramImageValidator.resize_for_instagram(image_path)
-                            
-                            # Aplicar borda apenas se a imagem de borda existir
-                            if border_image_path and os.path.exists(border_image_path):
-                                bordered_image_path = FilterImage.apply_border(resized_image, border_image_path)
-                                bordered_images.append(bordered_image_path)
+                            # Processar a imagem usando o InstagramImageValidator
+                            result = InstagramImageValidator.process_single_photo(image_path)
+                            if result['status'] == 'success':
+                                processed_path = result['image_path']
+                                
+                                # Aplicar borda apenas se a imagem de borda existir
+                                if border_image_path and os.path.exists(border_image_path):
+                                    bordered_path = FilterImage.apply_border(processed_path, border_image_path)
+                                    processed_images.append(bordered_path)
+                                else:
+                                    processed_images.append(processed_path)
+                                    
+                                print(f"✅ Imagem {idx} processada com sucesso")
                             else:
-                                # Se não existir, usar a imagem redimensionada diretamente
-                                bordered_images.append(resized_image)
+                                raise Exception(result['message'])
+                                
                         except Exception as e:
-                            print(f"Erro ao processar imagem {image_path}: {str(e)}")
-                            bordered_images.append(image_path)  # Usar a imagem original em caso de erro
+                            print(f"❌ Erro ao processar imagem {idx}: {str(e)}")
+                            # Em caso de erro no processamento, usar a imagem original
+                            processed_images.append(image_path)
+                    
+                    # Validar novamente as imagens processadas
+                    is_valid, validation_msg = InstagramImageValidator.validate_for_carousel(processed_images)
+                    if not is_valid:
+                        sender.send_text(number=msg.remote_jid, 
+                                        msg=f"⚠️ Erro após processamento das imagens: {validation_msg}")
+                        return jsonify({"status": "processing_error", "message": validation_msg}), 400
                     
                     # Enfileirar o carrossel para publicação
-                    job_id = InstagramSend.queue_carousel(bordered_images, caption_to_use)
+                    job_id = InstagramSend.queue_carousel(processed_images, caption_to_use)
                     
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"✅ Carrossel enfileirado com sucesso!\n"
                                         f"ID do trabalho: {job_id}\n"
-                                        f"Número de imagens: {len(bordered_images)}\n"
+                                        f"Número de imagens: {len(processed_images)}\n"
                                         f"Você pode verificar o status usando \"status {job_id}\"")
                     
                     # Verificar o status do trabalho após enfileiramento
@@ -411,7 +425,6 @@ def webhook():
 
     return jsonify({"status": "processed"}), 200
 
-# ... resto do código permanece o mesmo
 @app.route("/status", methods=['GET'])
 def status():
     """Endpoint to check system status"""

@@ -63,6 +63,7 @@ class InstagramCarouselService(BaseInstagramService):
 
     SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png"]
     MAX_MEDIA_SIZE = 8 * 1024 * 1024  # 8MB in bytes
+    API_VERSION = 'v22.0'  # Update to v22
 
     # Class-level rate limit state
     _rate_limit_state = RateLimitState()
@@ -80,6 +81,7 @@ class InstagramCarouselService(BaseInstagramService):
             
         super().__init__(access_token, ig_user_id)
         self.token_expires_at = None
+        self.instagram_account_id = ig_user_id  # Add this line to initialize instagram_account_id
         self._validate_token()
 
     def _validate_token(self, force_check=False):
@@ -92,7 +94,7 @@ class InstagramCarouselService(BaseInstagramService):
         try:
             # Add more detailed logging
             logger.info(f"Validating Instagram token (force_check={force_check})")
-            logger.info(f"Using Instagram Account ID: {self.instagram_account_id}")
+            logger.info(f"Using Instagram Account ID: {self.ig_user_id}")
             
             response = self._make_request(
                 "GET",
@@ -265,7 +267,7 @@ class InstagramCarouselService(BaseInstagramService):
         return False
 
     def _create_child_container(self, media_url: str) -> Optional[str]:
-        """Creates a child container for a carousel image."""
+        """Creates a child container for a carousel image using v22 API."""
         if self.token_expires_at and time.time() > self.token_expires_at - 60:
             self._refresh_token()
 
@@ -273,24 +275,54 @@ class InstagramCarouselService(BaseInstagramService):
             logger.error(f"Media validation failed for: {media_url}")
             return None
 
-        params = {
-            'image_url': media_url,
-            'is_carousel_item': 'true'
-        }
-
+        # Ensure the media_url is properly encoded
         try:
-            result = self._make_request('POST', f"{self.ig_user_id}/media", data=params)
-            if result and 'id' in result:
-                container_id = result['id']
-                logger.info(f"Child container created: {container_id}")
-                return container_id
+            from urllib.parse import quote
+            encoded_url = quote(media_url, safe=':/')  # Permitir : e / na URL
+            
+            # Construir os parâmetros corretamente
+            params = {
+                'image_url': encoded_url,
+                'media_type': 'IMAGE',
+                'is_carousel_item': 'true',  # Changed to string 'true'
+                'access_token': self.access_token
+            }
+
+            # Log params para debug (ocultando o token)
+            debug_params = params.copy()
+            debug_params['access_token'] = '***'
+            logger.info(f"Creating child container with params: {debug_params}")
+
+            try:
+                endpoint = f"{self.ig_user_id}/media"
+                result = self._make_request('POST', endpoint, data=params)
+                
+                if result and 'id' in result:
+                    container_id = result['id']
+                    logger.info(f"Child container created successfully: {container_id}")
+                    return container_id
+                else:
+                    error_msg = result.get('error', {}).get('message', 'Unknown error')
+                    logger.error(f"Invalid response from Instagram API: {error_msg}")
+                    return None
+                    
+            except InstagramAPIError as e:
+                # Log do erro mais detalhado
+                logger.error(f"Failed to create child container. Error: {str(e)}")
+                if hasattr(e, 'response') and hasattr(e.response, 'json'):
+                    try:
+                        error_details = e.response.json()
+                        logger.error(f"API Error details: {error_details}")
+                    except:
+                        pass
+                raise
+                
+        except Exception as e:
+            logger.error(f"Unexpected error creating child container: {str(e)}")
             return None
-        except InstagramAPIError as e:
-            logger.error(f"Failed to create child container: {e}")
-            raise
 
     def create_carousel_container(self, media_urls: List[str], caption: str) -> Optional[str]:
-        """Creates a container for a carousel post."""
+        """Creates a container for a carousel post using v22 API."""
         if self.token_expires_at and time.time() > self.token_expires_at - 60:
             self._refresh_token()
             
@@ -324,18 +356,23 @@ class InstagramCarouselService(BaseInstagramService):
             logger.error(f"Not enough child containers created. Found: {len(children)}, required: at least 2")
             return None
 
+        # Construir os parâmetros corretamente para o carrossel
         params = {
-            'media_type': 'CAROUSEL',
+            'media_type': 'CAROUSEL',  # Changed from CAROUSEL_ALBUM to CAROUSEL
             'caption': caption[:2200],  # Instagram caption limit
-            'children': ','.join(children)
+            'children': ','.join(children),  # Changed to comma-separated string
+            'access_token': self.access_token
         }
 
         try:
-            result = self._make_request('POST', f"{self.ig_user_id}/media", data=params)
+            endpoint = f"{self.ig_user_id}/media"
+            logger.info(f"Creating carousel container with params: {params}")
+            result = self._make_request('POST', endpoint, data=params)
             if result and 'id' in result:
                 container_id = result['id']
                 logger.info(f"Carousel container created successfully: {container_id}")
                 return container_id
+            logger.error(f"Failed to create carousel container. Response: {result}")
             return None
         except InstagramAPIError as e:
             logger.error(f"Failed to create carousel container: {e}")
@@ -349,7 +386,7 @@ class InstagramCarouselService(BaseInstagramService):
         for attempt in range(max_attempts):
             try:
                 params = {
-                    'fields': 'status_code,status,publishing_to_ig',
+                    'fields': 'status_code,status',  # Removed 'publishing_to_ig'
                     'access_token': self.access_token  # Ensure access token is included
                 }
                 
@@ -361,27 +398,20 @@ class InstagramCarouselService(BaseInstagramService):
 
                 status_code = data.get('status_code', '')
                 status_details = data.get('status', {})
-                publishing_to_ig = data.get('publishing_to_ig', False)
                 
                 # Log detailed status information
                 logger.info(f"Container status check (attempt {attempt + 1}/{max_attempts}):")
                 logger.info(f"  - Status code: {status_code}")
                 logger.info(f"  - Status details: {status_details}")
-                logger.info(f"  - Publishing to IG: {publishing_to_ig}")
 
-                if status_code == 'FINISHED' and not publishing_to_ig:
+                if status_code == 'FINISHED':
                     return status_code
-                    
-                elif status_code == 'FINISHED' and publishing_to_ig:
-                    logger.info("Container is ready but still being processed by Instagram")
-                    time.sleep(delay)
-                    continue
-                    
+                
                 elif status_code == 'IN_PROGRESS':
                     # Container still processing, continue waiting
                     time.sleep(delay)
                     continue
-                    
+                
                 elif status_code == 'ERROR':
                     # Extract detailed error information
                     error_code = status_details.get('error_code')
@@ -431,12 +461,13 @@ class InstagramCarouselService(BaseInstagramService):
         return 'TIMEOUT'
 
     def publish_carousel(self, container_id: str) -> Optional[str]:
-        """Publishes the carousel post."""
+        """Publishes the carousel post using v22 API."""
         if self.token_expires_at and time.time() > self.token_expires_at - 60:
             self._refresh_token()
 
         params = {
-            'creation_id': container_id
+            'creation_id': container_id,
+            'access_token': self.access_token
         }
 
         if self._rate_limit_state.should_backoff():
@@ -449,10 +480,11 @@ class InstagramCarouselService(BaseInstagramService):
             logger.info(f"Attempting to publish carousel with container ID: {container_id}")
             
             # Print detailed info about the request
-            logger.info(f"Publishing to endpoint: {self.ig_user_id}/media_publish")
+            logger.info(f"Publishing to endpoint: {self.ig_user_id}/media_publish")  # Removed API_VERSION prefix
             logger.info(f"Publishing with params: {params}")
             
-            result = self._make_request('POST', f"{self.ig_user_id}/media_publish", data=params)
+            endpoint = f"{self.ig_user_id}/media_publish"  # Removed API_VERSION prefix
+            result = self._make_request('POST', endpoint, data=params)
             
             if result and 'id' in result:
                 post_id = result['id']
