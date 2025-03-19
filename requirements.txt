@@ -10,4 +10,3 @@ Werkzeug>=2.0,<4.0
 psutil>=5.8,<6.0
 evolutionapi>=0.0.9
 pilgram>=0.1.1
-opencv-python>=4.8.0

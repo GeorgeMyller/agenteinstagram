@@ -24,46 +24,40 @@ class CarouselCreationError(Exception):
 class RateLimitState:
     """Track rate limit state"""
     def __init__(self):
+        self.errors = []
         self.last_error_time = 0
-        self.error_count = 0
-        self.backoff_until = 0
-        self.min_delay = 60  # Start with 1 minute
-        self.max_delay = 3600  # Max 1 hour delay
+        self.backoff_base = 60  # Start with 1 minute
+        self.max_backoff = 3600  # Max 1 hour
+
+    def record_error(self) -> float:
+        """Record an error and return the backoff time in seconds"""
+        current_time = time.time()
+        self.errors = [t for t in self.errors if current_time - t < 3600]  # Keep last hour
+        self.errors.append(current_time)
+        self.last_error_time = current_time
+        
+        # Calculate exponential backoff based on number of recent errors
+        delay = min(self.backoff_base * (2 ** len(self.errors)), self.max_backoff)
+        return delay + random.uniform(0, 10)  # Add jitter
 
     def should_backoff(self) -> bool:
         """Check if we should still be backing off"""
-        return time.time() < self.backoff_until
+        if not self.errors:
+            return False
+        return time.time() - self.last_error_time < self.get_backoff_time()
 
     def get_backoff_time(self) -> float:
-        """Get how many seconds to wait"""
-        if self.should_backoff():
-            return self.backoff_until - time.time()
-        return 0
-
-    def record_error(self):
-        """Record a rate limit error and calculate backoff"""
-        current_time = time.time()
-        
-        # Reset error count if it's been more than an hour
-        if current_time - self.last_error_time > 3600:
-            self.error_count = 0
-            
-        self.error_count += 1
-        self.last_error_time = current_time
-        
-        # Calculate exponential backoff with jitter
-        delay = min(self.min_delay * (2 ** (self.error_count - 1)), self.max_delay)
-        jitter = random.uniform(0, delay * 0.1)  # 10% jitter
-        self.backoff_until = current_time + delay + jitter
-        
-        return delay + jitter
+        """Get the current backoff time in seconds"""
+        if not self.errors:
+            return 0
+        return self.backoff_base * (2 ** len(self.errors))
 
 class InstagramCarouselService(BaseInstagramService):
     """Classe para gerenciar o upload e publicação de carrosséis no Instagram."""
 
     SUPPORTED_MEDIA_TYPES = ["image/jpeg", "image/png"]
     MAX_MEDIA_SIZE = 8 * 1024 * 1024  # 8MB in bytes
-    API_VERSION = 'v22.0'  # Update to v22
+    API_VERSION = 'v22.0'  # Using latest API version
 
     # Class-level rate limit state
     _rate_limit_state = RateLimitState()
@@ -81,18 +75,12 @@ class InstagramCarouselService(BaseInstagramService):
             
         super().__init__(access_token, ig_user_id)
         self.token_expires_at = None
-        self.instagram_account_id = ig_user_id  # Add this line to initialize instagram_account_id
+        self.instagram_account_id = ig_user_id
         self._validate_token()
 
     def _validate_token(self, force_check=False):
-        """Validates the access token and retrieves its expiration time.
-        
-        Args:
-            force_check: If True, always check the token validity with the API.
-                        If False (default), might use cached validation results.
-        """
+        """Validates the access token and retrieves its expiration time."""
         try:
-            # Add more detailed logging
             logger.info(f"Validating Instagram token (force_check={force_check})")
             logger.info(f"Using Instagram Account ID: {self.ig_user_id}")
             
@@ -101,6 +89,7 @@ class InstagramCarouselService(BaseInstagramService):
                 "debug_token",
                 params={"input_token": self.access_token}
             )
+            
             if response and 'data' in response and response['data'].get('is_valid'):
                 logger.info("Token de acesso validado com sucesso.")
                 
@@ -144,52 +133,30 @@ class InstagramCarouselService(BaseInstagramService):
 
     def _refresh_token(self):
         """Refreshes the access token."""
-        if not os.getenv("INSTAGRAM_API_KEY"):
-            raise AuthenticationError("Cannot refresh token. No long-lived access token available.")
+        if not os.getenv("INSTAGRAM_CLIENT_SECRET"):
+            raise AuthenticationError("Cannot refresh token. No client secret available.")
 
         logger.info("Refreshing Instagram access token...")
         try:
             response = self._make_request(
                 "GET",
-                "oauth/access_token",
+                "refresh_access_token",
                 params={
                     "grant_type": "ig_refresh_token",
-                    "client_secret": os.getenv("INSTAGRAM_CLIENT_SECRET"),
-                    "access_token": self.access_token,
+                    "access_token": self.access_token
                 }
             )
-            self.access_token = response['access_token']
-            self.token_expires_at = time.time() + response['expires_in']
-            logger.info(f"Token refreshed. New expiration: {datetime.fromtimestamp(self.token_expires_at)}")
             
-            # Update the .env file (with warning)
-            self._update_env_file("INSTAGRAM_API_KEY", self.access_token)
-        except InstagramAPIError as e:
+            if response and 'access_token' in response:
+                self.access_token = response['access_token']
+                self.token_expires_at = time.time() + response.get('expires_in', 5184000)  # Default 60 days
+                logger.info(f"Token refreshed. New expiration: {datetime.fromtimestamp(self.token_expires_at)}")
+            else:
+                raise AuthenticationError("Failed to refresh token: Invalid response")
+                
+        except Exception as e:
             logger.error(f"Error refreshing token: {e}")
             raise
-
-    def _update_env_file(self, key, new_value):
-        """Updates the .env file with the new token (use with caution)."""
-        try:
-            with open(".env", "r") as f:
-                lines = f.readlines()
-            updated_lines = []
-            found = False
-            for line in lines:
-                if line.startswith(f"{key}="):
-                    updated_lines.append(f"{key}={new_value}\n")
-                    found = True
-                else:
-                    updated_lines.append(line)
-            if not found:
-                updated_lines.append(f"{key}={new_value}\n")
-            with open(".env", "w") as f:
-                f.writelines(updated_lines)
-            logger.warning(
-                ".env file updated. THIS IS GENERALLY NOT RECOMMENDED FOR PRODUCTION."
-            )
-        except Exception as e:
-            logger.error(f"Error updating .env file: {e}")
 
     def _validate_media(self, media_url: str) -> bool:
         """Validates media URL and type before uploading with retry mechanism."""
@@ -219,7 +186,7 @@ class InstagramCarouselService(BaseInstagramService):
                     if response.status_code == 429:
                         # Use retry-after header if present, otherwise use exponential backoff
                         retry_after = int(response.headers.get('retry-after', base_delay * (2 ** attempt)))
-                        # Ensure we wait at least 10 seconds for Imgur rate limits
+                        # Ensure we wait at least 10 seconds for rate limits
                         retry_after = max(retry_after, 10 + random.randint(1, 10))
                         logger.warning(f"Rate limit hit from image host. Waiting {retry_after}s before retry...")
                         time.sleep(retry_after)
@@ -278,9 +245,9 @@ class InstagramCarouselService(BaseInstagramService):
         # Ensure the media_url is properly encoded
         try:
             from urllib.parse import quote
-            encoded_url = quote(media_url, safe=':/')  # Permitir : e / na URL
+            encoded_url = quote(media_url, safe=':/')  # Allow : and / in URL
             
-            # Construir os parâmetros corretamente
+            # Build parameters correctly
             params = {
                 'image_url': encoded_url,
                 'media_type': 'IMAGE',
@@ -288,7 +255,7 @@ class InstagramCarouselService(BaseInstagramService):
                 'access_token': self.access_token
             }
 
-            # Log params para debug (ocultando o token)
+            # Log params for debug (hiding the token)
             debug_params = params.copy()
             debug_params['access_token'] = '***'
             logger.info(f"Creating child container with params: {debug_params}")
@@ -415,8 +382,8 @@ class InstagramCarouselService(BaseInstagramService):
                 elif status_code == 'ERROR':
                     # Extract detailed error information
                     error_code = status_details.get('error_code')
-                    error_message = status_details.get('error_message')
                     error_type = status_details.get('error_type')
+                    error_message = status_details.get('error_message')
                     
                     logger.error(f"Container failed with error:")
                     logger.error(f"  - Error code: {error_code}")
@@ -431,7 +398,7 @@ class InstagramCarouselService(BaseInstagramService):
                             continue
                     
                     return 'ERROR'
-                    
+                
                 elif status_code == 'EXPIRED':
                     logger.error("Container expired before publishing")
                     return 'EXPIRED'
@@ -445,8 +412,11 @@ class InstagramCarouselService(BaseInstagramService):
                     return 'UNKNOWN'
 
             except RateLimitError as e:
-                logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
-                time.sleep(e.retry_seconds)
+                if e.retry_seconds:
+                    logger.warning(f"Rate limit hit while checking status. Waiting {e.retry_seconds}s...")
+                    time.sleep(e.retry_seconds)
+                else:
+                    time.sleep(delay)
             except InstagramAPIError as e:
                 if e.response.status_code == 400:
                     logger.error(f"Bad Request: {e.response.text}")
@@ -480,7 +450,7 @@ class InstagramCarouselService(BaseInstagramService):
             logger.info(f"Attempting to publish carousel with container ID: {container_id}")
             
             # Print detailed info about the request
-            logger.info(f"Publishing to endpoint: {self.ig_user_id}/media_publish")  # Removed API_VERSION prefix
+            logger.info(f"Publishing to endpoint: {self.ig_user_id}/media_publish")
             logger.info(f"Publishing with params: {params}")
             
             endpoint = f"{self.ig_user_id}/media_publish"  # Removed API_VERSION prefix
@@ -503,7 +473,6 @@ class InstagramCarouselService(BaseInstagramService):
                 self._handle_rate_limit()
                 raise
             raise
-            
         except Exception as e:
             logger.error(f"Error publishing carousel: {e}")
             
@@ -569,7 +538,7 @@ class InstagramCarouselService(BaseInstagramService):
                     raise
                     
         return None
-        
+
     def check_token_permissions(self):
         """
         Check if the access token has the necessary permissions for posting.
@@ -606,3 +575,30 @@ class InstagramCarouselService(BaseInstagramService):
         delay = self._rate_limit_state.record_error()
         logger.warning(f"Rate limit hit. Backing off for {delay:.1f} seconds...")
         time.sleep(delay)
+
+    def debug_token(self):
+        """Get detailed token information for debugging"""
+        try:
+            return self._make_request(
+                "GET",
+                "debug_token",
+                params={"input_token": self.access_token}
+            )
+        except Exception as e:
+            logger.error(f"Error getting token debug info: {e}")
+            return None
+
+    def get_app_usage_info(self):
+        """Get current API usage information"""
+        try:
+            return self._make_request(
+                "GET",
+                f"{self.ig_user_id}/content_publishing_limit",
+                params={
+                    "fields": "quota_usage,rate_limit_settings",
+                    "access_token": self.access_token
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error getting app usage info: {e}")
+            return {}

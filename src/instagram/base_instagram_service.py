@@ -9,7 +9,6 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import random
 import math
-from typing import Dict, Any
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -122,71 +121,94 @@ class BaseInstagramService:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
     
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """Make a request to the Instagram Graph API."""
+    def _make_request(self, method, endpoint, params=None, data=None, headers=None, retry_attempt=0):
+        """Make an API request with enhanced rate limiting and error handling"""
+        url = f"{self.base_url}/{endpoint}"
+        
+        # Add access token to params
+        if params is None:
+            params = {}
+        params['access_token'] = self.access_token
+        
+        # Respect rate limits with minimum interval between requests
+        current_time = time.time()
+        elapsed = current_time - self.last_request_time
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+        
         try:
-            import requests
-
-            # Adiciona versão da API e token de acesso se não fornecidos
-            if 'params' not in kwargs:
-                kwargs['params'] = {}
-            if 'access_token' not in kwargs['params'] and 'data' not in kwargs:
-                kwargs['params']['access_token'] = self.access_token
-
-            url = f"{self.base_url}/{endpoint}"
             logger.info(f"Making {method} request to {endpoint}")
-
-            # Log request details for debugging
-            debug_kwargs = kwargs.copy()
-            if 'params' in debug_kwargs:
-                debug_params = debug_kwargs['params'].copy()
-                if 'access_token' in debug_params:
-                    debug_params['access_token'] = '***'
-                debug_kwargs['params'] = debug_params
-            if 'data' in debug_kwargs:
-                debug_data = debug_kwargs['data'].copy()
-                if 'access_token' in debug_data:
-                    debug_data['access_token'] = '***'
-                debug_kwargs['data'] = debug_data
-            logger.debug(f"Request details: {debug_kwargs}")
-
-            response = requests.request(method, url, **kwargs)
+            if data:
+                logger.info(f"With data: {data}")
+            
+            response = self.session.request(method, url, params=params, data=data, headers=headers)
+            self.last_request_time = time.time()
+            
+            # Process rate limit headers if present
+            if 'x-business-use-case-usage' in response.headers:
+                self._process_rate_limit_headers(response.headers)
+            
+            # Log response status
             logger.info(f"Response status: {response.status_code}")
-
-            if response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', 60))
-                raise RateLimitError(f"Rate limit exceeded. Retry after {retry_after} seconds", retry_after)
-
-            # Log response content for debugging
-            try:
-                response_json = response.json()
-                if 'error' in response_json:
-                    logger.error(f"API Error response: {response_json['error']}")
-                logger.debug(f"Response content: {response_json}")
-            except ValueError:
-                logger.error(f"Non-JSON response: {response.text}")
-
-            response.raise_for_status()
-            return response.json()
-
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"Request failed: {e}")
-            if e.response.status_code == 400:
+            
+            if response.status_code == 403:
                 try:
-                    error_data = e.response.json().get('error', {})
-                    error_message = error_data.get('message', str(e))
-                    error_code = error_data.get('code')
-                    error_subcode = error_data.get('error_subcode')
-                    fb_trace_id = error_data.get('fbtrace_id')
-                    
-                    logger.error(f"Error details:")
-                    logger.error(f"Message: {error_message}")
-                    logger.error(f"Code: {error_code}")
-                    logger.error(f"Subcode: {error_subcode}")
-                    logger.error(f"Trace ID: {fb_trace_id}")
-                except:
-                    pass
-            raise InstagramAPIError(str(e), response=e.response)
+                    error_json = response.json()
+                    if 'error' in error_json:
+                        error = error_json['error']
+                        error_code = error.get('code')
+                        error_subcode = error.get('error_subcode')
+                        error_message = error.get('message', '')
+                        fb_trace_id = error.get('fbtrace_id')
+                        
+                        logger.error(f"{error_code} {error_message} (Subcode: {error_subcode})")
+                        
+                        # Handle application request limit specifically
+                        if error_subcode == 2207051:
+                            retry_seconds = 300  # Start with 5 minutes
+                            if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
+                                backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
+                                logger.warning(f"Application request limit reached. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
+                                time.sleep(backoff_time)
+                                return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
+                            
+                        raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
+                        
+                except ValueError:
+                    raise InstagramAPIError("Failed to parse error response")
+            
+            response.raise_for_status()
+            result = response.json() if response.content else None
+            
+            if result and 'error' in result:
+                error = result['error']
+                error_code = error.get('code')
+                error_message = error.get('message', '')
+                error_subcode = error.get('error_subcode')
+                fb_trace_id = error.get('fbtrace_id')
+                
+                if error_code in [190, 104]:  # Token errors
+                    raise AuthenticationError(error_message, error_code, error_subcode, fb_trace_id)
+                elif error_code in [200, 10, 803]:  # Permission errors
+                    raise PermissionError(error_message, error_code, error_subcode, fb_trace_id)
+                elif RateLimitHandler.is_rate_limit_error(error_code, error_subcode):
+                    retry_seconds = self._get_retry_after(error)
+                    if retry_attempt < RateLimitHandler.MAX_ATTEMPTS:
+                        backoff_time = RateLimitHandler.calculate_backoff_time(retry_attempt, retry_seconds)
+                        logger.warning(f"Rate limit hit. Backing off for {backoff_time:.2f} seconds. Attempt {retry_attempt+1}/{RateLimitHandler.MAX_ATTEMPTS}")
+                        time.sleep(backoff_time)
+                        return self._make_request(method, endpoint, params, data, headers, retry_attempt + 1)
+                    raise RateLimitError(error_message, retry_seconds, error_code, error_subcode, fb_trace_id)
+                elif error_code in [1, 2]:  # Temporary server errors
+                    raise TemporaryServerError(error_message, error_code, error_subcode, fb_trace_id)
+                else:
+                    raise InstagramAPIError(error_message, error_code, error_subcode, fb_trace_id)
+            
+            return result
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {str(e)}")
+            raise InstagramAPIError(f"Request failed: {str(e)}")
     
     def _process_rate_limit_headers(self, headers):
         """Process rate limit information from response headers"""

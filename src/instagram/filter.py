@@ -6,8 +6,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import os
 from PIL import Image, ImageOps
 import pilgram
-import cv2
-import numpy as np
 
 
 class FilterImage:
@@ -64,12 +62,7 @@ class FilterImage:
             border_image = Image.open(border_path)
 
             # Redimensionar a borda para corresponder ao tamanho da imagem original
-            # Use Image.Resampling.LANCZOS instead of deprecated Image.ANTIALIAS
-            try:
-                border_image = border_image.resize(original_image.size, Image.Resampling.LANCZOS)
-            except AttributeError:
-                # Fallback for older PIL versions
-                border_image = border_image.resize(original_image.size, Image.LANCZOS)
+            border_image = border_image.resize(original_image.size, Image.ANTIALIAS)
 
             # Aplicar a borda à imagem original
             bordered_image = ImageOps.fit(original_image, border_image.size)
@@ -83,69 +76,6 @@ class FilterImage:
         except Exception as e:
             print(f"Erro ao aplicar borda à imagem: {e}")
             raise
-
-class FilterVideo:
-    @staticmethod
-    def process(video_path):
-        """
-        Processa o vídeo aplicando filtros básicos de cor e contraste.
-        Retorna o caminho do vídeo processado.
-        """
-        try:
-            # Abrir o vídeo
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                raise Exception("Não foi possível abrir o vídeo")
-
-            # Obter propriedades do vídeo
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            # Criar o caminho para o vídeo processado
-            output_path = video_path.rsplit('.', 1)[0] + '_processed.' + video_path.rsplit('.', 1)[1]
-            
-            # Configurar o writer
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-            frame_count = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                # Aplicar filtros básicos
-                # 1. Aumentar contraste
-                alpha = 1.2  # Contraste (1.0-3.0)
-                beta = 10    # Brilho (0-100)
-                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
-
-                # 2. Melhorar saturação
-                frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                frame_hsv[:, :, 1] = frame_hsv[:, :, 1] * 1.2  # Aumentar saturação em 20%
-                frame = cv2.cvtColor(frame_hsv, cv2.COLOR_HSV2BGR)
-
-                # Escrever o frame processado
-                out.write(frame)
-
-                # Atualizar progresso
-                frame_count += 1
-                if frame_count % 30 == 0:  # Atualizar a cada 30 frames
-                    progress = (frame_count / total_frames) * 100
-                    print(f"Processando vídeo: {progress:.1f}%")
-
-            # Liberar recursos
-            cap.release()
-            out.release()
-
-            print("Processamento do vídeo concluído")
-            return output_path
-
-        except Exception as e:
-            print(f"Erro ao processar o vídeo: {str(e)}")
-            return video_path  # Retorna o caminho original em caso de erro
 
 # Exemplo de uso:
 # filepath = os.path.join(Paths.ROOT_DIR, "temp", "temp-1733594830377.png")

@@ -51,38 +51,28 @@ class InstagramImageValidator:
         # Track aspect ratios for consistency check
         aspect_ratios = []
         invalid_images = []
-        processed_images = []  # Armazena caminhos de imagens processadas
-        needs_processing = False
         
         for i, img_path in enumerate(image_paths):
             try:
                 if not os.path.exists(img_path):
                     invalid_images.append(f"Imagem {i+1}: arquivo não encontrado")
-                    processed_images.append(None)
                     continue
                     
                 with Image.open(img_path) as img:
                     width, height = img.size
                     
-                    # Check dimensions and flag for processing if needed
-                    size_issue = False
+                    # Check dimensions
                     if width < cls.MIN_IMG_SIZE or height < cls.MIN_IMG_SIZE:
                         invalid_images.append(f"Imagem {i+1}: tamanho muito pequeno ({width}x{height})")
-                        size_issue = True
+                        continue
                     
                     if width > cls.MAX_IMG_SIZE or height > cls.MAX_IMG_SIZE:
                         invalid_images.append(f"Imagem {i+1}: tamanho muito grande ({width}x{height})")
-                        size_issue = True
-                        needs_processing = True
-                    
-                    if size_issue:
-                        processed_images.append(None)
                         continue
                         
                     # Calculate aspect ratio
                     aspect_ratio = width / height
                     aspect_ratios.append(aspect_ratio)
-                    processed_images.append(img_path)
                     
                     # Check format (Instagram accepts JPEG)
                     if img.format not in ['JPEG', 'JPG']:
@@ -90,22 +80,6 @@ class InstagramImageValidator:
                     
             except Exception as e:
                 invalid_images.append(f"Imagem {i+1}: erro ao processar ({str(e)})")
-                processed_images.append(None)
-        
-        # Se precisar de processamento automático e os erros são apenas de tamanho grande
-        if needs_processing and all("tamanho muito grande" in issue for issue in invalid_images):
-            logger.info("Tentando otimizar automaticamente imagens muito grandes para o carrossel")
-            optimized_paths = []
-            for i, img_path in enumerate(image_paths):
-                if img_path and (i < len(processed_images) and processed_images[i] is None):
-                    # Otimizar imagem grande
-                    optimized_path = cls.resize_for_instagram(img_path)
-                    optimized_paths.append(optimized_path)
-                else:
-                    optimized_paths.append(img_path)
-            
-            # Verificar novamente com imagens otimizadas
-            return cls.validate_for_carousel(optimized_paths, auto_normalize)
         
         if invalid_images:
             return False, "Problemas encontrados:\n• " + "\n• ".join(invalid_images)
@@ -113,101 +87,91 @@ class InstagramImageValidator:
         # Check if all aspect ratios are similar (Instagram requires consistent ratios)
         if aspect_ratios:
             first_ratio = aspect_ratios[0]
-            inconsistent_ratios = []
             for i, ratio in enumerate(aspect_ratios[1:], 2):
                 # Allow tolerance
                 if abs(first_ratio - ratio) / first_ratio > cls.CAROUSEL_RATIO_TOLERANCE:
-                    inconsistent_ratios.append(f"As imagens devem ter proporções similares. Imagem 1 ({first_ratio:.2f}:1) difere da imagem {i} ({ratio:.2f}:1)")
-            
-            if inconsistent_ratios and auto_normalize:
-                logger.info("Tentando normalizar proporções das imagens do carrossel")
-                normalized_paths = cls.normalize_for_carousel(image_paths)
-                if normalized_paths:
-                    validation_result, message = cls.validate_for_carousel(normalized_paths, auto_normalize=False)
-                    return validation_result, message, normalized_paths
-            elif inconsistent_ratios:
-                return False, inconsistent_ratios[0]
+                    return False, f"As imagens devem ter proporções similares. Imagem 1 ({first_ratio:.2f}:1) difere da imagem {i} ({ratio:.2f}:1)"
         
         return True, "Todas as imagens são válidas para o carrossel"
 
     @classmethod
     def normalize_for_carousel(cls, image_paths):
         """
-        Normaliza imagens para o carrossel aplicando os mesmos padrões de imagens únicas.
+        Normalizes a list of images for Instagram carousel use.
+        Resizes images that exceed max dimensions and ensures consistent aspect ratios.
+        
+        Args:
+            image_paths (list): List of paths to images
+            
+        Returns:
+            list: List of paths to normalized images
         """
-        if not image_paths:
+        if not image_paths or len(image_paths) < 2:
             return []
             
         normalized_paths = []
-        target_ratio = None
+        valid_image_data = []  # Store (path, width, height, aspect_ratio) for valid images
         
-        # Primeira passagem: processar cada imagem individualmente
+        # First pass: collect valid images and their properties
         for path in image_paths:
             try:
-                # Usar o mesmo processamento de imagem única
-                result = cls.process_single_photo(path)
-                if result['status'] == 'success':
-                    processed_path = result['image_path']
+                if not os.path.exists(path):
+                    logger.error(f"Arquivo não encontrado: {path}")
+                    continue
                     
-                    # Calcular proporção da primeira imagem válida como referência
-                    if target_ratio is None:
-                        with Image.open(processed_path) as img:
-                            width, height = img.size
-                            target_ratio = width / height
-                    
-                    normalized_paths.append(processed_path)
-                else:
-                    logger.warning(f"Falha ao processar imagem {path}: {result['message']}")
+                with Image.open(path) as img:
+                    width, height = img.size
+                    aspect_ratio = width / height
+                    valid_image_data.append((path, width, height, aspect_ratio))
             except Exception as e:
                 logger.error(f"Erro ao processar imagem {path}: {str(e)}")
-        
-        # Segunda passagem: ajustar proporções para corresponder à primeira imagem
-        if target_ratio and len(normalized_paths) > 1:
-            final_paths = []
-            for path in normalized_paths:
-                try:
-                    with Image.open(path) as img:
-                        width, height = img.size
-                        current_ratio = width / height
-                        
-                        # Se a proporção for muito diferente, ajustar
-                        if abs(current_ratio - target_ratio) > cls.CAROUSEL_RATIO_TOLERANCE:
-                            new_path = cls._adjust_aspect_ratio(img, path, target_ratio)
-                            final_paths.append(new_path)
-                        else:
-                            final_paths.append(path)
-                except Exception as e:
-                    logger.error(f"Erro ao ajustar proporção da imagem {path}: {str(e)}")
-                    final_paths.append(path)
+                
+        if not valid_image_data:
+            return []
             
-            return final_paths
+        # Find the most common aspect ratio (or use the first one)
+        # For simplicity, we'll use the first valid image's aspect ratio as target
+        target_ratio = valid_image_data[0][3]
         
+        # Second pass: resize and crop images to match target ratio and size limits
+        for path, width, height, ratio in valid_image_data:
+            try:
+                # First resize if needed
+                resized_path = cls.resize_for_instagram(path)
+                
+                # Now adjust aspect ratio if needed
+                if abs(ratio - target_ratio) / target_ratio > cls.CAROUSEL_RATIO_TOLERANCE:
+                    with Image.open(resized_path) as img:
+                        width, height = img.size
+                        
+                        # Create a new filename for the aspect-adjusted image
+                        filename, ext = os.path.splitext(resized_path)
+                        output_path = f"{filename}_adjusted{ext}"
+                        
+                        # Calculate crop dimensions to match target ratio
+                        if ratio > target_ratio:  # Image is wider than target
+                            new_width = int(height * target_ratio)
+                            left = (width - new_width) // 2
+                            right = left + new_width
+                            crop_box = (left, 0, right, height)
+                        else:  # Image is taller than target
+                            new_height = int(width / target_ratio)
+                            top = (height - new_height) // 2
+                            bottom = top + new_height
+                            crop_box = (0, top, width, bottom)
+                            
+                        # Crop and save
+                        cropped_img = img.crop(crop_box)
+                        cropped_img.save(output_path, quality=95)
+                        normalized_paths.append(output_path)
+                        logger.info(f"Imagem ajustada para proporção alvo: {path} -> {output_path}")
+                else:
+                    # No aspect ratio adjustment needed
+                    normalized_paths.append(resized_path)
+            except Exception as e:
+                logger.error(f"Falha ao normalizar imagem {path}: {str(e)}")
+                
         return normalized_paths
-
-    @classmethod
-    def _adjust_aspect_ratio(cls, img, original_path, target_ratio):
-        """
-        Ajusta a proporção de uma imagem para corresponder à proporção alvo.
-        """
-        width, height = img.size
-        current_ratio = width / height
-        
-        filename, ext = os.path.splitext(original_path)
-        new_path = f"{filename}_adjusted{ext}"
-        
-        if current_ratio > target_ratio:
-            # Imagem muito larga, cortar largura
-            new_width = int(height * target_ratio)
-            left = (width - new_width) // 2
-            img_cropped = img.crop((left, 0, left + new_width, height))
-        else:
-            # Imagem muito alta, cortar altura
-            new_height = int(width / target_ratio)
-            top = (height - new_height) // 2
-            img_cropped = img.crop((0, top, width, top + new_height))
-        
-        img_cropped.save(new_path, quality=95)
-        return new_path
 
     @classmethod
     def resize_for_instagram(cls, image_path, output_path=None):
