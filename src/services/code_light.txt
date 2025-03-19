@@ -609,7 +609,7 @@ class InstagramSend:
             str: Job ID for tracking the post status
         """
         if not caption or caption.lower() == "none":
-            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            caption = "A AcessoIA está transformando processos com IA! 🚀"
             print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Arquivo de imagem não encontrado: {image_path}")
@@ -627,7 +627,7 @@ class InstagramSend:
             str: Job ID for tracking the post status
         """
         if not caption or caption.lower() == "none":
-            caption = "A Acesso IA está transformando processos com IA! 🚀 #reels #ai"
+            caption = "A AcessoIA está transformando processos com IA! 🚀 #reels #ai"
             print(f"Caption vazia ou 'None'. Usando caption padrão para reels: '{caption}'")
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Arquivo de vídeo não encontrado: {video_path}")
@@ -694,7 +694,7 @@ class InstagramSend:
         uploaded_images = []
         uploader = ImageUploader()  # Reuse the same uploader instance
         if not caption or caption.lower() == "none":
-            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            caption = "A AcessoIA está transformando processos com IA! 🚀"
             print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
         try:
             if inputs is None:

@@ -54,7 +54,7 @@ Criar uma postagem no Instagram usando os seguintes insumos:
 **Recebendo os seguintes insumos:**  
 1. **Insumo principal:**  
    - Gênero: Indica o estilo de palavras e abordagem.  
-   - Caption: Uma breve ideia inicial ou descrição enviada pela Acesso IA.  
+   - Caption: Uma breve ideia inicial ou descrição enviada pela AcessoIA.  
    - Tamanho: Define o comprimento da legenda em palavras.  
 
 2. **Insumos secundários:**  
@@ -99,7 +99,7 @@ Ao receber um Caption, ajuste o texto para referenciar a AcessoIA na terceira pe
 Esses exemplos demonstram como transformar uma linguagem pessoal em uma comunicação direcionada ao público empresarial, mantendo o tom irreverente e profissional da AcessoIA.
 
 **Exemplo de legenda gerada:**  
-*"A Acesso IA está no comando hoje! Enquanto otimiza seu repositório com insights do LLM 💻 e desenvolve soluções em Python 🐍, os workshops capacitam as equipes corporativas para transformar processos e acelerar resultados. Implementar IA é simples, mas ver a Acesso IA vibrar com os ganhos de eficiência é outra história! Treinar equipes em IA pode ser fácil, mas celebrar cada novo acesso ao mercado de trabalho é o verdadeiro diferencial!🚀"*
+*"A AcessoIA está no comando hoje! Enquanto otimiza seu repositório com insights do LLM 💻 e desenvolve soluções em Python 🐍, os workshops capacitam as equipes corporativas para transformar processos e acelerar resultados. Implementar IA é simples, mas ver a AcessoIA vibrar com os ganhos de eficiência é outra história! Treinar equipes em IA pode ser fácil, mas celebrar cada novo acesso ao mercado de trabalho é o verdadeiro diferencial!🚀"*
                     
 Gênero: {genero}
 Caption: {caption}
