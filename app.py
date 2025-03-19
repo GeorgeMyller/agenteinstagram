@@ -66,8 +66,8 @@ def webhook():
         #Verificar se o número é de um grupo valido.
         if msg.scope == Message.SCOPE_GROUP:
             print(f"Grupo: {msg.group_id}")
-            if str(msg.group_id) != os.getenv("AUTHORIZED_GROUP_ID"):
-                return jsonify({"status": "processed, but ignored"}), 200
+            if str(msg.group_id) != "120363383673368986":  #Use != para a comparação, e a string correta.
+                return jsonify({"status": "processed, but ignored"}), 200 #Retorna 200 para o webhook não reenviar.
         
         # Lógica do Modo Carrossel
         # Iniciar modo carrossel com comando "carrossel" ou "carousel"

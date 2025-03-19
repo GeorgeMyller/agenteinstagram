@@ -37,45 +37,6 @@ class InstagramSend:
     max_rate_limit_hits = 52  # Maximum number of rate limit hits before enforcing longer delays
     
     @staticmethod
-    def display_success_message(content_type, post_id=None, permalink=None):
-        """
-        Display a success message to the user after successful post
-        
-        Args:
-            content_type (str): Type of content posted (photo, carousel, reel)
-            post_id (str): ID of the published post
-            permalink (str): URL to the published post
-        """
-        message = "\n" + "="*50 + "\n"
-        
-        if content_type.lower() == "photo":
-            message += "✅ FOTO PUBLICADA COM SUCESSO NO INSTAGRAM! ✅\n"
-        elif content_type.lower() == "carousel":
-            message += "✅ CARROSSEL PUBLICADO COM SUCESSO NO INSTAGRAM! ✅\n"
-        elif content_type.lower() == "reel":
-            message += "✅ REEL PUBLICADO COM SUCESSO NO INSTAGRAM! ✅\n"
-        else:
-            message += "✅ CONTEÚDO PUBLICADO COM SUCESSO NO INSTAGRAM! ✅\n"
-            
-        if post_id:
-            message += f"ID da publicação: {post_id}\n"
-            
-        if permalink:
-            message += f"Link da publicação: {permalink}\n"
-            
-        message += "="*50
-        
-        # Print the message prominently in the console
-        print("\n")
-        print(message)
-        print("\n")
-        
-        # Also log it
-        logger.info(message)
-        
-        return message
-    
-    @staticmethod
     def queue_post(image_path, caption, inputs=None) -> str:
         """
         Queue an image to be posted to Instagram asynchronously
@@ -367,9 +328,6 @@ class InstagramSend:
                 
                 logger.info(f"Imagem publicada com sucesso! ID: {post_id}")
                 
-                # Display success message to the user
-                InstagramSend.display_success_message("photo", post_id, permalink)
-                
                 # 6. Cleanup - remover arquivos temporários
                 try:
                     if image_path != original_image_path and os.path.exists(image_path):
@@ -594,19 +552,6 @@ class InstagramSend:
                 
                 if post_id:
                     logger.info(f"[CAROUSEL] Carrossel publicado com sucesso! ID: {post_id}")
-                    
-                    # Get permalink if available
-                    permalink = None
-                    try:
-                        from src.instagram.instagram_post_service import InstagramPostService
-                        insta_service = InstagramPostService()
-                        permalink = insta_service.get_post_permalink(post_id)
-                    except:
-                        pass
-                        
-                    # Display success message to the user
-                    InstagramSend.display_success_message("carousel", post_id, permalink)
-                    
                     return {"status": "success", "post_id": post_id}
                 else:
                     raise Exception("Failed to post carousel")
@@ -678,10 +623,6 @@ class InstagramSend:
                 return None
 
             print(f"Reel published successfully. ID: {result.get('id')}")
-            
-            # Display success message to the user
-            InstagramSend.display_success_message("reel", result.get('id'), result.get('permalink'))
-            
             return result
 
         except Exception as e:
@@ -793,19 +734,6 @@ class InstagramSend:
                     
                     if post_id:
                         logger.info(f"[CAROUSEL] Carrossel publicado com sucesso! ID: {post_id}")
-                        
-                        # Get permalink if available
-                        permalink = None
-                        try:
-                            from src.instagram.instagram_post_service import InstagramPostService
-                            insta_service = InstagramPostService()
-                            permalink = insta_service.get_post_permalink(post_id)
-                        except:
-                            pass
-                            
-                        # Display success message to the user
-                        InstagramSend.display_success_message("carousel", post_id, permalink)
-                        
                         return {"status": "success", "post_id": post_id}
                     else:
                         logger.error(f"[CAROUSEL] post_carousel retornou None na tentativa {attempt+1}")
