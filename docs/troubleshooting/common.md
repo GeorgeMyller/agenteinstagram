@@ -30,11 +30,15 @@ Este guia cobre os problemas mais comuns que você pode encontrar ao usar o Inst
 **Problema**: Módulo não encontrado ou erros de importação
 
 **Solução**:
-1. Verifique se todas as dependências foram instaladas:
+1. Verifique se todas as dependências foram instaladas usando UV (recommended):
+   ```bash
+   uv sync
+   ```
+2. Alternatively, use pip to install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-2. Considere usar o ambiente de desenvolvimento completo:
+3. Considere usar o ambiente de desenvolvimento completo:
    ```bash
    pip install -e .
    ```

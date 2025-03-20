@@ -10,11 +10,23 @@ As seguintes variáveis de ambiente devem ser configuradas no arquivo `.env`:
 
 ```
 # Credenciais do Instagram
-INSTAGRAM_USERNAME=sua_conta_instagram
-INSTAGRAM_PASSWORD=sua_senha
+INSTAGRAM_API_KEY=your_instagram_api_key_here
+INSTAGRAM_ACCOUNT_ID=your_instagram_account_id_here
+INSTAGRAM_ACCESS_TOKEN=your_instagram_access_token_here
 
 # Credenciais da API Gemini (para geração de legendas)
 GEMINI_API_KEY=sua_chave_api_gemini
+
+# Credenciais Imgur (for image uploads)
+IMGUR_CLIENT_ID=your_imgur_client_id_here
+IMGUR_CLIENT_SECRET=your_imgur_client_secret_here
+
+# Credenciais Evolution API (for message processing)
+EVO_API_TOKEN=your_evo_api_token_here
+EVO_INSTANCE_NAME=your_instance_name_here
+EVO_INSTANCE_TOKEN=your_instance_token_here
+EVO_BASE_URL=http://your_base_url_here
+AUTHORIZED_GROUP_ID=your_authorized_group_id_here
 
 # Configurações de Servidor
 SERVER_PORT=5001

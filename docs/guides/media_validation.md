@@ -8,7 +8,7 @@ O Instagram tem requisitos específicos para diferentes tipos de mídia. O siste
 
 ### Requisitos para Imagens
 
-- **Formatos suportados**: JPG, PNG
+- **Formatos suportados**: JPG, PNG, WebP
 - **Resolução mínima**: 320 x 320 pixels
 - **Resolução máxima recomendada**: 1080 x 1080 pixels (quadrado)
 - **Proporções suportadas**: 
@@ -60,6 +60,7 @@ MAX_IMAGE_DIMENSION=1080
 MIN_VIDEO_DURATION=3
 MAX_VIDEO_DURATION_FEED=60
 MAX_VIDEO_DURATION_REEL=90
+SKIP_QUALITY_CHECK=False
 ```
 
 ### Desativando Validações Específicas

@@ -6,6 +6,7 @@
 - Git para controle de versão
 - Conta Instagram Business/Creator
 - Chaves de API necessárias (Gemini)
+- UV (optional, but recommended)
 
 ## Instalação
 
@@ -21,7 +22,11 @@
    source venv/bin/activate  # Windows: venv\Scripts\activate
    ```
 
-3. Instale dependências:
+3. Instale dependências usando UV (recomendado para velocidade e eficiência):
+   ```bash
+   uv sync
+   ```
+   Alternativamente, use pip:
    ```bash
    pip install -r requirements.txt
    ```
@@ -31,7 +36,7 @@
    - Configure suas chaves e tokens
 
 ## Teste Rápido
-1. Inicie o servidor:
+1. Inicie o servidor (porta padrão 5001):
    ```bash
    python app.py
    ```
@@ -42,7 +47,7 @@
    ```
 
 ## Interface Web
-1. Inicie o Streamlit:
+1. Inicie o Streamlit (porta padrão 8501):
    ```bash
    streamlit run streamlit_app.py
    ```
@@ -79,6 +84,10 @@ Este serviço acompanha o status das publicações e fornece atualizações em t
 
 Para desenvolvimento, instale ferramentas adicionais:
 
+```bash
+uv sync
+```
+Alternativamente, use pip:
 ```bash
 pip install -r requirements-dev.txt
 ```

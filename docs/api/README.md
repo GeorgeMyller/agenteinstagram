@@ -4,7 +4,7 @@ Esta seção contém a documentação completa da API REST do Instagram Agent.
 
 ## Visão Geral
 
-A API do Instagram Agent permite o controle programático de todas as funcionalidades de publicação e gerenciamento de conteúdo para o Instagram. Ela fornece endpoints para upload de mídia, geração de legendas, programação de publicações e monitoramento de status.
+A API do Instagram Agent permite o controle programático de todas as funcionalidades de publicação e gerenciamento de conteúdo para o Instagram. Ela fornece endpoints para upload de mídia (imagens, carrosséis e vídeos), geração de legendas inteligentes com IA, programação de publicações e monitoramento de status em tempo real. Com esta API, você pode integrar o Instagram Agent em seus próprios sistemas e automatizar completamente o processo de publicação no Instagram.
 
 ## Autenticação
 
