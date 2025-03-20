@@ -179,15 +179,20 @@ class ReelsPublisher(BaseInstagramService):
         post_id = self.publish_reels(container_id)
         if not post_id:
             return None
-
+            
+        # Obter o permalink do post, assim como é feito para fotos simples
+        permalink = self.get_reels_permalink(post_id)
+        
         result = {
             'id': post_id,
             'container_id': container_id,
+            'permalink': permalink,  # Incluir o permalink no resultado
             'media_type': 'REELS'
         }
         
         logger.info("Reels publicado com sucesso!")
         logger.info(f"ID: {post_id}")
+        logger.info(f"Link: {permalink or 'Não disponível'}")
         
         return result
 
@@ -256,6 +261,32 @@ class ReelsPublisher(BaseInstagramService):
             return f"{caption}\n\n{hashtag_text}"
         else:
             return hashtag_text
+            
+    def get_reels_permalink(self, post_id):
+        """
+        Obtém o link permanente (URL) para o Reels publicado.
+        Args:
+            post_id (str): ID da publicação
+        Returns:
+            str: URL do Reels ou None
+        """
+        params = {
+            'fields': 'permalink'
+        }
+        
+        try:
+            result = self._make_request('GET', f"{post_id}", params=params)
+            if result and 'permalink' in result:
+                permalink = result['permalink']
+                logger.info(f"Permalink do Reels: {permalink}")
+                return permalink
+            
+            logger.warning("Não foi possível obter permalink do Reels")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Erro ao obter permalink do Reels: {e}")
+            return None
 
 class ReelsValidator:
     """Validates videos for Reels requirements"""
