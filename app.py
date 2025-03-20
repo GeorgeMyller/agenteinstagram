@@ -26,6 +26,8 @@ from src.instagram.describe_video_tool import VideoDescriber  # Importar a class
 from src.instagram.describe_carousel_tool import CarouselDescriber  # Importar a classe CarouselDescriber
 from src.instagram.crew_post_instagram import InstagramPostCrew  # Importar a classe InstagramPostCrew
 from src.instagram.image_validator import InstagramImageValidator  # Add this import
+from src.services.post_notification import PostCompletionNotifier
+from src.services.post_queue import post_queue
 
 app = Flask(__name__)
 
@@ -190,7 +192,8 @@ def webhook():
                             bordered_images.append(image_path)  # Usar a imagem original em caso de erro
                     
                     # Enfileirar o carrossel para publicação
-                    job_id = InstagramSend.queue_carousel(bordered_images, caption_to_use)
+                    job_inputs = {'remote_jid': msg.remote_jid}
+                    job_id = InstagramSend.queue_carousel(bordered_images, caption_to_use, job_inputs)
                     
                     sender.send_text(number=msg.remote_jid, 
                                     msg=f"✅ Carrossel enfileirado com sucesso!\n"
@@ -304,7 +307,8 @@ def webhook():
                 caption = msg.image_caption if msg.image_caption else ""  # Usar a legenda da imagem, se houver
 
                 # Enfileirar a postagem da foto
-                job_id = InstagramSend.queue_post(image_path, caption)
+                job_inputs = {'remote_jid': msg.remote_jid}
+                job_id = InstagramSend.queue_post(image_path, caption, job_inputs)
                 sender.send_text(number=msg.remote_jid, msg=f"✅ Postagem de imagem enfileirada com sucesso!\nID do trabalho: {job_id}")
                 
                 # Verificar o status do trabalho após enfileiramento
@@ -369,7 +373,8 @@ def webhook():
                         caption = ""  # Usar uma legenda vazia em caso de erro
 
                 # 2. Enfileirar a postagem do Reels
-                job_id = InstagramSend.queue_reels(video_path, caption)
+                job_inputs = {'remote_jid': msg.remote_jid}
+                job_id = InstagramSend.queue_reels(video_path, caption, job_inputs)
                 sender.send_text(number=msg.remote_jid, msg=f"✅ Reels enfileirado com sucesso! ID do trabalho: {job_id}")
                 
                 # 3. Verificar o status do trabalho após enfileiramento
@@ -632,6 +637,48 @@ def check_api_limits():
             "traceback": traceback.format_exc()
         }), 500
 
+def handle_post_completion(job_id, job_info):
+    """
+    Callback function for when a post is completed
+    
+    Args:
+        job_id (str): ID do trabalho completado
+        job_info (dict): Detalhes do trabalho completado
+    """
+    try:
+        # Obter informações relevantes do post
+        remote_jid = job_info.get("inputs", {}).get("remote_jid")
+        content_type = job_info.get("content_type", "post")
+        result = job_info.get("result", {})
+        
+        # Se não temos um número para notificar, não podemos enviar a notificação
+        if not remote_jid:
+            return
+            
+        # Construir mensagem de notificação
+        notification_text = f"✅ Seu post foi publicado com sucesso! 🎉\n\n"
+        notification_text += f"🆔 ID do trabalho: {job_id}\n"
+        notification_text += f"📌 Tipo: {content_type}\n"
+        
+        # Adicionar link se disponível
+        if result and result.get("permalink"):
+            notification_text += f"🔗 Link: {result.get('permalink')}\n"
+            
+        # Enviar notificação
+        sender.send_text(number=remote_jid, msg=notification_text)
+        
+    except Exception as e:
+        print(f"Erro ao enviar notificação de conclusão: {e}")
+
+# Create a global notifier instance
+post_notifier = PostCompletionNotifier(notification_callback=handle_post_completion)
+
+def setup_notification_system():
+    """Configura o sistema de notificação de posts completados"""
+    # Iniciar o monitoramento de posts completados
+    post_notifier.start_monitoring(post_queue)
+    print("Sistema de notificação de posts iniciado")
+
 if __name__ == "__main__":
     # Ensure dependencies are installed
     ensure_dependencies()
@@ -654,10 +701,13 @@ if __name__ == "__main__":
     # Only start monitoring server on initial run, not on reloads
     if not os.environ.get('WERKZEUG_RUN_MAIN'):
         monitor_thread = start_monitoring_server()
-        if monitor_thread:
+        if (monitor_thread):
             print("Sistema de monitoramento iniciado na porta 6002")
         else:
             print("Monitor já está rodando ou não foi possível iniciar")
+
+    # Setup notification system
+    setup_notification_system()
 
     # Start the main app
     app.run(host="0.0.0.0", port=5001, debug=True)

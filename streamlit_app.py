@@ -5,13 +5,28 @@ import tempfile
 import random
 from PIL import Image
 from src.services.instagram_send import InstagramSend
+from src.instagram.image_validator import InstagramImageValidator
+from src.utils.paths import Paths
+from src.instagram.filter import FilterImage
+from datetime import datetime
 
 st.set_page_config(page_title="Instagram Agent", layout="wide")
-
 st.title('Instagram Agent 📷')
 st.caption('Agente para automação de Instagram')
 
-tab1, tab2, tab3, tab4 = st.tabs(["Publicar Foto", "Publicar Reels", "Publicar Carrossel", "Monitorar Fila"])
+# Inicialização de diretórios necessários
+os.makedirs(os.path.join(Paths.ROOT_DIR, "temp_videos"), exist_ok=True)
+os.makedirs(os.path.join(Paths.ROOT_DIR, "temp"), exist_ok=True)
+assets_dir = os.path.join(Paths.ROOT_DIR, "assets")
+os.makedirs(assets_dir, exist_ok=True)
+
+# Define border image with full path
+border_image_path = os.path.join(assets_dir, "moldura.png")
+if not os.path.exists(border_image_path):
+    st.warning(f"⚠️ Aviso: Imagem de borda não encontrada em {border_image_path}")
+    border_image_path = None
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Publicar Foto", "Publicar Reels", "Publicar Carrossel", "Monitorar Fila", "Debug"])
 
 with tab1:
     st.header('Publicar Foto no Instagram')
@@ -322,75 +337,143 @@ with tab3:
             else:
                 st.info('Por favor, selecione pelo menos 2 imagens (máximo 10) para criar um carrossel')
 
-# Queue monitoring section
 with tab4:
-    st.header('Queue Status')
-    if st.button('Refresh Queue Status'):
-        stats = InstagramSend.get_queue_stats()
-        recent_jobs = InstagramSend.get_recent_posts(5)
-        
-        # Display stats in columns
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Jobs", stats["total_jobs"])
-            st.metric("Completed", stats["completed_jobs"])
-        with col2:
-            st.metric("Failed", stats["failed_jobs"])
-            st.metric("Pending", stats["pending_jobs"])
-        with col3:
-            st.metric("Processing", stats["processing_jobs"])
-            st.metric("Rate Limited", stats["rate_limited_posts"])
-        with col4:
-            # Calculate estimated completion time based on processing speed
-            processing_speed = stats.get("avg_processing_time", 120)  # seconds per job
-            remaining_jobs = stats["pending_jobs"] + stats["processing_jobs"]
-            est_minutes = int((processing_speed * remaining_jobs) / 60) if remaining_jobs > 0 else 0
+    st.header('Status da Fila')
+    
+    # Adiciona filtros de data
+    col_date, col_refresh = st.columns([3, 1])
+    with col_date:
+        start_date = st.date_input("Data inicial", datetime.now().date())
+        end_date = st.date_input("Data final", datetime.now().date())
+    
+    with col_refresh:
+        st.write("")  # Espaçamento
+        if st.button('Atualizar Status', type='primary'):
+            stats = InstagramSend.get_queue_stats(start_date=start_date, end_date=end_date)
+            recent_jobs = InstagramSend.get_recent_posts(10)  # Aumentado para 10 posts recentes
             
-            st.metric("Est. Completion", f"{est_minutes} min" if est_minutes > 0 else "N/A")
-            st.metric("Avg. Process Time", f"{stats.get('avg_processing_time', 0):.1f}s")
+            # Display stats in columns
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Jobs", stats["total_jobs"])
+                st.metric("Completados", stats["completed_jobs"])
+            with col2:
+                st.metric("Falhas", stats["failed_jobs"])
+                st.metric("Pendentes", stats["pending_jobs"])
+            with col3:
+                st.metric("Processando", stats["processing_jobs"])
+                st.metric("Rate Limited", stats["rate_limited_posts"])
+            with col4:
+                processing_speed = stats.get("avg_processing_time", 120)
+                remaining_jobs = stats["pending_jobs"] + stats["processing_jobs"]
+                est_minutes = int((processing_speed * remaining_jobs) / 60) if remaining_jobs > 0 else 0
+                
+                st.metric("Tempo Estimado", f"{est_minutes} min" if est_minutes > 0 else "N/A")
+                st.metric("Tempo Médio", f"{stats.get('avg_processing_time', 0):.1f}s")
             
-        # Display recent jobs
-        st.subheader("Recent Posts")
-        
-        if not recent_jobs:
-            st.info("No recent posts found.")
-        else:
-            for job in recent_jobs:
-                col1, col2 = st.columns([1, 3])
-                with col1:
-                    # Try to load preview image if available
-                    if job.get("media_type") == "IMAGE" and job.get("media_paths"):
-                        try:
-                            if isinstance(job["media_paths"], list) and len(job["media_paths"]) > 0:
-                                image_path = job["media_paths"][0]
-                            else:
-                                image_path = job["media_paths"]
-                                
-                            if os.path.exists(image_path):
-                                st.image(image_path, width=100)
-                            else:
-                                st.write("🖼️ [Image]")
-                        except:
-                            st.write("🖼️ [Image]")
-                    elif job.get("media_type") == "VIDEO" or job.get("content_type") == "reel":
-                        st.write("🎬 [Video]")
-                    elif job.get("content_type") == "carousel":
-                        st.write("🔄 [Carousel]")
-                    else:
-                        st.write("📄 [Media]")
+            # Taxa de sucesso
+            success_rate = (stats["completed_jobs"] / stats["total_jobs"] * 100) if stats["total_jobs"] > 0 else 0
+            st.progress(success_rate / 100, text=f"Taxa de Sucesso: {success_rate:.1f}%")
+            
+            # Display recent jobs with more details
+            st.subheader("Posts Recentes")
+            if not recent_jobs:
+                st.info("Nenhum post recente encontrado.")
+            else:
+                for job in recent_jobs:
+                    with st.expander(f"Post {job.get('job_id', 'Unknown')} - {job.get('status', 'Unknown')}"):
+                        col1, col2 = st.columns([1, 2])
+                        with col1:
+                            if job.get("media_type") == "IMAGE":
+                                try:
+                                    image_path = job["media_paths"][0] if isinstance(job["media_paths"], list) else job["media_paths"]
+                                    if os.path.exists(image_path):
+                                        st.image(image_path, width=200)
+                                except:
+                                    st.write("🖼️ [Imagem não disponível]")
+                            elif job.get("content_type") in ["reel", "video"]:
+                                st.write("🎬 [Vídeo]")
+                            elif job.get("content_type") == "carousel":
+                                st.write("🔄 [Carrossel]")
                         
+                        with col2:
+                            st.write(f"**Status:** {job.get('status', 'Unknown')}")
+                            st.write(f"**Criado em:** {job.get('created_at', 'Unknown')}")
+                            st.write(f"**Tipo:** {job.get('content_type', 'Unknown')}")
+                            if job.get("error"):
+                                st.error(f"Erro: {job['error']}")
+                            if job.get("result", {}).get("permalink"):
+                                st.markdown(f"[Ver no Instagram]({job['result']['permalink']})")
+
+# Nova aba de Debug
+with tab5:
+    st.header("Ferramentas de Debug")
+    
+    # Status da API
+    with st.expander("Status da API Instagram"):
+        if st.button("Verificar Status da API"):
+            try:
+                from src.instagram.instagram_carousel_service import InstagramCarouselService
+                service = InstagramCarouselService()
+                usage_info = service.get_app_usage_info()
+                
+                if usage_info and 'app_usage' in usage_info:
+                    st.json(usage_info)
+                else:
+                    st.error("Não foi possível obter informações de uso da API")
+            except Exception as e:
+                st.error(f"Erro ao verificar status da API: {str(e)}")
+    
+    # Verificação de Token
+    with st.expander("Verificar Token Instagram"):
+        if st.button("Verificar Token"):
+            try:
+                from src.instagram.instagram_carousel_service import InstagramCarouselService
+                service = InstagramCarouselService()
+                is_valid, missing_permissions = service.check_token_permissions()
+                
+                if is_valid:
+                    st.success("Token válido! ✅")
+                    token_details = service.debug_token()
+                    if token_details and 'data' in token_details:
+                        data = token_details['data']
+                        st.write("Detalhes do Token:")
+                        st.write(f"- App ID: {data.get('app_id')}")
+                        st.write(f"- Expira em: {datetime.fromtimestamp(data.get('expires_at')).strftime('%Y-%m-%d %H:%M:%S') if data.get('expires_at') else 'Unknown'}")
+                        st.write("- Permissões:", ', '.join(data.get('scopes', [])))
+                else:
+                    st.error(f"Token inválido! Permissões faltando: {', '.join(missing_permissions)}")
+            except Exception as e:
+                st.error(f"Erro ao verificar token: {str(e)}")
+    
+    # Limpeza de Cache
+    with st.expander("Limpeza de Cache"):
+        if st.button("Limpar Cache de Mídia"):
+            try:
+                # Limpar diretórios temporários
+                FilterImage.clean_temp_directory(os.path.join(Paths.ROOT_DIR, "temp"))
+                st.success("Cache de mídia limpo com sucesso!")
+            except Exception as e:
+                st.error(f"Erro ao limpar cache: {str(e)}")
+    
+    # Monitor de Sistema
+    with st.expander("Monitor de Sistema"):
+        if st.button("Verificar Status do Sistema"):
+            try:
+                import psutil
+                
+                # CPU e Memória
+                cpu_percent = psutil.cpu_percent(interval=1)
+                memory = psutil.virtual_memory()
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("CPU", f"{cpu_percent}%")
+                    st.metric("Memória", f"{memory.percent}%")
+                
                 with col2:
-                    status_color = {
-                        "completed": "🟢",
-                        "failed": "🔴",
-                        "processing": "🟡",
-                        "pending": "⚪"
-                    }.get(job.get("status", ""), "⚪")
-                    
-                    st.write(f"{status_color} **ID:** `{job.get('job_id', 'Unknown')}`")
-                    st.caption(f"Status: {job.get('status', 'Unknown')} • Time: {job.get('created_at', 'Unknown')}")
-                    
-                    if job.get("result") and job.get("result").get("permalink"):
-                        st.markdown(f"[View on Instagram]({job['result']['permalink']})")
-    else:
-        st.info("Click the button to refresh queue statistics")
+                    disk = psutil.disk_usage('/')
+                    st.metric("Disco", f"{disk.percent}%")
+                    st.metric("Temperatura CPU", f"{psutil.sensors_temperatures().get('coretemp', [{'current': 0}])[0].current}°C" if hasattr(psutil, 'sensors_temperatures') and psutil.sensors_temperatures() else "N/A")
+            except Exception as e:
+                st.error(f"Erro ao monitorar sistema: {str(e)}")

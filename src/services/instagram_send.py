@@ -51,7 +51,7 @@ class InstagramSend:
         """
         # Validate inputs before queuing
         if not caption or caption.lower() == "none":
-            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            caption = "A AcessoIA está transformando processos com IA! 🚀"
             print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
 
         # Validate image path
@@ -77,7 +77,7 @@ class InstagramSend:
         """
         # Validate inputs before queuing
         if not caption or caption.lower() == "none":
-            caption = "A Acesso IA está transformando processos com IA! 🚀 #reels #ai"
+            caption = "A AcessoIA está transformando processos com IA! 🚀 #reels #ai"
             print(f"Caption vazia ou 'None'. Usando caption padrão para reels: '{caption}'")
 
         # Validate video path
@@ -174,7 +174,7 @@ class InstagramSend:
         
         # Validar caption antes do processamento
         if not caption or caption.lower() == "none":
-            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            caption = "A AcessoIA está transformando processos com IA! 🚀"
             print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
         
         try:
@@ -373,7 +373,7 @@ class InstagramSend:
         
         # Validar caption antes do processamento
         if not caption or caption.lower() == "none":
-            caption = "A Acesso IA está transformando processos com IA! 🚀"
+            caption = "A AcessoIA está transformando processos com IA! 🚀"
             print(f"Caption vazia ou 'None'. Usando caption padrão: '{caption}'")
         
         try:
