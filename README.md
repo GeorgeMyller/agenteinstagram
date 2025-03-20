@@ -3,16 +3,24 @@
 ## Português 🇧🇷
 
 ### Descrição do Projeto
-Este projeto é uma ferramenta completa para automação e gerenciamento de postagens em redes sociais, com foco especial no Instagram. Ele integra a biblioteca CrewAI para gerar legendas criativas, além de oferecer serviços robustos de processamento de imagens – incluindo aplicação de filtros, adição de bordas, upload via Imgur e publicação no Instagram. Também conta com descrição inteligente de imagens utilizando a API Gemini do Google, processamento de mensagens (texto, áudio, imagem e documentos) e integração com a Evolution API.
+Este projeto é uma ferramenta de automação social media que integra CrewAI e Gemini para gerenciar postagens no Instagram. Oferece geração inteligente de legendas, processamento de imagens e suporte a múltiplos formatos de mídia.
+
+> **Origem do Projeto**: Este projeto foi inspirado pelo livro [CrewAI 2 - Intermediário](https://physia.com.br) do Professor Sandeco, que apresenta conceitos avançados de automação e IA colaborativa para desenvolvimento de agentes inteligentes.
 
 ### Funcionalidades Principais 🚀
-- Geração de legendas com CrewAI
-- Processamento de imagens: filtros, correção e bordas
-- Upload de imagens via Imgur
-- Publicação de posts no Instagram
-- Descrição inteligente de imagens com API Gemini
-- Processamento e envio de mensagens via Evolution API
-- Endpoints Flask para webhooks e integração de serviços
+- Geração de legendas usando CrewAI
+- Descrição de imagens com API Gemini
+- Processamento de imagens e vídeos
+- Suporte a carrosséis do Instagram
+- Interface web via Streamlit
+- API REST para integrações
+
+### Pré-requisitos 📋
+- Python 3.10+
+- FFmpeg para processamento de vídeos
+- Conta Instagram Business/Creator
+- Chave API Gemini
+- UV (gerenciador de pacotes Python)
 
 ### Como Usar 🚀
 
@@ -25,47 +33,28 @@ Este projeto é uma ferramenta completa para automação e gerenciamento de post
    ```bash
    streamlit run streamlit_app.py
    ```
-3. Acesse a interface web em `http://localhost:8501`
-4. Use o painel lateral para configurar:
-   - Estilo de escrita
-   - Pessoa narrativa
-   - Sentimento
-   - Uso de emojis e linguagem informal
-5. Faça upload de uma imagem e adicione uma legenda opcional
-6. Clique em "Post to Instagram" para publicar
+3. Acesse em `http://localhost:8501`
 
 #### API (Webhooks)
-1. Instale o UV:
+1. Instale o UV e crie ambiente virtual:
    ```bash
    pip install uv
-   ```
-2. Crie o ambiente virtual:
-   ```bash
    uv venv
-   ```
-3. Ative o ambiente virtual (no Windows use `venv\Scripts\activate`):
-   ```bash
-   source venv/bin/activate
-   ```
-4. Sincronize as dependências e inicie a aplicação:
-   ```bash
+   source venv/bin/activate  # Windows: venv\Scripts\activate
    uv sync
    ```
+2. Configure o `.env` com suas credenciais
+3. Inicie o servidor Flask
 
 ### Estrutura do Projeto 📂
-- `app.py`: Endpoints Flask para o processamento de mensagens.
-- Diretório `instagram/`: Módulos para criar posts, fazer upload de imagens, aplicar filtros, adicionar bordas e descrever imagens.
-- `crew_post_instagram.py`: Configuração do CrewAI e tarefas para geração de legendas.
-- `message.py` e `send_message.py`: Processamento e envio de mensagens.
-- `paths.py`: Definição dos caminhos usados no sistema.
-- `streamlit_app.py`: Interface gráfica para gerenciamento de posts
-- Outros arquivos e scripts auxiliares.
-
-### Contribuição
-Contribuições são bem-vindas! Sinta-se à vontade para abrir issues e pull requests para melhorias e correções.
+- `app.py`: Endpoints Flask
+- `instagram/`: Módulos de integração Instagram
+- `crew_post_instagram.py`: Configuração CrewAI
+- `message.py`: Processamento de mensagens
+- `streamlit_app.py`: Interface gráfica
 
 ### Licença
-Este projeto está licenciado sob a Licença MIT. Veja o arquivo LICENSE para mais detalhes.
+MIT License - Veja LICENSE para detalhes.
 
 ---
 
@@ -73,6 +62,8 @@ Este projeto está licenciado sob a Licença MIT. Veja o arquivo LICENSE para ma
 
 ### Project Description
 This project is a comprehensive tool for automating and managing social media posts, with a special focus on Instagram. It integrates the CrewAI library to generate creative captions, along with robust image processing features – including filters, border addition, image upload via Imgur, and Instagram posting. It also features intelligent image description using Google's Gemini API, message processing (text, audio, image, and document) and integration with the Evolution API.
+
+> **Project Origin**: This project was inspired by Professor Sandeco's book [CrewAI 2 - Intermediate](https://physia.com.br), which presents advanced concepts of automation and collaborative AI for developing intelligent agents.
 
 ### Main Features 🚀
 - Caption generation with CrewAI

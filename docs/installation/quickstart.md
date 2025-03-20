@@ -1,16 +1,11 @@
 # Guia de Início Rápido
 
-Comece a usar o Instagram Agent rapidamente seguindo este guia.
-
 ## Pré-requisitos
-
-Antes de começar, certifique-se de que você tem:
-
-- Python 3.10 ou mais recente
-- FFmpeg instalado para processamento de vídeos
+- Python 3.10+
+- FFmpeg instalado
 - Git para controle de versão
-- Conta Instagram Business ou Creator
-- Chaves de API e tokens necessários
+- Conta Instagram Business/Creator
+- Chaves de API necessárias (Gemini)
 
 ## Instalação
 
@@ -20,54 +15,39 @@ Antes de começar, certifique-se de que você tem:
    cd agenteinstagram
    ```
 
-2. Crie um ambiente virtual e ative-o:
+2. Crie e ative o ambiente virtual:
    ```bash
    python -m venv venv
-   # No Windows
-   venv\Scripts\activate
-   # No macOS/Linux
-   source venv/bin/activate
+   source venv/bin/activate  # Windows: venv\Scripts\activate
    ```
 
-3. Instale as dependências:
+3. Instale dependências:
    ```bash
    pip install -r requirements.txt
    ```
 
-4. Configure seu ambiente:
-   - Copie `.env.example` para `.env` (se disponível)
-   - Preencha suas chaves de API e tokens
-   - Configure caminhos e configurações
-
-5. Valide sua configuração:
-   ```bash
-   python tests/check_job_status.py
-   ```
+4. Configure o ambiente:
+   - Copie `.env.example` para `.env`
+   - Configure suas chaves e tokens
 
 ## Teste Rápido
-
-Teste sua instalação:
-
 1. Inicie o servidor:
    ```bash
    python app.py
    ```
 
-2. Em outro terminal, teste o endpoint:
+2. Teste o status:
    ```bash
    curl http://localhost:5001/status
    ```
 
-## Usando a Interface Web
-
-1. Inicie a interface Streamlit:
+## Interface Web
+1. Inicie o Streamlit:
    ```bash
    streamlit run streamlit_app.py
    ```
 
-2. Abra seu navegador em `http://localhost:8501`
-
-3. Experimente fazer upload de uma imagem e publicá-la no Instagram
+2. Acesse `http://localhost:8501`
 
 ## Configuração de Bordas
 
