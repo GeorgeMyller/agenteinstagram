@@ -520,7 +520,18 @@ class InstagramCarouselService(BaseInstagramService):
                 time.sleep(20)  # Increased from 10 to 20 seconds
                 
                 # Publish carousel
-                return self.publish_carousel(container_id)
+                post_id = self.publish_carousel(container_id)
+                if not post_id:
+                    return None
+                
+                # Get permalink
+                permalink = self.get_post_permalink(post_id)
+                
+                return {
+                    'id': post_id,
+                    'permalink': permalink,
+                    'media_type': 'CAROUSEL_ALBUM'
+                }
                 
             except PermissionError as e:
                 if "request limit reached" in str(e).lower():
@@ -602,3 +613,29 @@ class InstagramCarouselService(BaseInstagramService):
         except Exception as e:
             logger.error(f"Error getting app usage info: {e}")
             return {}
+
+    def get_post_permalink(self, post_id):
+        """
+        Obtém o link permanente (URL) para a publicação de carrossel.
+        """
+        if self.token_expires_at and time.time() > self.token_expires_at - 60:
+            self._refresh_token()
+            
+        params = {
+            'fields': 'permalink',
+            'access_token': self.access_token
+        }
+        
+        try:
+            result = self._make_request('GET', f"{post_id}", params=params)
+            if result and 'permalink' in result:
+                permalink = result['permalink']
+                logger.info(f"Carousel permalink: {permalink}")
+                return permalink
+                
+            logger.warning("Failed to get carousel permalink")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting carousel permalink: {e}")
+            return None
